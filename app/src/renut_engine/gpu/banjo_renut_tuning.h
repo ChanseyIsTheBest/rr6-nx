@@ -359,6 +359,7 @@ void CountFetchAlignment(bool aligned);
 bool DepthHandOverReadOnlyOn();
 bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
 bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
+bool FetchOverPointerOn();  // rr6-nx (2026-11-03, rr6_fetch_over_pointer, A/B 75)
 bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 73
 float AlphaNearOne(uint32_t func, float threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
 bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state

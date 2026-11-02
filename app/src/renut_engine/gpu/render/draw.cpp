@@ -2931,6 +2931,22 @@ TextureFetch DeviceTextureFetch(const d3d::Device &dev, u32 r) {
   return TextureFetch::FromGuest(dev.m_Constants.TextureFetch[r]);
 }
 
+// rr6-nx (2026-11-03, rr6_fetch_over_pointer, A/B 75): the texture a slot samples. The GPU reads the fetch constant and never
+// the device's pointer, and SetTexture(NULL) leaves the fetch constant as it was, so a draw after it still samples that
+// texture. Ridge Racer 6's second bloom blur draws so: with the null texture it wrote zeros over the glow, and every lit
+// surface came out about a quarter too dark. The slot's last texture is the one those fetch words came from.
+u32 g_fetch_owner[d3d::kTextureFetchSlots] = {};
+inline u32 SlotTextureVa(const GuestDevice &device, u32 r) {
+  const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+  if (va) {
+    g_fetch_owner[r] = va;
+    return va;
+  }
+  if (!g_fetch_owner[r] || !banjo::renut_gpu::FetchOverPointerOn())
+    return 0;
+  return DeviceTextureFetch(device.dev(), r).IsTexture() ? g_fetch_owner[r] : 0;
+}
+
 // banjo-nx (deko3d renderer, docs/deko3d-renderer.md): the sampler words hold the sampler id where a texture handle has
 // it (bit 20 up), so the deko3d shaders make the handle as (texture word & 0xFFFFF) | (sampler word & 0xFFF00000): no
 // shift, and the form Ryujinx's shader translator follows back to the constant buffer (the emulator tests).
@@ -3292,7 +3308,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
     const u32 r = u32(std::countr_zero(bits));
     if (!draw_fetches)
       slots.f[r] = DeviceTextureFetch(dev, r);
-    const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+    const u32 va = SlotTextureVa(device, r);
     if (!va)
       continue;
     if (objs && ((objs->mask >> r) & 1)) {
@@ -3310,7 +3326,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
   for (u32 bits = fetch_mask; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
     const TextureFetch &fetch = fetches[r];
-    const u32 texture_va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+    const u32 texture_va = SlotTextureVa(device, r);
     const auto *header = texture_va ? GuestPtr<const d3d::BaseTexture>(texture_va) : nullptr;
     const bool memo = banjo::renut_gpu::CpuMemosOn() && header;
     if (all_memo && !memo)
@@ -8587,7 +8603,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 64);
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 128);
       } else if (textures_inputs && r < d3d::kTextureFetchSlots) {
-        const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+        const u32 va = SlotTextureVa(device, r);
         if (const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr)
           __builtin_prefetch(&header->Format);
         const TextureSlotMemo &m = TextureMemoSlot(va, fetches[r]);
@@ -8673,7 +8689,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     f.textures_valid = all_memo;
     for (u32 bits = texture_mask & ((1u << d3d::kTextureFetchSlots) - 1u); bits && all_memo; bits &= bits - 1) {
       const u32 r = u32(std::countr_zero(bits));
-      const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+      const u32 va = SlotTextureVa(device, r);
       f.texture_va[r] = va;
       f.texture_obj[r] = tex_objects ? g_draw_resources->slot[r] : nullptr;  // banjo-nx (2026-10-27, Phase A)
       if (tex_objects)
@@ -9825,7 +9841,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     const d3d::Device &pdev = device.dev();
     for (u32 bits = prefetch_textures; bits; bits &= bits - 1) {
       const u32 r = u32(std::countr_zero(bits));
-      const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+      const u32 va = SlotTextureVa(device, r);
       const bool fresh = !((fetches_valid >> r) & 1);
       if (fresh) {
         draw_fetches.f[r] = DeviceTextureFetch(pdev, r);
@@ -10160,7 +10176,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   for (u32 bits = textures_reused ? texture_mask & ((1u << d3d::kTextureFetchSlots) - 1u) : 0u; bits;
        bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
-    const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+    const u32 va = SlotTextureVa(device, r);
     const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr;
     textures_reused = header &&
                       (texture_fields_same ||
@@ -10233,7 +10249,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       for (u32 r = 0; r < d3d::kTextureFetchSlots; ++r) {
         if (!(texture_mask & (1u << r)))
           continue;
-        const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+        const u32 va = SlotTextureVa(device, r);
         const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr;
         if (header)
           std::memcpy(treuse.header[r], &header->Format, sizeof(treuse.header[r]));
@@ -11064,7 +11080,7 @@ void UnleashedCensusDraw(const GuestDevice &device, const DrawCall &call, u32 te
     count(g_ucensus.indices, HookResourceKind(header) == 2, written);
   }
   for (u32 bits = texture_mask & ((1u << d3d::kTextureFetchSlots) - 1u); bits; bits &= bits - 1) {
-    const u32 header = device.U32(d3d::kDeviceOffsetTextures + u32(std::countr_zero(bits)) * 4);
+    const u32 header = SlotTextureVa(device, u32(std::countr_zero(bits)));
     if (!header)
       continue;
     const u8 kind = HookResourceKind(header);
