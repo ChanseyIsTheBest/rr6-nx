@@ -317,6 +317,8 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   desc.frontFace = (key.mode_control & 4) ? plume::RenderFrontFace::CLOCKWISE
                                           : plume::RenderFrontFace::COUNTER_CLOCKWISE;
   desc.depthClipEnabled = true;
+  // rr6-nx (2026-11-03, rr6_depth_bias): set per draw (SetDrawDepthBias), so no value of it makes a pipeline.
+  desc.dynamicDepthBiasEnabled = banjo::renut_gpu::DepthBiasKeyOn() && s.device->getCapabilities().dynamicDepthBias;
 
   // RB_DEPTHCONTROL.
   const u32 dc = key.depth_control;

@@ -570,6 +570,9 @@ struct Bound {
   ConstantUpload pushed_vs, pushed_ps;
   bool blend_constant_set = false;
   float blend_constant[4] = {};
+  // rr6-nx (2026-11-03, rr6_depth_bias): the device words SetDrawDepthBias last set.
+  bool depth_bias_set = false;
+  u32 depth_bias_scale = 0, depth_bias_offset = 0, depth_bias_float24 = 0;
 
   // State as the draws last set it on the list, which most draws in a row
   // share (the viewport, the zero stream, the memexport buffer): setting it
@@ -697,6 +700,40 @@ void SetIndexBuffer(plume::RenderCommandList *cmd, const plume::RenderIndexBuffe
 // The blend constant (RB_BLEND_RED..ALPHA) the draw's blend controls read, or
 // false if none reads it. The host has a single constant for BLEND_FACTOR, so a
 // colour factor that reads the constant alpha gets the alpha in rgb as well.
+// rr6-nx (2026-11-03, rr6_depth_bias, A/B 72): the game's depth bias, which the setters stored and no draw read. Dynamic state, never in
+// the pipeline key: this game sets a fresh slope value for about 13 draws a frame, which keyed on pipelines made about 770 a second (Ridge
+// Racer 6 Recomp's measurement). Set only when its words change. The units are the reference's (draw_util's
+// GetD3D10IntegerPolygonOffset, pipeline_cache's slope): the slope register is in 1/16 subpixels; the constant is in the depth format's
+// units, rounded away from 0, as "if the offset is used at all, primitives need to be separated". No rounding of the slope, which Recomp's
+// depth_bias_fix does to save pipelines and which would change the picture.
+void SetDrawDepthBias(plume::RenderCommandList *cmd, const d3d::Device &dev) {
+  static const bool on = banjo::renut_gpu::DepthBiasKeyOn() && Video::Device()->getCapabilities().dynamicDepthBias;
+  if (!on)
+    return;
+  u32 scale = 0, offset = 0;
+  // PA_SU_SC_MODE_CNTL's polygon offset enables, front (bit 11) and back (bit 12). The setters write both faces alike.
+  if ((u32(dev.m_ControlPacket.ModeControl) & 0x1800u) && banjo::renut_gpu::DepthBiasOn()) {
+    const auto *words = reinterpret_cast<const be_u32 *>(dev.m_PointPacket);
+    scale = words[0];
+    offset = words[1];
+  }
+  const u32 float24 = (u32(dev.m_DestinationPacket.DepthInfo) >> 16) & 1;  // RB_DEPTH_INFO: D24FS8
+  if (g_bound.depth_bias_set && g_bound.depth_bias_scale == scale && g_bound.depth_bias_offset == offset &&
+      g_bound.depth_bias_float24 == float24)
+    return;
+  g_bound.depth_bias_set = true;
+  g_bound.depth_bias_scale = scale;
+  g_bound.depth_bias_offset = offset;
+  g_bound.depth_bias_float24 = float24;
+  const float polygon_offset = std::bit_cast<float>(offset);
+  const float magnitude = std::fabs(polygon_offset);
+  int32_t constant = float24 ? int32_t(std::ceil(magnitude * float(1u << 21))) << 3
+                             : int32_t(std::ceil(magnitude * float((1u << 24) - 1)));
+  if (polygon_offset < 0.0f)
+    constant = -constant;
+  cmd->setDepthBias(float(constant), 0.0f, std::bit_cast<float>(scale) * (1.0f / 16.0f));
+}
+
 // banjo-nx (2026-10-27, render thread night): whether DrawBlendConstant finds a factor reading the constant (its first
 // loop): a fact of the key alone.
 bool BlendConstantUsed(const PipelineKey &key) {
@@ -2374,18 +2411,6 @@ UploadAllocation UploadFloatConstants(const FloatConstants &constants, const u32
   for (uint64_t remaining = groups; remaining;) {
     const u32 group = u32(std::countl_zero(remaining));
     remaining &= ~(uint64_t(1) << (63 - group));
-    // RR6DIAG: every register holding a NaN, once each (RR6_NAN_CENSUS). Temporary.
-    static const bool rr6_nan_census = std::getenv("RR6_NAN_CENSUS") != nullptr;
-    if (rr6_nan_census) {
-      static bool seen[256];
-      const auto *g = reinterpret_cast<const be_u32 *>(constants.Register(group * 4));
-      for (u32 i = 0; i < 16; ++i) {
-        if ((u32(g[i]) & 0x7FFFFFFFu) > 0x7F800000u && !seen[group * 4 + i / 4]) {
-          seen[group * 4 + i / 4] = true;
-          RGPU_INFO("[nancensus] register {} has a NaN", group * 4 + i / 4);
-        }
-      }
-    }
     if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn()) {
       alignas(16) u8 fog[kConstantGroupBytes];
       CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes, fog);
@@ -9103,9 +9128,12 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);
   }
   if (g_bound.pipeline != pipeline) {
+    if (!g_bound.pipeline)
+      g_bound.depth_bias_set = false;  // rr6-nx: after an internal pass, whose pipeline set its own bias
     cmd->setPipeline(pipeline);
     g_bound.pipeline = pipeline;
   }
+  SetDrawDepthBias(cmd, dev);  // rr6-nx (2026-11-03, rr6_depth_bias)
   float blend_constant[4];
   if (f.blend_used && DrawBlendConstant(dev, *f.kp, blend_constant) &&
       !(g_bound.blend_constant_set && SameBytes<sizeof(blend_constant)>(blend_constant, g_bound.blend_constant))) {
@@ -10365,42 +10393,6 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     g_draw_sc_track.fetch_slots = fetch_mask;
   }
   {
-    // RR6DIAG: a pixel shader's constants and fetch words, from RR6_PS_DUMP (its hash). Temporary.
-    static const uint64_t want_ps = [] {
-      const char *v = std::getenv("RR6_PS_DUMP");
-      return v ? uint64_t(std::strtoull(v, nullptr, 16)) : 0ull;
-    }();
-    if (want_ps && store_device_ps && store_device_ps->hash == want_ps) {
-      static uint32_t seen = 0;
-      if (seen++ % 600 < 2) {
-        const auto &con = device.dev().m_Constants;
-        RGPU_INFO("[psdump] #{} VS {:016X} textures {:08X} targets {}x{} depth {}", seen, vs->hash, texture_mask, targets.width,
-                  targets.height, targets.depth != nullptr);
-        for (u32 r = 0; r < 40; ++r) {
-          const float x = con.PixelShaderF[r][0], y = con.PixelShaderF[r][1], z = con.PixelShaderF[r][2],
-                      w = con.PixelShaderF[r][3];
-          if (x != 0.0f || y != 0.0f || z != 0.0f || w != 0.0f)
-            RGPU_INFO("[psdump] c{} = {} {} {} {}", r, x, y, z, w);
-        }
-        for (u32 r = 17; r <= 22; ++r) {
-          RGPU_INFO("[psdump] vs c{} = {} {} {} {}", r, float(con.VertexShaderF[r][0]), float(con.VertexShaderF[r][1]),
-                    float(con.VertexShaderF[r][2]), float(con.VertexShaderF[r][3]));
-        }
-        for (u32 bits = texture_mask; bits; bits &= bits - 1) {
-          const u32 slot = std::countr_zero(bits);
-          const auto *w = reinterpret_cast<const be_u32 *>(&con.TextureFetch[slot]);
-          // What the texture's memory holds now, through the physical window: all zero means nothing was written there.
-          const auto *mem = GuestPtr<const u8>(0xA0000000u + (u32(w[1]) & 0x1FFFF000u));
-          u32 nonzero = 0;
-          for (u32 i = 0; mem && i < 4096; ++i)
-            nonzero += mem[i] != 0;
-          RGPU_INFO("[psdump] slot {} fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, {} of 4096 bytes not zero", slot, u32(w[0]),
-                    u32(w[1]), u32(w[2]), u32(w[3]), u32(w[4]), u32(w[5]), nonzero);
-        }
-      }
-    }
-  }
-  {
     static const uint64_t want = [] {
       const std::string v = REXCVAR_GET(banjo_renut_diag_stream_dump_vs);
       return v.empty() ? 0ull : uint64_t(std::strtoull(v.c_str(), nullptr, 16));
@@ -10736,12 +10728,15 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     // banjo-nx (2026-10-23, batch 6): not on deko3d (two calls a bind that did nothing there).
     if (!IsDeko3D() && !banjo::renut_gpu::record::IsProxy(cmd))
       banjo::renut_gpu::BeforePipelineBind(pipeline);
+    if (!g_bound.pipeline)
+      g_bound.depth_bias_set = false;  // rr6-nx: after an internal pass, whose pipeline set its own bias
     cmd->setPipeline(pipeline);
     g_bound.pipeline = pipeline;
     // Vulkan: a pipeline without the constant as dynamic state overwrites it.
     if (IsVulkan())
       g_bound.blend_constant_set = false;
   }
+  SetDrawDepthBias(cmd, dev);  // rr6-nx (2026-11-03, rr6_depth_bias)
   float blend_constant[4];
   if (DrawBlendConstant(dev, key, blend_constant) &&
       !(g_bound.blend_constant_set &&

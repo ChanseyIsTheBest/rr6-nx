@@ -111,12 +111,14 @@ katamari-nx's Renut stands at XDK 2.0.5632 (`docs/from-katamari/katamari-notes-r
 
 ## Visual differences against the reference (emulated GPU, Direct3D 12)
 
-Reference: `out/pc_runs/emu4`. Ours: `out/pc_runs/renut*`. `tools/side_by_side.py` makes the comparison.
+Reference: `out/pc_runs/emu4`. Ours: `out/pc_runs/renut*`, `out/emu_runs/*`. `tools/side_by_side.py` and `tools/three_way.py` make the comparisons; the crops are in `out/visual_diffs` (not committed, game imagery). Not all screens have been compared yet.
 
 | # | Where | Difference | Why | Status |
 |---|---|---|---|---|
 | 1 | Race | Scene cut on the right and at the bottom on Direct3D 12 (88.9 % x 90 %); device lost on Vulkan | The race draws a 1440x800 colour target over a depth surface made 1280x720. RB_SURFACE_INFO's pitch is shared, so that is legal on the console; a host framebuffer cuts to the smaller or is invalid | Fixed by `rr6_depth_covers_colour` (no in-run A/B: off loses the device on Vulkan; runs only when targets change) |
-| 2 | Car select | Car body black, logos included; interior draws | Under investigation. Not the exponent adjust (the counter never fires), not the PS constant location (0x1780 matches) | Open |
+| 2 | Car select | Car body black, logos included; interior draws | The fog constants are NaN there and multiplied by 0: the reference and the console give 0, HLSL gives NaN | Fixed by `rr6_fog_nan_zero` (A/B 71). Checked on D3D12 against the reference; textured on deko3d in the emulator |
+| 3 | Race, car | Rear window blotchy where the reference has smooth glass; no glossy streak across the rear panel | Not known. Our D3D12 and deko3d agree with each other, so it is in the shared renderer or translator. Suspect, unproved: the reflection's cube map or its mip selection | **Open** |
+| 4 | Race, Vulkan on the PC only | Near geometry stretched, car shredded | Not known. Ruled out: GPU enhancements with the master switch, record worker, stale pipeline caches, ring hooks, fog NaNs, restart, stride, input locations | **Open.** Not on D3D12 or deko3d, so not a Switch problem |
 
 ## Recompiler bugs found by other ports (2026-11-02)
 
@@ -165,3 +167,24 @@ This is the keys' presence and values, not a measurement. Each key's in-run A/B 
 The reference's translator gives every multiply Shader Model 3's rule, zero times anything is zero, even NaN (`dxbc_translator_alu.cpp`, `kMul`, `kMad`). XenosRecomp emits a plain multiply. At car select the pixel bank's `c21` and `c22` are NaN, and those are `FogPhaseY` and `FogPhaseZ`. The vertex shader 877AAC07400C0F33 multiplies its own constants of those names into the fog terms, and the paint shader ends `r0.xyz = r1.xyz * r3.xyz + r4.xyz` with those terms in r3 and r4. A NaN there comes out black. In the race those constants are finite and the same paint draws correctly. **Not yet proved:** the vertex bank's values have not been read, and no fix has been tried.
 
 **Proved (2026-11-03, renut27):** with `RR6_NAN_ZERO` zeroing registers 21 and 22 at upload, the car at car select draws textured and matches the reference (`out/pc_runs/renut27/captura_014_0211s.png`, `out/pc_runs/emu4/captura_014_0210s.png`). Both banks' c21 and c22 are NaN there, and the fog colours and coefficient are 0. Its texture memory holds data. The cause is Shader Model 3's multiply (0 x NaN = 0), which the reference has and XenosRecomp lacks.
+
+## Game speed when frames run late (2026-11-03, measured; the game's timing not changed)
+
+The lap clock against real time, read from captures 15 s apart, against the frames the log counted between them.
+
+| Run | Frame rate | Lap clock per real second | Ticks per presented frame |
+|---|---|---|---|
+| PC, D3D12, renut22, the control | about 59 fps | 1.00 (15.05, 15.02, 15.02, 14.93 s per 15 s) | about 1 |
+| Emulator, emu3, the whole race (472 s) | about 38 fps mean | 0.755 (356 s of lap clock in 471 s) | 1.20 mean |
+| emu3, windows | 20 to 57 fps | 0.40 to 0.99 | 1.03 to 1.86 |
+
+**The game slows down when frames run late.** Every lap value is a multiple of 1/60 s. It is not a strict lock to one tick per frame: the clock runs ahead of the presented frames, by more in the later part of the run (about 1.5 from 746 s, when the race's time limit is on screen), so some catch-up exists. Its mechanism was not looked for. The lap values were read from the captures by eye. The emulator's frame rate is a proxy with verify keys on, so this shows the behaviour, not the console's speed.
+
+A thing to look at: `captura_048_0746s` in emu3 is black except the HUD and a bright strip where the car's rear window is. Whether that is a fade the reference also shows is not checked.
+
+## The request's checklist against this renderer (2026-11-03)
+
+- **Slope-scaled depth bias.** Not in the pipeline key, so it cannot make pipelines. But Renut stored it and no draw read it: **the bias never reached the GPU.** `rr6_depth_bias` (A/B 72) now sets it as dynamic state when its words change, in the full and fast draw paths, in the reference's units. Recomp's rounding is not used. Direct3D 12 applies it only with the Agility SDK; Vulkan and deko3d have it. Not yet compared against the reference in a run.
+- **LOD bias.** Reaches the sampler on every back end, by reading the code: `mipLODBias = fetch.LodBias() / 32`, and plume's deko3d `s.lodBias`. The race's distant textures look right in emu3. No measurement of the value on deko3d.
+- **Exponent bias.** Recomp's bug (a translator reading it from the LOD bias's word) cannot occur: Renut does not apply a fetch's exponent adjust at all, it only counts it, and the counter's warning fired in no log (renut22, renut29, emu3). So this game does not use it where those runs went.
+- **Foliage.** Recomp's `use_fuzzy_alpha_epsilon` is the emulated GPU's. Trees in the race look right in emu3, by eye at capture size. **For the console test list.**

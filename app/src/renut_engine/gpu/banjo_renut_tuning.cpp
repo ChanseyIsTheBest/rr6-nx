@@ -356,6 +356,11 @@ REXCVAR_DEFINE_BOOL(rr6_depth_covers_colour, true, "Banjo/Enhancements",
                     "size, once (the race draws 1440x800 over a depth surface made 1280x720, which the console's "
                     "EDRAM allows). Off: black bars on Direct3D 12 and device lost on Vulkan, so it has no in-run A/B "
                     "target; it runs only when the targets change, and adds nothing per draw");
+REXCVAR_DEFINE_BOOL(rr6_depth_bias, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-03): the game's depth bias reaches the GPU, as dynamic state set when its value "
+                    "changes; no value of it makes a pipeline. Off: as Renut had it, no bias at all. Needs a back end "
+                    "with dynamic depth bias: Vulkan and deko3d have it; Direct3D 12 only with the Agility SDK. In-run "
+                    "A/B target 72 (the off half draws with no bias)");
 REXCVAR_DEFINE_BOOL(rr6_fog_nan_zero, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): NaNs in float constant registers 21 and 22 (the game's FogPhaseY and FogPhaseZ) "
                     "reach the shaders as 0. The console's multiply gives 0 for 0 times NaN, HLSL's gives NaN: off, the "
@@ -921,6 +926,7 @@ const char *AbName(int target) {
   case 69: return "Katamari's hand-written matrix natives (katamari_hand_matrix_*; off half: the generated copies)";
   case 70: return "the localized copies of the hot functions (localized.txt; off half: the generated originals)";
   case 71: return "rr6_fog_nan_zero (NaNs in the fog constants as 0)";  // rr6-nx (2026-11-03)
+  case 72: return "rr6_depth_bias (off half: no depth bias)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
 }
@@ -1556,6 +1562,15 @@ bool DepthCoversColourOn() {
 bool FogNanZeroOn() {
   static const bool on = REXCVAR_GET(rr6_fog_nan_zero);
   return on && g_ab_off.load(std::memory_order_relaxed) != 71;
+}
+
+bool DepthBiasKeyOn() {
+  static const bool on = REXCVAR_GET(rr6_depth_bias);
+  return on;
+}
+
+bool DepthBiasOn() {
+  return DepthBiasKeyOn() && g_ab_off.load(std::memory_order_relaxed) != 72;
 }
 
 bool DepthHandOverReadOnlyOn() {

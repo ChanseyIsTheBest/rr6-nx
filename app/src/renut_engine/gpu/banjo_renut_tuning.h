@@ -359,6 +359,8 @@ void CountFetchAlignment(bool aligned);
 bool DepthHandOverReadOnlyOn();
 bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
 bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
+bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state
+bool DepthBiasOn();     // and its value this half (A/B 72: the off half draws with no bias)
 // banjo_deko3d_depth24 (2026-10-19, GPU): D24S8 depth targets as 24-bit unorm (render/format.cpp).
 [[gnu::always_inline]] inline bool Depth24On() { return Latch().depth24; }
 // banjo_deko3d_push_constants (2026-10-19, render-thread proposals 2 and 5): the float constants and SharedConstants
