@@ -139,3 +139,7 @@ The other piecewise builders in that file were read and are safe: `vsubsws`, `vr
 This is the keys' presence and values, not a measurement. Each key's in-run A/B and verify run on this game is still to do.
 
 **Package defaults changed from Katamari:** `banjo_renut_render_height_docked` is 720, not 1080: pixel-identical is the default here and 1080 was the user's decision for Katamari. `configs/renut_1080_docked.toml` has it. `RR6_BUILTIN_CONFIG` is OFF, so the NRO reads `renut.toml`, as the package needs.
+
+## The main thread's spin (2026-11-02, PC profile, `out/pc_runs/renut19/pc_profile.log`)
+
+`sub_82144DA0` takes 91 % of the main thread's samples in the race, and that is waiting, not work: it loops on the word at `0x824D4F30` until another thread sets it to 1, calling an optional callback each time round, then adds 1 to it atomically. A profile must not read this as a hot function. On the Switch this loop keeps a core busy while it waits. Replacing it with a real wait would change no picture but touches the game's timing, so it is **a decision for the user, not made here**.
