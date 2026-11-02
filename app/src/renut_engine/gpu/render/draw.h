@@ -427,6 +427,7 @@ bool SortableShadersLocked(u32 vs_va, u32 ps_va);
 bool ShaderSortableByHash(uint64_t hash, const ShaderCacheEntry *entry, bool pixel);
 void CountMergedDraws(uint64_t draws, uint64_t ops);
 std::string DrawKindsReport();
+std::string DroppedDrawsReport();  // halo3-nx (2026-11-03): draws that never reached the GPU, by why
 inline uint64_t RenderTicks() {
 #if defined(__aarch64__)
   uint64_t t;

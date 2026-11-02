@@ -29,6 +29,7 @@ struct ShaderRecompiler : StringBuffer
 {
     uint32_t indentation = 0;
     bool isPixelShader = false;
+    std::string fetchCensus;  // rr6-nx (2026-11-03): the texture fetches that name their own filters or LOD bias
     const uint8_t* constantTableData = nullptr;
     std::unordered_map<uint32_t, VertexElement> vertexElements;
     std::unordered_map<uint32_t, std::string> interpolators;

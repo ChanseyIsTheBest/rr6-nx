@@ -583,6 +583,7 @@ renut_shadow_resolution = "1x"
 renut_ambient_occlusion = "Half"
 banjo_xma_frame_cache = false
 rr6_dlc_unlock_keys = false  # true: also load the 36 car unlock keys
+rr6_alpha_near_one = true  # false: the test of >= 1 exact, flickering trees on NVIDIA, A/B 74
 
 [input_p1]
 a = ""

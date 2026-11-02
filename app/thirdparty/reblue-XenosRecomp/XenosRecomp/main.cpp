@@ -232,6 +232,8 @@ int main(int argc, char** argv)
                     std::begin(shader.floatConstants));
                 shader.cbufLiterals = recompiler.cbufLiterals;  // banjo-nx
                 shader.shaderFlags = recompiler.shaderFlags;    // banjo-nx (banjo_gpu_depth_only)
+                if (!recompiler.fetchCensus.empty())  // rr6-nx (2026-11-03): one line a shader
+                    fmt::print(stderr, "fetch census {}_{:016X}:{}\n", recompiler.isPixelShader ? "ps" : "vs", hash, recompiler.fetchCensus);
                 if (recompiler.isPixelShader)
                 {
                     // banjo-nx (banjo_gpu_depth_only): the flags against the shader's own text (a kill is its only

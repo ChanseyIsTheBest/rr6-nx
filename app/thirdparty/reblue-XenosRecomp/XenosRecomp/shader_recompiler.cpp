@@ -504,6 +504,14 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     if (!isPixelShader && instr.opcode != FetchOpcode::SetTextureLod && instr.dstRegister == 0)
         vertexIndexOverwritten = true;  // see recompile(const AluInstruction&)
 
+    // rr6-nx (2026-11-03, census, from vivapinata-nx): what a fetch names over its fetch constant, none of it honoured here:
+    // filters mag, min, mip (0 point, 1 linear, 2 base map, 3 as the constant), its own LOD bias, its anisotropy (7 = as the constant).
+    static const bool census_all = std::getenv("RR6_FETCH_CENSUS_ALL") != nullptr;  // the check that the fields read at all
+    if (instr.opcode == FetchOpcode::TextureFetch &&
+        (census_all || instr.magFilter != 3 || instr.minFilter != 3 || instr.mipFilter != 3 || instr.lodBias != 0 || instr.anisoFilter != 7))
+        fetchCensus += fmt::format(" t{}:f{}{}{},lod{},aniso{}", uint32_t(instr.constIndex), uint32_t(instr.magFilter),
+            uint32_t(instr.minFilter), uint32_t(instr.mipFilter), int32_t(instr.lodBias), uint32_t(instr.anisoFilter));
+
     // setTexLOD stores the LOD that following useRegLod fetches sample at.
     if (instr.opcode == FetchOpcode::SetTextureLod)
     {

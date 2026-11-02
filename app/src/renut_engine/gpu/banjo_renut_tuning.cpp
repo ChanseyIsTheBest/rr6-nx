@@ -361,6 +361,12 @@ REXCVAR_DEFINE_BOOL(rr6_depth_bias, true, "Banjo/Enhancements",
                     "changes; no value of it makes a pipeline. Off: as Renut had it, no bias at all. Needs a back end "
                     "with dynamic depth bias: Vulkan and deko3d have it; Direct3D 12 only with the Agility SDK. In-run "
                     "A/B target 72 (the off half draws with no bias)");
+REXCVAR_DEFINE_BOOL(rr6_alpha_near_one, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-03): an alpha test of >= 1 runs at >= 0.999. The game draws its foliage twice, >= 1 with "
+                    "depth and then > 0 for the edges, and a filter that returns just under 1 for opaque texels fails the "
+                    "exact compare: on NVIDIA GPUs the trees flickered. No 8-bit alpha below 1 passes (254/255 is 0.996). Ridge "
+                    "Racer 6 Recomp's use_fuzzy_alpha_epsilon has the same limit for this test. The threshold is a constant: "
+                    "no cost. In-run A/B target 74");
 REXCVAR_DEFINE_BOOL(rr6_fog_nan_zero, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): NaNs in float constant registers 21 and 22 (the game's FogPhaseY and FogPhaseZ) "
                     "reach the shaders as 0. The console's multiply gives 0 for 0 times NaN, HLSL's gives NaN: off, the "
@@ -928,6 +934,7 @@ const char *AbName(int target) {
   case 71: return "rr6_fog_nan_zero (NaNs in the fog constants as 0)";  // rr6-nx (2026-11-03)
   case 72: return "rr6_depth_bias (off half: no depth bias)";  // rr6-nx (2026-11-03)
   case 73: return "banjo_renut_game_gamma (off half: the output without the display's ramp)";  // rr6-nx (2026-11-03)
+  case 74: return "rr6_alpha_near_one (off half: the alpha test of >= 1 exact)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
 }
@@ -1102,6 +1109,8 @@ void StatsGameFrame() {
     REXLOG_INFO("[renut] {}", fd);
   if (const std::string ta = ::renut::gpu::TextureAnswersReport(); !ta.empty())  // banjo-nx (2026-10-27)
     REXLOG_INFO("[renut] {}", ta);
+  if (const std::string dd = ::renut::gpu::DroppedDrawsReport(); !dd.empty())  // halo3-nx (2026-11-03)
+    REXLOG_WARN("[renut] {}", dd);
   if (const std::string dk = ::renut::gpu::DrawKindsReport(); !dk.empty())  // banjo-nx (2026-10-27)
     REXLOG_INFO("[renut] {}", dk);
   if (const std::string ss = ::renut::gpu::StateSourceReport(); !ss.empty())  // banjo-nx (2026-10-26)
@@ -1563,6 +1572,17 @@ bool DepthCoversColourOn() {
 bool FogNanZeroOn() {
   static const bool on = REXCVAR_GET(rr6_fog_nan_zero);
   return on && g_ab_off.load(std::memory_order_relaxed) != 71;
+}
+
+float AlphaNearOne(uint32_t func, float threshold) {
+  static const bool key = REXCVAR_GET(rr6_alpha_near_one);
+  if (func != 6)
+    return threshold;
+  const bool on = key && g_ab_off.load(std::memory_order_relaxed) != 74;
+  if (on && threshold >= 1.0f)
+    return 0.999f;
+  // A kept packet holds what was set before an A/B flip.
+  return !on && threshold == 0.999f ? 1.0f : threshold;
 }
 
 bool GameGammaAbOff() {

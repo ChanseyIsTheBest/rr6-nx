@@ -8784,7 +8784,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     // banjo-nx (2026-10-28, host packets): the same state, pixel shader drawn and first target: the same words.
     SetShared(sc, sc.booleans, pk->booleans);
     SetShared(sc, sc.alpha_test_func, pk->alpha_test_func);
-    SetShared(sc, sc.alpha_threshold, pk->alpha_threshold);
+    SetShared(sc, sc.alpha_threshold, banjo::renut_gpu::AlphaNearOne(pk->alpha_test_func, pk->alpha_threshold));
     alpha_test_func = pk->alpha_test_func;
   } else if ((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
              targets_changed || verify) {
@@ -8805,6 +8805,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
         threshold = 0.5f;
       }
     }
+    threshold = banjo::renut_gpu::AlphaNearOne(func, threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
     if (verify && !((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
                     targets_changed) &&
         (func != sc.alpha_test_func || threshold != sc.alpha_threshold ||
@@ -9423,6 +9424,27 @@ void NoteDrawMerge(bool same_state, bool contiguous) {
   g_merge_same[g_prev_draw_kind < 3 ? g_prev_draw_kind : 2] += same_state;
   g_merge_contiguous[g_prev_draw_kind < 3 ? g_prev_draw_kind : 2] += contiguous;
 }
+// halo3-nx (2026-11-03), rr6-nx: draws that never reached the GPU, by why. These exits were silent.
+enum DropReason : uint32_t {
+  kDropShaderRecord, kDropHostShader, kDropTargets, kDropGeometry, kDropStreams, kDropAllocation, kDropPipeline, kDropCount
+};
+uint64_t g_dropped_draws[kDropCount] = {};
+std::string DroppedDrawsReport() {
+  uint64_t all = 0;
+  for (const uint64_t n : g_dropped_draws)
+    all += n;
+  if (!all)
+    return {};
+  std::string out = fmt::format("DRAWS NOT DRAWN: {} (no shader record {}, no host shader {}, no targets {}, geometry {}, "
+                                "exported streams {}, allocation {}, pipeline or framebuffer {})",
+                                all, g_dropped_draws[kDropShaderRecord], g_dropped_draws[kDropHostShader],
+                                g_dropped_draws[kDropTargets], g_dropped_draws[kDropGeometry],
+                                g_dropped_draws[kDropStreams], g_dropped_draws[kDropAllocation],
+                                g_dropped_draws[kDropPipeline]);
+  std::fill(std::begin(g_dropped_draws), std::end(g_dropped_draws), uint64_t(0));
+  return out;
+}
+
 std::string DrawKindsReport() {
   uint64_t all = 0;
   for (const DrawKindStats &k : g_kind_stats)
@@ -9760,6 +9782,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     if (LogLimited(logged, 16)) {
       const u32 va = vs ? declaration_va : vs_va;
       const auto *words = GuestPtr<const be_u32>(va);
+      ++g_dropped_draws[kDropShaderRecord];
       RGPU_WARN("Draw dropped: {} {:08X} is not one the renderer knows (words {:08X} {:08X})",
                 vs ? "vertex declaration" : "vertex shader", va, words ? u32(words[0]) : 0,
                 words ? u32(words[1]) : 0);
@@ -9930,7 +9953,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 
   plume::RenderShader *host_vs = GetHostShader(vs);
   plume::RenderShader *host_ps = ps ? GetHostShader(ps) : nullptr;
-  if (!host_vs || (ps && !host_ps))
+  if ((!host_vs || (ps && !host_ps)) && ++g_dropped_draws[kDropHostShader])
     return false;  // missing from the shader cache (captured for the next build)
 
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): the previous chain draw's targets when the device's target words (bytes
@@ -9975,6 +9998,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     }
   } else {
     if (!GatherTargets(device, targets)) {
+      ++g_dropped_draws[kDropTargets];
       g_targets_reuse.seq = 0;
       return false;
     }
@@ -10257,6 +10281,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       alpha_threshold = 0.5f;
     }
   }
+  alpha_threshold = banjo::renut_gpu::AlphaNearOne(alpha_test_func, alpha_threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
   SetShared(sc, sc.alpha_test_func, alpha_test_func);  // banjo-nx (2026-10-26)
   SetShared(sc, sc.alpha_threshold, alpha_threshold);
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): the previous chain draw's viewport when nothing ComputeViewport reads
@@ -10349,6 +10374,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     ++g_range_draws;
     if (call.tessellation ? !PrepareTessellation(device, call, geometry, tessellation)
                           : !PrepareGeometry(device, call, geometry)) {
+      ++g_dropped_draws[kDropGeometry];
       return false;
     }
   }
@@ -10370,6 +10396,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   GpuStreams gpu_streams;
   if (!whole && !ConvertExportedStreamsLocked(s, device, call, *vs, shader_strides, *declaration, geometry,
                                               gpu_streams)) {
+    ++g_dropped_draws[kDropStreams];
     return false;
   }
 
@@ -10567,7 +10594,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     }
     banjo::renut_gpu::CountSharedConstants(false);
   }
-  if ((!fetch_alloc && !fetch_none) || (!pushed && (!vs_alloc || !ps_alloc || !sc_alloc)) || !memexport)
+  if (((!fetch_alloc && !fetch_none) || (!pushed && (!vs_alloc || !ps_alloc || !sc_alloc)) || !memexport) &&
+      ++g_dropped_draws[kDropAllocation])
     return false;
 
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_chain_reuse): a chain draw takes the previous draw's key when nothing MakeKey reads
@@ -10699,7 +10727,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // banjo-nx (2026-10-28, banjo_deko3d_depth_handover_readonly): whether this draw writes depth or stencil.
   const bool draw_depth_writes = ((key.depth_control & 2) && (key.depth_control & 4)) ||
                                  ((key.depth_control & 1) && ((key.stencil_ref_mask >> 16) & 0xFF) != 0);
-  if (!pipeline || !BindTargets(targets, draw_depth_writes))
+  if ((!pipeline || !BindTargets(targets, draw_depth_writes)) && ++g_dropped_draws[kDropPipeline])
     return false;
 #if defined(PLUME_DEKO3D)
   // banjo-nx (2026-10-21, banjo_deko3d_async_variants): a pipeline drawing a shader's generic variant while its own was
