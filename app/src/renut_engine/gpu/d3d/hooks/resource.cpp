@@ -1508,6 +1508,13 @@ u32 Rr6IndexBufferLock(u32 buffer, u32 offset, u32 size, u32 flags) {
   return base ? base + offset : 0;
 }
 
+// rr6-nx: the index buffer's Unlock (sub_82254EB8: `lwz r4,12(r3); li r5,0; b sub_82254AA0`). The game's own code takes 0x1000
+// from Common, stamps +8 and writes cache-flush packets to the ring, each by XDK 2135's layout: on Renut's header that is
+// other fields, and the ring packets ran over into the records heap (o1heapAllocate crashed entering the first race).
+void Rr6IndexBufferUnlock(u32 buffer) {
+  D3D_UnlockResource_hook(buffer, LoadU32(buffer + 0x18), 0);
+}
+
 // Lock2DSurface (texture, face, level, locked, rect, flags): the target of the texture's and the cube's LockRect thunks.
 void Rr6TextureLockRect(u32 texture, u32 face, u32 level, mapped_u32 locked_rect, mapped_u32 rect, u32 flags) {
   D3D_Lock2DSurface_hook(Rr6ShadowTexture(texture), face, level, locked_rect, rect, flags);
@@ -2008,3 +2015,4 @@ BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D08A8, AlignTextureDimensions_hook);  // D
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0D38, GetMipTailLevelOffsetCoords_hook);  // D3D_GetMipTailLevelOffsetCoords  // rr6-nx: the game's own code (sub_822518B0, XDK 2135's headers)
 BANJO_RENUT_HOOK(sub_8224E758, Rr6Release);  // rr6-nx: a shader's own Release (the count at +4, data at +12): Renut's objects
 BANJO_RENUT_HOOK(sub_8224ED60, Rr6Release);  // rr6-nx: a declaration's own Release (the count at +4): Renut's objects
+BANJO_RENUT_HOOK(sub_82254EB8, Rr6IndexBufferUnlock);  // D3DIndexBuffer_Unlock  // rr6-nx: 4 instructions, reads +12; 2 sites
