@@ -1634,8 +1634,15 @@ bool GatherTargets(const GuestDevice &device, Targets &t) {
     t.colors[t.color_count++] = surface;
   }
   HostSurface *depth = GetHostSurfaceLocked(device.U32(d3d::kDeviceOffsetDepthStencil));
-  if (depth && depth->depth)
+  if (depth && depth->depth) {
+    // rr6-nx (2026-11-02, rr6_depth_covers_colour): a colour target larger than the depth surface under it.
+    if (t.color_count && depth->scale == t.colors[0]->scale &&
+        (depth->width < t.colors[0]->width || depth->height < t.colors[0]->height) &&
+        banjo::renut_gpu::DepthCoversColourOn())
+      depth = GrowDepthToColourLocked(device.U32(d3d::kDeviceOffsetDepthStencil), depth, t.colors[0]->width,
+                                      t.colors[0]->height);
     t.depth = depth;
+  }
   if (!t.color_count && !t.depth)
     return false;
   const HostSurface *first = t.color_count ? t.colors[0] : t.depth;

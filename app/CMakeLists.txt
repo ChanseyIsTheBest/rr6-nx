@@ -582,7 +582,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     # katamari-nx (2026-11-02, the user: only these settings in the toml, the rest hardcoded; sa2-nx's design): the fixed
     # settings compiled in (src/renut_app.h BuiltInConfig), and the player's rr6.toml, written next to the NRO when
     # it is missing (DefaultConfigFile). RR6_BUILTIN_CONFIG=OFF: test builds that read a full renut.toml.
-    option(RR6_BUILTIN_CONFIG "Switch: the fixed settings compiled in, the player's options in rr6.toml" ON)
+    # rr6-nx: OFF, this port's packages are test builds with renut.toml, renut_play.toml and renut_ab.toml.
+    option(RR6_BUILTIN_CONFIG "Switch: the fixed settings compiled in, the player's options in rr6.toml" OFF)
     if(RR6_BUILTIN_CONFIG)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rr6_switch_defaults.toml" RR6_BUILTIN_TEXT)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rr6_switch.toml" RR6_PLAYER_TEXT)

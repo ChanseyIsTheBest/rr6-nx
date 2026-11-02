@@ -357,6 +357,7 @@ void CountFetchAlignment(bool aligned);
 [[gnu::always_inline]] inline bool DepthHandOverOn() { return Latch().depth_handover; }
 // banjo-nx (2026-10-28, GPU block): banjo_deko3d_depth_handover_readonly (A/B 64).
 bool DepthHandOverReadOnlyOn();
+bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
 // banjo_deko3d_depth24 (2026-10-19, GPU): D24S8 depth targets as 24-bit unorm (render/format.cpp).
 [[gnu::always_inline]] inline bool Depth24On() { return Latch().depth24; }
 // banjo_deko3d_push_constants (2026-10-19, render-thread proposals 2 and 5): the float constants and SharedConstants

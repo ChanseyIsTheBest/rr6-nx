@@ -9,11 +9,12 @@ param([int]$Seconds = 420, [string]$Name = "rdc", [string]$Toml = "", [string]$T
 $root = Split-Path -Parent $PSScriptRoot
 $rdcDir = "D:\Banjo kazooie port\tools\RenderDoc_1.46_64"
 $ryu = "D:\New folder\Ryubing-src\ryubing\build\Ryujinx.exe"
-$data = "D:\New folder\ryu-data\katamari"
-$sd = Join-Path $data "sdcard\switch\katamari-nx"
+$data = "D:\New folder\ryu-data\rr6"
+$sd = Join-Path $data "sdcard\switch\rr6-nx"
 $nro = Join-Path $sd "rr6-nx.nro"
 $out = Join-Path $root "out\emu_runs\$Name"
-if (Get-Process -Name Ryujinx -ErrorAction SilentlyContinue) { Write-Output "a Ryujinx is running (another port's?): not starting"; exit 2 }
+$running = @(Get-Process -Name Ryujinx -ErrorAction SilentlyContinue).Count
+if ($running -ge 2) { Write-Output "$running Ryujinx are running (other ports'): not starting"; exit 2 }
 $os = Get-CimInstance Win32_OperatingSystem
 $freeCommit = $os.FreeVirtualMemory / 1MB
 if ($freeCommit -lt $MinCommitGB) { Write-Output ("free commit memory {0:N1} GB < {1} GB: not starting" -f $freeCommit, $MinCommitGB); exit 3 }

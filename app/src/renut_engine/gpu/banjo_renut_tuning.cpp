@@ -351,6 +351,11 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_depth_handover_readonly, true, "Banjo/Enhanceme
                     "with the target bound, or the target's next whole clear (the texture takes the image). The "
                     "night_final city drew all 438 handed resolves a 10 s after all at such binds. Same pixels. "
                     "In-run A/B target 64");
+REXCVAR_DEFINE_BOOL(rr6_depth_covers_colour, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-02): a depth target smaller than the colour target bound over it grows to that "
+                    "size, once (the race draws 1440x800 over a depth surface made 1280x720, which the console's "
+                    "EDRAM allows). Off: black bars on Direct3D 12 and device lost on Vulkan, so it has no in-run A/B "
+                    "target; it runs only when the targets change, and adds nothing per draw");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_depth24, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, GPU): a D24S8 depth target (the shadow maps, small render-to-texture "
                     "targets) as 24-bit unorm depth with stencil, the Xenos's own format, instead of 32-bit float: half "
@@ -1536,6 +1541,11 @@ void CountDeviceSwizzle(uint32_t frame) {
   Bump(g_device_swizzle[0], 1);
   if (g_device_swizzle_frame.exchange(frame, std::memory_order_relaxed) != frame)
     Bump(g_device_swizzle[1], 1);
+}
+
+bool DepthCoversColourOn() {
+  static const bool on = REXCVAR_GET(rr6_depth_covers_colour);
+  return on;
 }
 
 bool DepthHandOverReadOnlyOn() {

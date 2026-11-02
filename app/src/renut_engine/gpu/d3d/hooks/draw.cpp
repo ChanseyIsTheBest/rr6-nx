@@ -333,22 +333,24 @@ void Rr6EndVertices(u32 /*device*/) {}
 // rr6-nx: the setters that keep a binding on Renut's own objects in this XDK (zuma-nx's reading of sub_82124A50).
 u32 g_rr6_vs = 0, g_rr6_ps = 0;
 void Rr6SetVertexShader(u32 device, u32 shader) {
+  u32 old = 0;
   if (shader != g_rr6_vs) {
     native::Rr6Bind(shader);
-    const u32 old = g_rr6_vs;
+    old = g_rr6_vs;
     g_rr6_vs = shader;
-    native::Rr6Unbind(old);
   }
   native::SetVertexShader(native::DeviceAt(device), shader);
+  native::Rr6Unbind(old);  // after the setter, as in state.cpp's Rr6Rebind
 }
 void Rr6SetPixelShader(u32 device, u32 shader) {
+  u32 old = 0;
   if (shader != g_rr6_ps) {
     native::Rr6Bind(shader);
-    const u32 old = g_rr6_ps;
+    old = g_rr6_ps;
     g_rr6_ps = shader;
-    native::Rr6Unbind(old);
   }
   native::SetPixelShader(native::DeviceAt(device), shader);
+  native::Rr6Unbind(old);
 }
 
 // void D3DDevice_BeginTiling(D3DDevice*, DWORD Count, const D3DRECT *pTileRects,

@@ -54,31 +54,33 @@ constexpr u32 kRr6Samplers = 26, kRr6Streams = 16, kRr6Targets = 4;
 u32 g_rr6_textures[kRr6Samplers] = {}, g_rr6_streams[kRr6Streams] = {}, g_rr6_targets[kRr6Targets] = {};
 u32 g_rr6_depth = 0, g_rr6_indices = 0, g_rr6_declaration = 0;
 
-// Binds the new, unbinds the old.
-inline void Rr6Rebind(u32 &slot, u32 value) {
+// Binds the new and returns the old, for the caller to unbind after the native setter: that setter fences what it replaces
+// (TagResourceFence), and an old object unbound first may be gone by then, its fence landing in the record heap's free list.
+inline u32 Rr6Rebind(u32 &slot, u32 value) {
   if (slot == value)
-    return;
+    return 0;
   native::Rr6Bind(value);
   const u32 old = slot;
   slot = value;
-  native::Rr6Unbind(old);
+  return old;
 }
 
 void Rr6SetTexture(u32 device, u32 sampler, u32 texture) {
-  if (sampler < kRr6Samplers)
-    Rr6Rebind(g_rr6_textures[sampler], texture);
+  const u32 old = sampler < kRr6Samplers ? Rr6Rebind(g_rr6_textures[sampler], texture) : 0;
   native::SetTexture(native::DeviceAt(device), sampler, native::Rr6TextureShadow(texture));
+  native::Rr6Unbind(old);
 }
 void Rr6SetRenderTarget(u32 device, u32 index, u32 surface) {
   const u32 shadow = native::Rr6SurfaceShadow(surface);
-  if (index < kRr6Targets)
-    Rr6Rebind(g_rr6_targets[index], surface);
+  const u32 old = index < kRr6Targets ? Rr6Rebind(g_rr6_targets[index], surface) : 0;
   native::SetRenderTarget(native::DeviceAt(device), index, shadow);
+  native::Rr6Unbind(old);
 }
 void Rr6SetDepthStencil(u32 device, u32 surface) {
   const u32 shadow = native::Rr6SurfaceShadow(surface);
-  Rr6Rebind(g_rr6_depth, surface);
+  const u32 old = Rr6Rebind(g_rr6_depth, surface);
   native::SetDepthStencilSurface(native::DeviceAt(device), shadow);
+  native::Rr6Unbind(old);
 }
 u32 Rr6GetRenderTarget(u32 device, u32 index) {
   const native::Device d = native::DeviceAt(device);
@@ -97,17 +99,19 @@ u32 Rr6GetDepthStencil(u32 device) {
   return surface;
 }
 void Rr6SetStreamSource(u32 device, u32 stream, u32 vertex_buffer, u32 offset, u32 stride) {
-  if (stream < kRr6Streams)
-    Rr6Rebind(g_rr6_streams[stream], vertex_buffer);
+  const u32 old = stream < kRr6Streams ? Rr6Rebind(g_rr6_streams[stream], vertex_buffer) : 0;
   native::SetStreamSource(native::DeviceAt(device), stream, vertex_buffer, offset, stride);
+  native::Rr6Unbind(old);
 }
 void Rr6SetIndices(u32 device, u32 index_buffer) {
-  Rr6Rebind(g_rr6_indices, index_buffer);
+  const u32 old = Rr6Rebind(g_rr6_indices, index_buffer);
   native::SetIndices(native::DeviceAt(device), index_buffer);
+  native::Rr6Unbind(old);
 }
 void Rr6SetVertexDeclaration(u32 device, u32 declaration) {
-  Rr6Rebind(g_rr6_declaration, declaration);
+  const u32 old = Rr6Rebind(g_rr6_declaration, declaration);
   native::SetVertexDeclaration(native::DeviceAt(device), declaration);
+  native::Rr6Unbind(old);
 }
 
 // XDK 2135's render state 57 (between ColorWriteEnable3 and TessellationMode), which N&B's order does not have: its setter

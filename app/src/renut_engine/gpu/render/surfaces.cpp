@@ -854,6 +854,29 @@ HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
   return slot.get();
 }
 
+// rr6-nx (2026-11-02, rr6_depth_covers_colour): RB_SURFACE_INFO's pitch is the same for every target and a depth surface's
+// own size is only D3D's bookkeeping, so the console draws a 1440x800 colour target over a depth surface made 1280x720 (this
+// game's race). A host framebuffer can't: Direct3D 12 cuts the draws to the depth's size (black bars on the right and at the
+// bottom) and in Vulkan it is an invalid framebuffer (device lost). The view's target grows once, as for a larger surface over
+// it in GetHostSurfaceSlow, and keeps that size. What it held is lost: the game clears it next.
+HostSurface *GrowDepthToColourLocked(u32 surface_va, HostSurface *depth, uint32_t width, uint32_t height) {
+  const auto *desc = GuestPtr<const d3d::SurfaceDesc>(surface_va + sizeof(d3d::Resource));
+  if (!desc || FindHostSurfaceLocked(surface_va) != depth)
+    return depth;
+  const uint32_t min_width = std::max(width, depth->width), min_height = std::max(height, depth->height);
+  RGPU_INFO("Depth target {:08X}: {}x{} grown to {}x{}, the colour target over it (rr6_depth_covers_colour)", surface_va,
+            depth->width, depth->height, min_width, min_height);
+  RetireTarget(*depth);
+  ++g_surface_epoch;
+  if (!BuildTarget(*depth, *desc, min_width, min_height, depth->scale))
+    return nullptr;
+  if (plume::RenderCommandList *cmd = Video::CommandListLocked()) {
+    TransitionSurfaceLocked(depth, plume::RenderTextureLayout::DEPTH_WRITE);
+    cmd->discardTexture(depth->texture.get());
+  }
+  return depth;
+}
+
 HostSurface *SurfaceByGenerationLocked(uint64_t generation) {
   for (const auto &[key, surface] : g_targets)
     if (surface && surface->texture && surface->generation == generation)
