@@ -1290,9 +1290,12 @@ BANJO_RENUT_UNHOOKED_HOOK(unlinked_824ED278, D3D_XenonGpu_Initialize_hook);  // 
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E11A0, D3D_InitializeApiState_hook);  // D3D_InitializeApiState  // rr6-nx: not hooked in this XDK; Katamari 824E11A0
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E1408, D3D_InitializePresentationParameters_hook);  // D3D_InitializePresentationParameters  // rr6-nx: not hooked in this XDK; Katamari 824E1408
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E1B50, D3D_CDevice_Uninitialize_hook);  // D3D_CDevice_Uninitialize  // rr6-nx: not hooked in this XDK; Katamari 824E1B50
-BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E0298, KickOff_hook);  // D3D_CDevice_KickOff  // rr6-nx: not hooked in this XDK; Katamari 824E0298
-BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E0110, KickOffSegment_hook);  // D3D_CDevice_KickOffSegment  // rr6-nx: not hooked in this XDK; Katamari 824E0110
-BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E04B0, BeginRingBig_hook);  // D3D_CDevice_BeginRingBig  // rr6-nx: not hooked in this XDK; Katamari 824E04B0
+// rr6-nx (2026-11-02): the pairing left these four unlinked, so XDK 2135's own ring code ran on Renut's device, whose layout is this
+// XDK's only as far as the constants: it read render states as ring and fence fields. Paired by hand from the code: sub_8225B5E0
+// returns the ring after its kick, sub_8225B7C0(device, count) reserves count dwords, sub_8225B038(device, fence, type, no_kick) waits.
+BANJO_RENUT_HOOK(sub_8225B5E0, KickOff_hook);  // D3D_CDevice_KickOff
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E0110, KickOffSegment_hook);  // D3D_CDevice_KickOffSegment  // rr6-nx: sub_8225B4A0, reached only through sub_8225B5E0, hooked above
+BANJO_RENUT_HOOK(sub_8225B7C0, BeginRingBig_hook);  // D3D_CDevice_BeginRingBig
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_8255A200, BeginRingManual_hook);  // D3D_CDevice_BeginRingManual  // rr6-nx: not hooked in this XDK; Katamari 8255A200
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DF3F0, RingBufferDeviceAllocate_hook);  // D3D_RingBufferDeviceAllocate  // rr6-nx: not hooked in this XDK; Katamari 824DF3F0
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_821FC318, AllocateInlineData_hook);  // D3D_CDevice_AllocateInlineData  // rr6-nx: not hooked in this XDK; Katamari 821FC318
@@ -1301,6 +1304,6 @@ BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E8E90, D3DDevice_Swap_hook);  // D3DDevice
 BANJO_RENUT_UNHOOKED_HOOK_SHARED(unlinked_82640818, D3DDevice_BeginCommandBuffer_hook);  // D3DDevice_BeginCommandBuffer  // rr6-nx: not hooked in this XDK; Katamari 82640818
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_82640DE8, D3DDevice_EndCommandBuffer_hook);  // D3DDevice_EndCommandBuffer  // rr6-nx: not hooked in this XDK; Katamari 82640DE8
 BANJO_RENUT_UNHOOKED_HOOK_SHARED(unlinked_821F1A78, D3DDevice_RunCommandBuffer_hook);  // D3DDevice_RunCommandBuffer  // rr6-nx: not hooked in this XDK; Katamari 821F1A78
-BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DFC48, BlockOnFence_hook);  // D3D_CDevice_BlockOnFence  // rr6-nx: not hooked in this XDK; Katamari 824DFC48
+BANJO_RENUT_HOOK(sub_8225B038, BlockOnFence_hook);  // D3D_CDevice_BlockOnFence  // rr6-nx: paired by hand, see KickOff above
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0290, CBlocker_Check_hook);  // D3D_CBlocker_Check  // rr6-nx: not hooked in this XDK; Katamari 824D0290
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E03D0, IsFencePending_hook);  // D3DDevice_IsFencePending  // rr6-nx: not hooked in this XDK; Katamari 824E03D0

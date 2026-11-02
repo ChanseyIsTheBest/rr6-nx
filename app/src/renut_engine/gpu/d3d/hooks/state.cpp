@@ -508,7 +508,8 @@ BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E67C8, D3DDevice_SetScreenExtentQueryMode_
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0488, D3DDevice_UnsetAll_hook);  // D3DDevice_UnsetAll  // rr6-nx: not hooked in this XDK; Katamari 824D0488
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DE3C0, D3D_ResetAllState_hook);  // D3D_ResetAllState  // rr6-nx: not hooked in this XDK; Katamari 824DE3C0
 BANJO_RENUT_UNHOOKED_HOOK_SHARED(unlinked_82634B90, D3D_InvalidateConstants_hook);  // D3D_InvalidateConstants  // rr6-nx: not hooked in this XDK; Katamari 82634B90
-BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E0518, D3DDevice_BlockUntilIdle_hook);  // D3DDevice_BlockUntilIdle  // rr6-nx: not hooked in this XDK; Katamari 824E0518
+// rr6-nx (2026-11-02): paired by hand. The game's own spun on device+0x28FC with no yield, a render state on Renut's device.
+BANJO_RENUT_HOOK(sub_8225B828, D3DDevice_BlockUntilIdle_hook);  // D3DDevice_BlockUntilIdle
 // Through a thunk (j_D3DDevice_SetRenderTarget 0x82636EC8).
 BANJO_RENUT_UNHOOKED_HOOK(unlinked_82636EC8, D3DDevice_SetRenderTarget_hook);  // D3DDevice_SetRenderTarget_Thunk  // rr6-nx: not hooked in this XDK; Katamari 82636EC8
 BANJO_RENUT_HOOK(sub_82257818, Rr6GetRenderTarget);  // D3DDevice_GetRenderTarget  // rr6-nx: 18 instructions, AddRef; the game's surface back from its shadow; Katamari 82636ED0

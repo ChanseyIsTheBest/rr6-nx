@@ -143,3 +143,19 @@ This is the keys' presence and values, not a measurement. Each key's in-run A/B 
 ## The main thread's spin (2026-11-02, PC profile, `out/pc_runs/renut19/pc_profile.log`)
 
 `sub_82144DA0` takes 91 % of the main thread's samples in the race, and that is waiting, not work: it loops on the word at `0x824D4F30` until another thread sets it to 1, calling an optional callback each time round, then adds 1 to it atomically. A profile must not read this as a hot function. On the Switch this loop keeps a core busy while it waits. Replacing it with a real wait would change no picture but touches the game's timing, so it is **a decision for the user, not made here**.
+
+## Census for the renderer guide's section 2 (2026-11-02, PC, Vulkan, `out/pc_runs/renut18`; the race's picture was still wrong in this run, so these are counts, not costs)
+
+| Question | This game | Banjo, for scale |
+|---|---|---|
+| Where draws come from | 100 % direct calls: 229,379 immediate, 0 replayed from recorded command buffers in the 10 s measured | 98.5 % recorded |
+| Draws a frame | about 413 in that 10 s of race (229,377 draws, 555 frames) | |
+| Shadow or depth-only | 2,755 depth-only draws in that 10 s, about 5 a frame, all with alpha test or alpha to coverage | about 2,200 a frame |
+| Render targets | 8, 20 MB, at 1x | |
+| Textures | 831 to 858, 83 to 91 MB, of which 8 resolve targets 22 MB | |
+| Vertex and index copies | stream cache 17 to 18 MB in a 32 MB pool, about 1,100 streams | |
+| Shaders | all 176 in the image, none found in `RRM*.DAT`; 103 vertex, 73 pixel | |
+
+**Consequence:** the record-time items of the guide's sections 4.5 to 4.7 serve recorded command buffers, and this game records none, so they should do little here. To be measured with their A/B targets, not assumed.
+
+**Not measured yet:** resources by creation call or built by the game (`UnleashedCensusOn`), setters or inline writes (the tags census), memexport pending per draw, threads on the emulator.
