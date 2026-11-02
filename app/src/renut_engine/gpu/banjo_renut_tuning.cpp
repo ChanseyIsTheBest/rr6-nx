@@ -927,6 +927,7 @@ const char *AbName(int target) {
   case 70: return "the localized copies of the hot functions (localized.txt; off half: the generated originals)";
   case 71: return "rr6_fog_nan_zero (NaNs in the fog constants as 0)";  // rr6-nx (2026-11-03)
   case 72: return "rr6_depth_bias (off half: no depth bias)";  // rr6-nx (2026-11-03)
+  case 73: return "banjo_renut_game_gamma (off half: the output without the display's ramp)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
 }
@@ -1562,6 +1563,10 @@ bool DepthCoversColourOn() {
 bool FogNanZeroOn() {
   static const bool on = REXCVAR_GET(rr6_fog_nan_zero);
   return on && g_ab_off.load(std::memory_order_relaxed) != 71;
+}
+
+bool GameGammaAbOff() {
+  return g_ab_off.load(std::memory_order_relaxed) == 73;
 }
 
 bool DepthBiasKeyOn() {

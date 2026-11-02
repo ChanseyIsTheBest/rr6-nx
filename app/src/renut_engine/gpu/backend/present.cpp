@@ -48,9 +48,11 @@ REXCVAR_DEFINE_DOUBLE(banjo_renut_diag_show_gamma, 1.0, "Banjo/Renut",
                       "Diagnostic: banjo_renut_diag_show_texture's exponent (depth near 1 shows with 64 or so)");
 
 // banjo-nx (2026-10-20): see GameGamma below.
-REXCVAR_DEFINE_BOOL(banjo_renut_game_gamma, false, "Banjo/Renut",
-                    "Apply the gamma ramp the game loads to the output, as the Xbox 360's display and banjo-nx's own "
-                    "renderer do (N&B's darkens the midtones, about x^1.17). Off: Renut's output as before");
+REXCVAR_DEFINE_BOOL(banjo_renut_game_gamma, true, "Banjo/Renut",
+                    "Apply the gamma ramp the D3D device holds to the output, as the Xbox 360's display and the "
+                    "emulated GPU do. rr6-nx (2026-11-03): on, since the reference has it. Ridge Racer 6 never loads a "
+                    "ramp of its own: this is the default one, corrected for the display (sRGB to BT.709). Off: brighter "
+                    "darks than the reference, in every screen. In-run A/B target 73");
 
 REXCVAR_DEFINE_BOOL(renut_vsync, true, "Nuts&Bolts/Graphics",
                     "Show each frame at the display's refresh: no tearing, and the game runs at "
@@ -139,7 +141,7 @@ GameGamma g_gamma;
 // Before the frame's passes (a copy may not be recorded inside one). Caller holds s.mutex.
 void PrepareGameGammaLocked(VideoState &s) {
   g_gamma.param = 0.0f;
-  if (!REXCVAR_GET(banjo_renut_game_gamma))
+  if (!REXCVAR_GET(banjo_renut_game_gamma) || banjo::renut_gpu::GameGammaAbOff())  // rr6-nx: A/B 73
     return;
   std::array<uint16_t, 768> ramp;
   uint32_t version;

@@ -54,13 +54,16 @@ SHIPPED = {
     'banjo_shader_misses': '"sdmc:/switch/rr6-nx/shader_misses"',
     # The 36 car unlock keys stay out of the game (the user's decision): true shows them too. The music packs always show.
     'rr6_dlc_unlock_keys': 'false  # true: also load the 36 car unlock keys',
+    # 2026-11-03: the display's ramp, which the reference applies and Renut's present did not. Measured against the
+    # reference: menus from 3-12 levels off to 0.14-0.54. Ridge Racer 6 only ever has the default ramp.
+    'banjo_renut_game_gamma': 'true  # the ramp of the reference and the 360 display; false: brighter darks, A/B 73',
 }
 PLAY = {'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false',
         'banjo_renut_diag_terrain': 'false'}
 # The targets that act on Ridge Racer 6's draws (direct calls, no command-buffer recordings: the census in docs/rr6-notes.md): the
 # fast draw (25), pipelines by content (28), whole-buffer copies (22), the setters' touch compare (26), merged draws (33), mesh
 # objects (42); 70 the localized copies of the hot functions; 1 (a Vulkan-only key) is the do-nothing control on the Switch.
-AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,71,72,1"', 'banjo_renut_ab_s': '30',
+AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,71,72,73,1"', 'banjo_renut_ab_s': '30',
       'banjo_renut_dynamic_resolution': 'false'}
 VERIFY = {k: 'true' for k in (
     'banjo_renut_fast_draw_verify', 'banjo_renut_resource_objects_verify', 'banjo_renut_fetch_cache_verify',
@@ -116,6 +119,7 @@ def main():
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
     base = open(a.banjo, encoding='utf-8').read().replace('sdmc:/switch/banjo-nx/', 'sdmc:/switch/rr6-nx/')
+    base = re.sub(r'# The gamma ramp the game loads.*?(?=banjo_renut_game_gamma)', '', base, count=1, flags=re.S)
     shipped = apply(base, SHIPPED)
     os.makedirs(os.path.join(a.out, 'configs'), exist_ok=True)
     outs = {

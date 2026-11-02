@@ -359,6 +359,7 @@ void CountFetchAlignment(bool aligned);
 bool DepthHandOverReadOnlyOn();
 bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
 bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
+bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 73
 bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state
 bool DepthBiasOn();     // and its value this half (A/B 72: the off half draws with no bias)
 // banjo_deko3d_depth24 (2026-10-19, GPU): D24S8 depth targets as 24-bit unorm (render/format.cpp).

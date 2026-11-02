@@ -495,10 +495,7 @@ banjo_renut_portrait_fur_shells = 1
 # shadow-map vertex shaders, memory-bound on the console). Needs 36d's deko3d_shaders.bin; off uses
 # deko3d_shaders_f447.bin (in the package too).
 banjo_deko3d_uam_wide_rows = true
-# The gamma ramp the game loads (about x^1.17: darker midtones), which the Xbox 360's display and banjo-nx's
-# own renderer apply and Renut's renderer never has: on, the output looks as on a 360 (the deko3d builds'
-# picture changes). Off by default: your call (2026-10-20).
-banjo_renut_game_gamma = false
+banjo_renut_game_gamma = true  # the ramp of the reference and the 360 display; false: brighter darks, A/B 73
 # Package 34 (CPU, 2026-10-19): the render thread's cached vertex and index copies proven by the store cards (every guest
 # store outside the stack marks its 4 KB page; Renut hashes a copy only when one of its pages was written since it was
 # last proven) instead of hashed whole after every kick (gameplay: 16 MB a frame, a quarter of the render thread). The
