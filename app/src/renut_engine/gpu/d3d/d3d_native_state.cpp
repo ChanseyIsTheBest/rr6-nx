@@ -727,9 +727,33 @@ constexpr SamplerStateFn kSamplerStateFns[kSamplerStates] = {
     SsPointBorderEnable,    // 19
 };
 
-// N&B's state tables: {getter, setter, default} per state.
-constexpr u32 kRenderStateTable = 0x82AD8E48;  // katamari-nx: 0x82D8A948->0x82AD8E48
-constexpr u32 kSamplerStateTable = 0x82AD9308;  // katamari-nx: 0x82D8AE28->0x82AD9308
+// rr6-nx: this game's state tables, {getter, setter, default} per state: 97 render states at 0x823763E0 and 20 sampler states at
+// 0x82376870, found by Zuma's defaults (the same XDK; the only match of each). Its D3D_InitializeApiState copies them to the
+// device's dispatch tables, through which the game reaches every state function.
+constexpr u32 kRenderStateTable = 0x823763E0, kRr6RenderStates = 97;
+constexpr u32 kSamplerStateTable = 0x82376870, kRr6SamplerStates = 20;
+// rr6-nx: this XDK's tables have 97 records in another order (below), so N&B's 101 defaults, in the order of kRenderStateFns,
+// are kept here (zuma-nx's: from Bejeweled 3's tables, the same values). The 20 sampler states are in the same order.
+constexpr u32 kRenderStateDefaults[101] = {
+    0x00000000u, 0x00000003u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3F800000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000003u, 0x00000001u, 0x00000000u, 0x00000006u, 0x00000000u,
+    0x00000000u, 0xFFFFFFFFu, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000007u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000007u, 0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000007u,
+    0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x00000000u, 0x3F800000u, 0x3F800000u, 0x00000000u, 0x42800000u,
+    0x00000001u, 0xFFFFFFFFu, 0x00000000u, 0x00000000u, 0x00000000u, 0x0000000Fu, 0x0000000Fu, 0x0000000Fu,
+    0x0000000Fu, 0x00000001u, 0x3F800000u, 0x3F800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x0000FFFFu, 0x00000000u, 0x00000087u, 0x40000000u, 0x40000000u,
+    0x3F800000u, 0x3F800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000002u, 0x00000002u, 0x00000001u, 0x3F800000u, 0x00000001u,
+};
+constexpr u32 kSamplerStateDefaults[20] = {
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000002u, 0x00000000u,
+    0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x0000000Du, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u,
+};
 constexpr u32 kTextureSamplers = 26;
 
 u32 TableWord(u32 table, u32 index, u32 field) {
@@ -884,17 +908,19 @@ u32 GetSamplerState(Device d, u32 s, u32 state) {
 void InitializeStateTables(Device device) {
   if (!device)
     return;
-  for (u32 i = 0; i < kRenderStates; ++i) {
+  for (u32 i = 0; i < kRenderStates; ++i)
+    kRenderStateFns[i](device, kRenderStateDefaults[i]);
+  for (u32 i = 0; i < kRr6RenderStates; ++i) {
     device.SetW(off::SetRenderStateCall + i * 4, TableWord(kRenderStateTable, i, 1));
     device.SetW(off::GetRenderStateCall + i * 4, TableWord(kRenderStateTable, i, 0));
-    kRenderStateFns[i](device, TableWord(kRenderStateTable, i, 2));
+  }
+  for (u32 i = 0; i < kRr6SamplerStates; ++i) {
+    device.SetW(off::SetSamplerStateCall + i * 4, TableWord(kSamplerStateTable, i, 1));
+    device.SetW(off::GetSamplerStateCall + i * 4, TableWord(kSamplerStateTable, i, 0));
   }
   for (u32 sampler = 0; sampler < kTextureSamplers; ++sampler) {
-    for (u32 i = 0; i < kSamplerStates; ++i) {
-      device.SetW(off::SetSamplerStateCall + i * 4, TableWord(kSamplerStateTable, i, 1));
-      device.SetW(off::GetSamplerStateCall + i * 4, TableWord(kSamplerStateTable, i, 0));
-      kSamplerStateFns[i](device, sampler, TableWord(kSamplerStateTable, i, 2));
-    }
+    for (u32 i = 0; i < kSamplerStates; ++i)
+      kSamplerStateFns[i](device, sampler, kSamplerStateDefaults[i]);
     SetTexture(device, sampler, 0);
   }
 }
@@ -1363,7 +1389,7 @@ namespace {
 
 // Per D3DFORMAT (low 6 bits) its format description; 0xF00 marks a float
 // depth format (word_82005200).
-constexpr u32 kFormatTable = 0x820FA9D0;  // katamari-nx: 0x82005200->0x820FA9D0
+constexpr u32 kFormatTable = 0x8206C088;  // rr6-nx: Zuma's 128 bytes, word for word; CreateSurface `addi r9,r9,-16248`;  // katamari-nx: 0x82005200->0x820FA9D0
 // The register packets between RB_COPY_CONTROL and RB_COPY_DEST_INFO.
 constexpr u32 kCopyControl = 0x2A18;
 constexpr u32 kCopyDestInfo = 0x2A24;

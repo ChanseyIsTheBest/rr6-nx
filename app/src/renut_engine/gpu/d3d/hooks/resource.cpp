@@ -23,6 +23,7 @@
 #include <bit>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <rex/hook.h>
@@ -49,7 +50,7 @@ using namespace renut::gpu;
 // memory of resources N&B's code allocated itself.
 // katamari-nx: Beautiful Katamari's XMemFree is sub_824CAB98 (the hardware-device init frees with
 // `lis r4,0xB1800000; li r3,0; bl` to it where N&B's calls sub_822089F0).
-REX_IMPORT(__imp__sub_824CAB98, GameXMemFree, void(u32, u32));
+REX_IMPORT(__imp__sub_8224DBB0, GameXMemFree, void(u32, u32));
 // The kernel's physical memory, as XPhysicalAlloc / XPhysicalFree use it.
 REX_IMPORT(__imp__MmAllocatePhysicalMemoryEx, MmAllocatePhysicalMemoryEx,
            u32(u32, u32, u32, u32, u32, u32));
@@ -96,7 +97,7 @@ void FreeHeader(u32 va) {
 // Resource data: XMemAlloc's physical path for its attributes (0x822346A8:
 // the alignment from bits 24-27, the protection from bits 28-29), then
 // XPhysicalAlloc (0x826F1FB8), which asks the kernel. 0 on failure.
-constexpr u32 kGameNoLargePagesVa = 0x8315DFE0;  // XPhysicalAlloc drops MEM_LARGE_PAGES while set (katamari-nx: 0x82DA3778->0x8315DFE0)
+constexpr u32 kGameNoLargePagesVa = 0;  // rr6-nx: none in XDK 2135 (zuma-nx);  // XPhysicalAlloc drops MEM_LARGE_PAGES while set (katamari-nx: 0x82DA3778->0x8315DFE0)
 
 u32 AllocPhysical(u32 size, u32 attributes) {
   static constexpr u32 kAlignment[16] = {4,    4,    4,     8,     16,    32,     64,     128,
@@ -105,7 +106,7 @@ u32 AllocPhysical(u32 size, u32 attributes) {
   if (!size)
     return 0;
   u32 protect = kProtect[(attributes >> 28) & 3];
-  if (const auto *no_large_pages = GuestPtr<const be_u32>(kGameNoLargePagesVa); u32(*no_large_pages))
+  if (const auto *no_large_pages = kGameNoLargePagesVa ? GuestPtr<const be_u32>(kGameNoLargePagesVa) : nullptr; no_large_pages && u32(*no_large_pages))
     protect &= ~0x20000000u;
   const u32 va = MmAllocatePhysicalMemoryEx(0, size, protect, 0, ~0u, kAlignment[(attributes >> 24) & 0xF]);
   if (!va)
@@ -121,7 +122,7 @@ void FreePhysical(u32 va) {
 
 // The GPU format table (word_82005200): per D3D format low 6 bits, bits per
 // pixel in the low byte, flags in the high one.
-constexpr u32 kFormatTable = 0x820FA9D0;  // katamari-nx: 0x82005200->0x820FA9D0
+constexpr u32 kFormatTable = 0x8206C088;  // rr6-nx: Zuma's 128 bytes, word for word;  // katamari-nx: 0x82005200->0x820FA9D0
 
 u16 FormatTableEntry(u32 format) {
   const auto *table = GuestPtr<const be_u16>(kFormatTable);
@@ -133,7 +134,7 @@ u32 FormatBitsPerPixel(u32 format) {
 }
 
 // The word at 0x82E108A0: set while a depth surface owns the HiZ memory.
-constexpr u32 kHiZOwnerVa = 0x8315E830;  // katamari-nx: 0x82E108A0->0x8315E830
+constexpr u32 kHiZOwnerVa = 0;  // rr6-nx: the game's surfaces carry their own HiZ word; Renut's automatic one takes HiZ base 0;  // katamari-nx: 0x82E108A0->0x8315E830
 
 u32 LoadU32(u32 va) {
   const auto *p = GuestPtr<const be_u32>(va);
@@ -1324,6 +1325,212 @@ u32 D3DDevice_CreateIndexBuffer_hook(u32 length, u32 usage, u32 format) {
   return header;
 }
 
+// ---------------------------------------------------------------------------
+// rr6-nx (2026-11-02): XDK 2.0.2135's own objects (zuma-nx's design, extended to surfaces, volumes and index buffers)
+// ---------------------------------------------------------------------------
+// This game's textures and surfaces stay XDK 2135 objects: the game's D3DX code and its loaders read their headers, which are
+// not N&B's. A resource head of 12 bytes: Common (reference count in the low byte, type in bits 16-18, the bind count in
+// bits 19-23), the fence at +4, the flush range at +8; a texture's fetch constant at +16..+40 (40 bytes); a surface
+// is 64 bytes: the same six words, its texture at +44, then SurfaceInfo +48, Color / DepthInfo +52, HiControl +56.
+// The game's own CreateTexture, GetSurfaceLevel, GetDesc, GetLevelDesc, AddRef, Release and GetType run on them (pure header
+// work and XMemAlloc / XMemFree). What touches the device goes to Renut through a SHADOW per object (N&B's layout, the key of
+// Renut's texture and surface caches): SetTexture, the locks, SetRenderTarget, SetDepthStencilSurface, Resolve. Renut's own
+// objects (vertex and index buffers, declarations, shaders, the automatic surfaces: OwnsHeader or a record) keep Renut's
+// AddRef and Release.
+REX_IMPORT(__imp__sub_82254608, Rr6GuestAddRef, u32(u32));
+REX_IMPORT(__imp__sub_82254B88, Rr6GuestRelease, u32(u32));
+REX_IMPORT(__imp__sub_82254670, Rr6GuestGetType, u32(u32));
+REX_IMPORT(__imp__sub_82254720, Rr6GuestDestroy, void(u32));
+REX_IMPORT(__imp__sub_82252CB8, Rr6GuestCreateSurface, u32(u32, u32, u32, u32, u32));
+REX_IMPORT(__imp__sub_82252FC0, Rr6GuestSurfaceGetDesc, void(u32, u32));
+
+std::mutex g_rr6_shadow_mutex;
+std::unordered_map<u32, u32> g_rr6_texture_shadows;  // the game's texture -> its shadow header (kept per address)
+std::unordered_map<u32, u32> g_rr6_surface_shadows;  // the game's surface -> Renut's surface record
+std::unordered_map<u32, u32> g_rr6_surface_guests;   // Renut's surface record -> the game's surface
+
+bool Rr6IsRenutObject(u32 resource) {
+  RecordKind kind;
+  return OwnsHeader(resource) || records::Lookup(resource, &kind);
+}
+
+// XDK 2135's GetType numbers (surface 1, volume 2, texture 3, volume texture 4, cube 5, vertex buffer 6, index buffer 7).
+u32 Rr6TypeFromRenut(u32 type) {
+  switch (type) {
+    case 1: return 6;
+    case 2: return 7;
+    case 3: case 19: case 20: return 3;
+    case 4: return 1;
+    case 16: return 2;
+    case 17: return 4;
+    case 18: return 5;
+    default: return 0;
+  }
+}
+
+// The shadow of a game texture, its fetch constant copied again at every use (the game's header may be set up again in
+// place). A shadow is kept for the address once made: a texture made again there reuses it.
+u32 Rr6ShadowTexture(u32 texture) {
+  const auto *g = GuestPtr<const be_u32>(texture);
+  if (!g)
+    return 0;
+  std::lock_guard lock(g_rr6_shadow_mutex);
+  u32 &shadow = g_rr6_texture_shadows[texture];
+  if (!shadow) {
+    shadow = AllocHeader(0x34);
+    if (!shadow)
+      return 0;
+    auto *t = GuestPtr<be_u32>(shadow);
+    t[0] = 0x100003u;    // Common: a texture (as SetTextureHeader writes it)
+    t[1] = 1u;           // ReferenceCount
+    t[5] = 0xFFFF0000u;  // BaseFlush
+    t[6] = 0xFFFF0000u;  // MipFlush
+  }
+  auto *t = GuestPtr<be_u32>(shadow);
+  for (u32 i = 0; i < 6; ++i)
+    t[7 + i] = u32(g[4 + i]);  // the fetch constant: XDK 2135's +16 to N&B's +0x1C
+  return shadow;
+}
+
+// A game surface's Renut record: made at the game's CreateSurface (the format is only an argument there); a surface the
+// game built some other way, from its header.
+u32 Rr6MakeSurfaceShadow(u32 surface, u32 width, u32 height, u32 format, u32 multisample) {
+  auto *record = CreateRecord<SurfaceRecord>(RecordKind::Surface);
+  if (!record)
+    return 0;
+  auto *s = reinterpret_cast<be_u32 *>(&record->x360);
+  u32 tiles = 0, hiz_size = 0;
+  SetSurfaceHeader(width, height, format, multisample, 0, s, tiles, hiz_size);
+  s[0] = u32(s[0]) | kCommonD3DCreated;
+  // Its EDRAM is the game's: the base its allocator (sub_8225C000) gave and the HiZ word.
+  const u32 info = LoadU32(surface + 52);
+  s[7] = native::Insert(s[7], info & 0xFFF, 0, 12);
+  s[8] = LoadU32(surface + 56);
+  std::lock_guard lock(g_rr6_shadow_mutex);
+  g_rr6_surface_shadows[surface] = record->self_va;
+  g_rr6_surface_guests[record->self_va] = surface;
+  return record->self_va;
+}
+
+u32 Rr6ShadowSurface(u32 surface) {
+  if (!surface || Rr6IsRenutObject(surface))
+    return surface;
+  {
+    std::lock_guard lock(g_rr6_shadow_mutex);
+    auto it = g_rr6_surface_shadows.find(surface);
+    if (it != g_rr6_surface_shadows.end())
+      return it->second;
+  }
+  // Not from CreateSurface: its size and format from the fetch words, as the game's GetDesc reads them.
+  const u32 size = LoadU32(surface + 24);
+  const u32 dword0 = LoadU32(surface + 16), dword1 = LoadU32(surface + 20), dword3 = LoadU32(surface + 28);
+  u32 swizzle = (((dword3 >> 10) & 7) << 3) | ((dword3 >> 7) & 7);
+  swizzle = (swizzle << 3) | ((dword3 >> 4) & 7);
+  swizzle = (swizzle << 3) | ((dword3 >> 1) & 7);
+  u32 f = (swizzle << 1) | (dword3 & 1);
+  f = (f << 2) | ((dword0 >> 8) & 3);
+  f = (f << 2) | ((dword0 >> 6) & 3);
+  f = (f << 2) | ((dword0 >> 4) & 3);
+  f = (f << 2) | ((dword0 >> 2) & 3);
+  f = (f << 1) | (dword0 >> 31);
+  f = (f << 2) | ((dword1 >> 6) & 3);
+  f = (f << 6) | (dword1 & 0x3F);
+  RGPU_INFO("[rr6] surface {:08X} not from CreateSurface: {}x{} format {:08X}", surface, (size & 0x1FFF) + 1,
+            ((size >> 13) & 0x1FFF) + 1, f);
+  return Rr6MakeSurfaceShadow(surface, (size & 0x1FFF) + 1, ((size >> 13) & 0x1FFF) + 1, f,
+                              (LoadU32(surface + 48) >> 16) & 3);
+}
+
+// A game object destroyed: what Renut holds for it goes after the work queued before it.
+void Rr6DropShadow(u32 resource) {
+  u32 shadow = 0, record = 0;
+  {
+    std::lock_guard lock(g_rr6_shadow_mutex);
+    auto it = g_rr6_texture_shadows.find(resource);
+    if (it != g_rr6_texture_shadows.end())
+      shadow = it->second;
+    auto its = g_rr6_surface_shadows.find(resource);
+    if (its != g_rr6_surface_shadows.end()) {
+      record = its->second;
+      g_rr6_surface_guests.erase(record);
+      g_rr6_surface_shadows.erase(its);
+    }
+  }
+  if (shadow)
+    render_thread::Queue([shadow] { ReleaseHostTextureLocked(shadow); });
+  if (record)
+    D3DResource_Destroy_hook(record);
+}
+
+// D3DSurface *D3DDevice_CreateSurface(Width, Height, D3DFORMAT, D3DMULTISAMPLE_TYPE, const D3DSURFACE_PARAMETERS*)
+u32 Rr6CreateSurface(u32 width, u32 height, u32 format, u32 multisample, u32 parameters) {
+  const u32 surface = Rr6GuestCreateSurface(width, height, format, multisample, parameters);
+  if (surface)
+    Rr6MakeSurfaceShadow(surface, width, height, format, multisample);
+  return surface;
+}
+
+u32 Rr6AddRef(u32 resource) {
+  return Rr6IsRenutObject(resource) ? AddRef(resource) : Rr6GuestAddRef(resource);
+}
+u32 Rr6Release(u32 resource) {
+  if (Rr6IsRenutObject(resource))
+    return Release(resource);
+  // The game's object: bound objects stay alive by the bind count (Common bits 19-23).
+  const u32 count = Rr6GuestRelease(resource);
+  if (!count && !(LoadU32(resource) & 0x00F80000u))
+    Rr6DropShadow(resource);
+  return count;
+}
+u32 Rr6GetType(u32 resource) {
+  return Rr6IsRenutObject(resource) ? Rr6TypeFromRenut(ResourceType(resource)) : Rr6GuestGetType(resource);
+}
+void Rr6SurfaceGetDesc(u32 surface, u32 desc) {
+  if (Rr6IsRenutObject(surface))
+    D3DSurface_GetDesc_hook(surface, mapped_u32(desc));
+  else
+    Rr6GuestSurfaceGetDesc(surface, desc);
+}
+
+// D3DDevice_CreateIndexBuffer(Length, Usage, Format): this XDK's Format is 0 for 16-bit and 1 for 32-bit indices (sub_82254DA0:
+// `cmpwi cr6,r28,1; oris r10,r30,0x8000`; the game's two calls pass 0), N&B's D3DFMT_INDEX16 1 and INDEX32 6.
+u32 Rr6CreateIndexBuffer(u32 length, u32 usage, u32 format) {
+  return D3DDevice_CreateIndexBuffer_hook(length, usage, format == 1 ? 6 : 1);
+}
+
+// The buffers' locks return base + offset in this XDK (Feeding Frenzy's and Zuma's adapter).
+u32 Rr6VertexBufferLock(u32 buffer, u32 offset, u32 size, u32 flags) {
+  const u32 base = D3DVertexBuffer_Lock_hook(buffer, offset, size, flags);
+  return base ? base + offset : 0;
+}
+u32 Rr6IndexBufferLock(u32 buffer, u32 offset, u32 size, u32 flags) {
+  const u32 base = D3DIndexBuffer_Lock_hook(buffer, offset, size, flags);
+  return base ? base + offset : 0;
+}
+
+// Lock2DSurface (texture, face, level, locked, rect, flags): the target of the texture's and the cube's LockRect thunks.
+void Rr6TextureLockRect(u32 texture, u32 face, u32 level, mapped_u32 locked_rect, mapped_u32 rect, u32 flags) {
+  D3D_Lock2DSurface_hook(Rr6ShadowTexture(texture), face, level, locked_rect, rect, flags);
+}
+void Rr6TextureUnlockRect(u32 texture) {
+  if (const u32 shadow = Rr6ShadowTexture(texture))
+    D3DArrayTexture_UnlockRect_hook(shadow);
+}
+// D3DSurface_LockRect (surface, locked, rect, flags): a texture level's surface, its texture at +44, face
+// ((+24 >> 26) & 63) and level ((+32 >> 2) & 15), as the game's sub_82253018 passes them on.
+void Rr6SurfaceLockRect(u32 surface, mapped_u32 locked_rect, mapped_u32 rect, u32 flags) {
+  const u32 texture = LoadU32(surface + 44);
+  D3D_Lock2DSurface_hook(Rr6ShadowTexture(texture), (LoadU32(surface + 24) >> 26) & 63, (LoadU32(surface + 32) >> 2) & 15,
+                         locked_rect, rect, flags);
+}
+void Rr6SurfaceUnlockRect(u32 surface) {
+  if (const u32 shadow = Rr6ShadowTexture(LoadU32(surface + 44)))
+    D3DArrayTexture_UnlockRect_hook(shadow);
+}
+void Rr6VolumeLockBox(u32 volume, mapped_u32 locked_box, mapped_u32 box, u32 flags) {
+  D3D_Lock3DSurface_hook(Rr6ShadowTexture(LoadU32(volume + 44)), (LoadU32(volume + 32) >> 2) & 15, locked_box, box, flags);
+}
+
 // _GetMaxMipLevels (0x8263DC20): the levels down to 1x1x1 of the largest
 // dimension, without the border.
 u32 GetMaxMipLevels(u32 width, u32 height, u32 depth, u32 border) {
@@ -1707,50 +1914,97 @@ u32 AddRefResource(u32 resource) {
   return AddRef(resource);
 }
 
+u32 CreateFrontBufferTexture(u32 width, u32 height, u32 format) {
+  return D3DDevice_CreateTexture_hook(width, height, 1, 1, 0, format, 0, 3);
+}
+
+// rr6-nx: XDK 2135's objects, for hooks/state.cpp and hooks/draw.cpp (the section above).
+u32 Rr6TextureShadow(u32 texture) {
+  if (!texture || Rr6IsRenutObject(texture))
+    return texture;
+  return Rr6ShadowTexture(texture);
+}
+u32 Rr6SurfaceShadow(u32 surface) {
+  return Rr6ShadowSurface(surface);
+}
+u32 Rr6SurfaceGuest(u32 shadow) {
+  std::lock_guard lock(g_rr6_shadow_mutex);
+  auto it = g_rr6_surface_guests.find(shadow);
+  return it != g_rr6_surface_guests.end() ? it->second : shadow;
+}
+// XDK 2135's Set* count a binding in the object's Common (`add r11,r11,0x80000`); the last unbinding of an object with no
+// references destroys it. Renut's own objects: a reference.
+void Rr6Bind(u32 resource) {
+  if (!resource)
+    return;
+  if (Rr6IsRenutObject(resource))
+    AddRef(resource);
+  else
+    AtomicAddGuest(resource, 0x80000);
+}
+void Rr6Unbind(u32 resource) {
+  if (!resource)
+    return;
+  if (Rr6IsRenutObject(resource)) {
+    Release(resource);
+    return;
+  }
+  const u32 now = AtomicAddGuest(resource, 0u - 0x80000u) - 0x80000u;
+  if (!(now & 0x00F800FFu)) {
+    Rr6GuestDestroy(resource);
+    Rr6DropShadow(resource);
+  }
+}
+u32 Rr6AddRefAny(u32 resource) {
+  return Rr6AddRef(resource);
+}
+
 } // namespace renut::gpu::native
 
-BANJO_RENUT_HOOK(sub_824D23F8, D3DDevice_CreateSurface_hook);  // D3DDevice_CreateSurface  // katamari-nx: N&B sub_8263EB88, D3DDevice_CreateSurface: InitializePresentationParameters calls it twice for the auto surfaces, as N&B's; sig 0.61/0.41
-BANJO_RENUT_HOOK(sub_824DB028, D3DResource_Destroy_hook);  // D3DResource_Destroy  // katamari-nx: N&B sub_821D7A00, D3DResource_Destroy: HiZ owner 0x8315E830 (N&B 0x82E108A0), VdGlobalDevice record 0x82000750; sig 0.59/0.33
-BANJO_RENUT_HOOK(sub_824DB448, D3D_UnlockResource_hook);  // D3D_UnlockResource  // katamari-nx: N&B sub_8263D360, D3D_UnlockResource: sig 0.61/0.26
-BANJO_RENUT_HOOK(sub_824DB7B0, D3DVertexBuffer_Unlock_hook);  // D3DVertexBuffer_Unlock  // katamari-nx: N&B sub_8263D638, signature 1.00 (next 0.72)
-BANJO_RENUT_HOOK(sub_824D0700, D3DSurface_UnlockRect_hook);  // D3DSurface_UnlockRect  // katamari-nx: N&B sub_8263ED78, signature 1.00 (next 0.81)
-BANJO_RENUT_HOOK(sub_824DB210, LockResource_hook);  // D3D_LockResource  // katamari-nx: N&B sub_8263D060, D3D_LockResource: VdGlobalDevice record 0x82000750 twice (N&B 0x820007F8); sig 0.65/0.30
-BANJO_RENUT_HOOK(sub_824DB760, D3DVertexBuffer_Lock_hook);  // D3DVertexBuffer_Lock  // katamari-nx: N&B sub_8263D5E8, signature 0.94 (next 0.60)
-BANJO_RENUT_HOOK(sub_824DB870, D3DIndexBuffer_Lock_hook);  // D3DIndexBuffer_Lock  // katamari-nx: N&B sub_8263D6F8, signature 0.89 (next 0.64)
-BANJO_RENUT_HOOK(sub_824D1918, D3D_LockSurface_hook);  // D3D_LockSurface  // katamari-nx: N&B sub_8263E420, signature 0.92 (next 0.32)
-BANJO_RENUT_HOOK(sub_824D19E0, D3D_Lock2DSurface_hook);  // D3D_Lock2DSurface  // katamari-nx: N&B sub_8263E4E0, signature 0.89 (next 0.73)
-BANJO_RENUT_HOOK(sub_824D1A70, D3D_Lock3DSurface_hook);  // D3D_Lock3DSurface  // katamari-nx: N&B sub_8263E570, signature 0.91 (next 0.73)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263E958, D3DArrayTexture_LockRect_hook);  // D3DArrayTexture_LockRect  // katamari-nx: not hooked (D3DArrayTexture_LockRect: a one-instruction thunk, not identifiable by signature)
-BANJO_RENUT_HOOK(sub_824D2148, D3DLineTexture_LockRect_hook);  // D3DLineTexture_LockRect  // katamari-nx: N&B sub_8263EA50, signature 1.00 (next 0.67)
-BANJO_RENUT_HOOK(sub_824D25B8, D3DSurface_LockRect_hook);  // D3DSurface_LockRect  // katamari-nx: N&B sub_8263ECF0, signature 1.00 (next 0.86)
-BANJO_RENUT_HOOK(sub_824D2620, D3DVolume_LockBox_hook);  // D3DVolume_LockBox  // katamari-nx: N&B sub_8263ED58, signature 1.00 (next 0.86)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263EA48, D3D_Lock3DSurface_hook);  // D3D_Lock3DSurface_Thunk  // katamari-nx: not hooked (D3D_Lock3DSurface_Thunk: as above)
-BANJO_RENUT_HOOK(sub_824DB550, D3DResource_AddRef_hook);  // D3DResource_AddRef  // katamari-nx: N&B sub_821D7DB0, signature 1.00 (next 0.78)
-BANJO_RENUT_HOOK(sub_824DB5C8, D3DResource_Release_hook);  // D3DResource_Release  // katamari-nx: N&B sub_821D7C20, signature 1.00 (next 0.78)
-BANJO_RENUT_HOOK(sub_824DAF98, D3DResource_GetType_hook);  // D3DResource_GetType  // katamari-nx: N&B sub_821D7630, signature 1.00 (next 0.25)
-BANJO_RENUT_HOOK(sub_824D2520, D3DSurface_GetDesc_hook);  // D3DSurface_GetDesc  // katamari-nx: N&B sub_821D77C0, signature 1.00 (next 0.43)
-BANJO_RENUT_HOOK(sub_824D25D8, D3DVolume_GetDesc_hook);  // D3DVolume_GetDesc  // katamari-nx: N&B sub_8263ED10, signature 1.00 (next 0.67)
-BANJO_RENUT_HOOK(sub_824D1258, Get2DSurfaceDesc);  // D3D_Get2DSurfaceDesc  // katamari-nx: N&B sub_821D76C0, D3D_Get2DSurfaceDesc: sig 1.00 (the 3D form takes sub_824D1358 at 1.00)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263E970, Get2DSurfaceDesc);  // D3D_Get2DSurfaceDesc_Thunk  // katamari-nx: not hooked (D3D_Get2DSurfaceDesc_Thunk: as above)
-BANJO_RENUT_HOOK(sub_824D1358, Get3DSurfaceDesc);  // D3D_Get3DSurfaceDesc  // katamari-nx: N&B sub_8263DEA0, D3D_Get3DSurfaceDesc: sig 1.00
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263E978, Get3DSurfaceDesc);  // D3D_Get3DSurfaceDesc_Thunk  // katamari-nx: not hooked (D3D_Get3DSurfaceDesc_Thunk: as above)
-BANJO_RENUT_HOOK(sub_824D0E90, LevelLayout_hook);  // D3D_GetLevelLayout  // katamari-nx: N&B sub_821D7260, signature 0.80 (next 0.43)
-BANJO_RENUT_HOOK(sub_824D1458, SubresourceLayout_hook);  // D3D_GetSubresourceLayout  // katamari-nx: N&B sub_8263DFA0, signature 0.88 (next 0.43)
-BANJO_RENUT_HOOK(sub_824D2080, D3DBaseTexture_GetLevelCount_hook);  // D3DBaseTexture_GetLevelCount  // katamari-nx: N&B sub_821BF500, signature 1.00 (next 0.46)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263E960, D3DArrayTexture_GetArraySize_hook);  // D3DArrayTexture_GetArraySize  // katamari-nx: not hooked (D3DArrayTexture_GetArraySize: no counterpart (sig 0.33))
-BANJO_RENUT_HOOK(sub_824D06E8, D3DArrayTexture_UnlockRect_hook);  // D3DArrayTexture_UnlockRect  // katamari-nx: N&B sub_8263E888, signature 1.00 (next 0.81)
-BANJO_RENUT_HOOK(sub_824DB8B8, D3DConstantBuffer_Unlock_hook);  // D3DConstantBuffer_Unlock  // katamari-nx: N&B sub_82237D70, signature 1.00 (next 0.72)
-BANJO_RENUT_HOOK(sub_824D2090, D3DTexture_GetSurfaceLevel_hook);  // D3DTexture_GetSurfaceLevel  // katamari-nx: N&B sub_821D7E28, D3DTexture_GetSurfaceLevel: (texture, level, out), frame 176; the three getters read in the image
-BANJO_RENUT_HOOK(sub_824D2160, D3DCubeTexture_GetCubeMapSurface_hook);  // D3DCubeTexture_GetCubeMapSurface  // katamari-nx: N&B sub_8263E8A0, D3DCubeTexture_GetCubeMapSurface: keeps a third argument (mr r28,r5: the face), frame 192
-BANJO_RENUT_HOOK(sub_824D2228, D3DVolumeTexture_GetVolumeLevel_hook);  // D3DVolumeTexture_GetVolumeLevel  // katamari-nx: N&B sub_8263E980, D3DVolumeTexture_GetVolumeLevel: sig 0.75/0.65, the third of the three
-BANJO_RENUT_HOOK(sub_824DB698, D3DDevice_CreateVertexBuffer_hook);  // D3DDevice_CreateVertexBuffer  // katamari-nx: N&B sub_8263D520, signature 0.89 (next 0.64)
-BANJO_RENUT_HOOK(sub_824DB7C0, D3DDevice_CreateIndexBuffer_hook);  // D3DDevice_CreateIndexBuffer  // katamari-nx: N&B sub_8263D648, signature 0.88 (next 0.64)
-BANJO_RENUT_HOOK(sub_824D22D8, D3DDevice_CreateTexture_hook);  // D3DDevice_CreateTexture  // katamari-nx: N&B sub_8263EA68, signature 0.89 (next 0.38)
-BANJO_RENUT_HOOK(sub_824D1B18, SetTextureHeader_hook);  // D3D_SetTextureHeader  // katamari-nx: N&B sub_8225C878, signature 0.91 (next 0.25)
-BANJO_RENUT_HOOK(sub_824D09C8, FindTextureSize_hook);  // D3D_FindTextureSize  // katamari-nx: N&B sub_82255DC0, signature 0.98 (next 0.45)
-BANJO_RENUT_HOOK(sub_824D0820, GetMaxMipLevels_hook);  // D3D_GetMaxMipLevels  // katamari-nx: N&B sub_8263DC20, signature 1.00 (next 0.21)
-BANJO_RENUT_HOOK(sub_824D0650, GetTextureDimensions_hook);  // D3D_GetTextureDimensions  // katamari-nx: N&B sub_821D7010, signature 1.00 (next 0.23)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263DCA8, GetGpuTextureDimensions_hook);  // D3D_GetGpuTextureDimensions  // katamari-nx: not hooked (D3D_GetGpuTextureDimensions: its best match sub_824D0650 is GetTextureDimensions' (1.00))
-BANJO_RENUT_HOOK(sub_824D0788, BlockSizeOfGpuFormat_hook);  // D3D_BlockSizeOfGpuFormat  // katamari-nx: N&B sub_821D70A8, signature 1.00 (next 0.26)
-BANJO_RENUT_HOOK(sub_824D08A8, AlignTextureDimensions_hook);  // D3D_AlignTextureDimensions  // katamari-nx: N&B sub_821D7140, signature 1.00 (next 0.29)
-BANJO_RENUT_HOOK(sub_824D0D38, GetMipTailLevelOffsetCoords_hook);  // D3D_GetMipTailLevelOffsetCoords  // katamari-nx: N&B sub_8263DD48, signature 0.95 (next 0.28)
+BANJO_RENUT_HOOK(sub_82252CB8, Rr6CreateSurface);  // D3DDevice_CreateSurface  // rr6-nx: 64-byte header, 0x01040001; 6 sites; the game's object and a Renut record; Katamari 824D23F8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DB028, D3DResource_Destroy_hook);  // D3DResource_Destroy  // rr6-nx: not hooked in this XDK; Katamari 824DB028
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DB448, D3D_UnlockResource_hook);  // D3D_UnlockResource  // rr6-nx: not hooked in this XDK; Katamari 824DB448
+BANJO_RENUT_HOOK(sub_82254D90, D3DVertexBuffer_Unlock_hook);  // D3DVertexBuffer_Unlock  // rr6-nx: 4 instructions, reads +12; 11 sites, one for each Lock; Katamari 824DB7B0
+BANJO_RENUT_HOOK(sub_822510A8, Rr6SurfaceUnlockRect);  // D3DSurface_UnlockRect  // rr6-nx: Zuma pair of sub_82128958; Katamari 824D0700
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DB210, LockResource_hook);  // D3D_LockResource  // rr6-nx: not hooked in this XDK; Katamari 824DB210
+BANJO_RENUT_HOOK(sub_82254D20, Rr6VertexBufferLock);  // D3DVertexBuffer_Lock  // rr6-nx: returns base + offset (Zuma's adapter); 11 sites; Katamari 824DB760
+BANJO_RENUT_HOOK(sub_82254E50, Rr6IndexBufferLock);  // D3DIndexBuffer_Lock  // rr6-nx: returns base + offset; 2 sites; Katamari 824DB870
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1918, D3D_LockSurface_hook);  // D3D_LockSurface  // rr6-nx: not hooked in this XDK; Katamari 824D1918
+BANJO_RENUT_HOOK(sub_82252498, Rr6TextureLockRect);  // D3D_Lock2DSurface  // rr6-nx: the target of the thunks sub_82252A18 (level) and sub_82252AD8 (face, level); Katamari 824D19E0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1A70, D3D_Lock3DSurface_hook);  // D3D_Lock3DSurface  // rr6-nx: not hooked in this XDK; Katamari 824D1A70
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263E958, D3DArrayTexture_LockRect_hook);  // D3DArrayTexture_LockRect  // rr6-nx: not hooked in this XDK; Katamari 8263E958
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D2148, D3DLineTexture_LockRect_hook);  // D3DLineTexture_LockRect  // rr6-nx: not hooked in this XDK; Katamari 824D2148
+BANJO_RENUT_HOOK(sub_82253018, Rr6SurfaceLockRect);  // D3DSurface_LockRect  // rr6-nx: Zuma pair of sub_8212A870; on the texture's shadow; Katamari 824D25B8
+BANJO_RENUT_HOOK(sub_82253088, Rr6VolumeLockBox);  // D3DVolume_LockBox  // rr6-nx: Katamari pair; (volume, locked, box, flags); Katamari 824D2620
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263EA48, D3D_Lock3DSurface_hook);  // D3D_Lock3DSurface_Thunk  // rr6-nx: not hooked in this XDK; Katamari 8263EA48
+BANJO_RENUT_HOOK(sub_82254608, Rr6AddRef);  // D3DResource_AddRef  // rr6-nx: Zuma pair of sub_82122300; 2 sites; Katamari 824DB550
+BANJO_RENUT_HOOK(sub_82254B88, Rr6Release);  // D3DResource_Release  // rr6-nx: Zuma pair of sub_82122880; 57 sites; Katamari 824DB5C8
+BANJO_RENUT_HOOK(sub_82254670, Rr6GetType);  // D3DResource_GetType  // rr6-nx: Zuma pair of sub_82122368; 8 sites; Katamari 824DAF98
+BANJO_RENUT_HOOK(sub_82252FC0, Rr6SurfaceGetDesc);  // D3DSurface_GetDesc  // rr6-nx: Katamari pair; the game's surfaces by the game's code, the automatic ones by Renut's; Katamari 824D2520
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D25D8, D3DVolume_GetDesc_hook);  // D3DVolume_GetDesc  // rr6-nx: the game's own code (sub_82253040, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1258, Get2DSurfaceDesc);  // D3D_Get2DSurfaceDesc  // rr6-nx: the game's own code (sub_82251DC8, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263E970, Get2DSurfaceDesc);  // D3D_Get2DSurfaceDesc_Thunk  // rr6-nx: not hooked in this XDK; Katamari 8263E970
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1358, Get3DSurfaceDesc);  // D3D_Get3DSurfaceDesc  // rr6-nx: the game's own code (sub_82251E70, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263E978, Get3DSurfaceDesc);  // D3D_Get3DSurfaceDesc_Thunk  // rr6-nx: not hooked in this XDK; Katamari 8263E978
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0E90, LevelLayout_hook);  // D3D_GetLevelLayout  // rr6-nx: not hooked in this XDK; Katamari 824D0E90
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1458, SubresourceLayout_hook);  // D3D_GetSubresourceLayout  // rr6-nx: not hooked in this XDK; Katamari 824D1458
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D2080, D3DBaseTexture_GetLevelCount_hook);  // D3DBaseTexture_GetLevelCount  // rr6-nx: the game's own code (sub_822528A0, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263E960, D3DArrayTexture_GetArraySize_hook);  // D3DArrayTexture_GetArraySize  // rr6-nx: not hooked in this XDK; Katamari 8263E960
+BANJO_RENUT_HOOK(sub_82251090, Rr6TextureUnlockRect);  // D3DArrayTexture_UnlockRect  // rr6-nx: Zuma pair of sub_82128940; (texture, level); Katamari 824D06E8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DB8B8, D3DConstantBuffer_Unlock_hook);  // D3DConstantBuffer_Unlock  // rr6-nx: not hooked in this XDK; Katamari 824DB8B8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D2090, D3DTexture_GetSurfaceLevel_hook);  // D3DTexture_GetSurfaceLevel  // rr6-nx: the game's own code (sub_82252970, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D2160, D3DCubeTexture_GetCubeMapSurface_hook);  // D3DCubeTexture_GetCubeMapSurface  // rr6-nx: the game's own code (sub_82252A30, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D2228, D3DVolumeTexture_GetVolumeLevel_hook);  // D3DVolumeTexture_GetVolumeLevel  // rr6-nx: the game's own code (sub_82252AF0, XDK 2135's headers)
+BANJO_RENUT_HOOK(sub_82254C70, D3DDevice_CreateVertexBuffer_hook);  // D3DDevice_CreateVertexBuffer  // rr6-nx: Zuma pair of sub_82122968; 11 sites; Katamari 824DB698
+BANJO_RENUT_HOOK(sub_82254DA0, Rr6CreateIndexBuffer);  // D3DDevice_CreateIndexBuffer  // rr6-nx: 20-byte header, 0x41020001 / 0x01020001; 2 sites; Format 0 16-bit, 1 32-bit; Katamari 824DB7C0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D22D8, D3DDevice_CreateTexture_hook);  // D3DDevice_CreateTexture  // rr6-nx: the game's own code (sub_82252B98, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D1B18, SetTextureHeader_hook);  // D3D_SetTextureHeader  // rr6-nx: the game's own code (sub_822525D0, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D09C8, FindTextureSize_hook);  // D3D_FindTextureSize  // rr6-nx: not hooked in this XDK; Katamari 824D09C8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0820, GetMaxMipLevels_hook);  // D3D_GetMaxMipLevels  // rr6-nx: not hooked in this XDK; Katamari 824D0820
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0650, GetTextureDimensions_hook);  // D3D_GetTextureDimensions  // rr6-nx: the game's own code (sub_82250FF8, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263DCA8, GetGpuTextureDimensions_hook);  // D3D_GetGpuTextureDimensions  // rr6-nx: not hooked in this XDK; Katamari 8263DCA8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0788, BlockSizeOfGpuFormat_hook);  // D3D_BlockSizeOfGpuFormat  // rr6-nx: the game's own code (sub_822510C0, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D08A8, AlignTextureDimensions_hook);  // D3D_AlignTextureDimensions  // rr6-nx: the game's own code (sub_82251268, XDK 2135's headers)
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0D38, GetMipTailLevelOffsetCoords_hook);  // D3D_GetMipTailLevelOffsetCoords  // rr6-nx: the game's own code (sub_822518B0, XDK 2135's headers)
+BANJO_RENUT_HOOK(sub_8224E758, Rr6Release);  // rr6-nx: a shader's own Release (the count at +4, data at +12): Renut's objects
+BANJO_RENUT_HOOK(sub_8224ED60, Rr6Release);  // rr6-nx: a declaration's own Release (the count at +4): Renut's objects

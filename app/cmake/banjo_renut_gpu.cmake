@@ -144,7 +144,7 @@ target_link_libraries(renut PRIVATE banjo_renut_gpu)
 target_compile_definitions(renut PRIVATE BANJO_RENUT_RENDERER=1)
 # katamari-nx (2026-10-30): Renut's hooks at Beautiful Katamari's functions (tools/renut_hook_remap_katamari.py,
 # docs/katamari-notes.md) are registered in this build; OFF compiles them unregistered (banjo_renut_select.h).
-option(RR6_RENUT_HOOKS "Register Renut's hooks at Beautiful Katamari's functions" ON)
+option(RR6_RENUT_HOOKS "Register Renut's hooks at this game's functions" ON)
 if(RR6_RENUT_HOOKS)
     target_compile_definitions(banjo_renut_gpu PRIVATE RR6_RENUT_HOOKS=1)
     target_compile_definitions(renut PRIVATE RR6_RENUT_HOOKS=1)

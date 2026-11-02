@@ -47,7 +47,7 @@ REXCVAR_DEFINE_STRING(input_script, "", "Input",
                       "Test automation: button presses for user 0 as 'seconds:button,...' counted from the first input "
                       "poll (buttons A B X Y START BACK UP DOWN LEFT RIGHT LB RB), each held 0.2 s, or as long as "
                       "'@seconds' after the name says; the sticks pushed all the way with LSUP LSDOWN LSLEFT LSRIGHT "
-                      "and RSUP RSDOWN RSLEFT RSRIGHT (e.g. '30:LSUP@2.5'). While set, user 0 always has a pad "
+                      "and RSUP RSDOWN RSLEFT RSRIGHT (e.g. '30:LSUP@2.5'), the triggers pulled with LT RT. While set, user 0 always has a pad "
                       "connected (works minimized, with no controller)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(input_script_sticks, 0, "Input",
@@ -280,7 +280,9 @@ const std::vector<ScriptedPress>& InputScript() {
         int axis;
         int16_t value;
       } kSticks[] = {{"LSLEFT", 0, -32767}, {"LSRIGHT", 0, 32767}, {"LSDOWN", 1, -32767}, {"LSUP", 1, 32767},
-                     {"RSLEFT", 2, -32767}, {"RSRIGHT", 2, 32767}, {"RSDOWN", 3, -32767}, {"RSUP", 3, 32767}};
+                     {"RSLEFT", 2, -32767}, {"RSRIGHT", 2, 32767}, {"RSDOWN", 3, -32767}, {"RSUP", 3, 32767},
+                     // rr6-nx (2026-11-02): the triggers (axis 4, 5), for driving.
+                     {"LT", 4, 255},        {"RT", 5, 255}};
       for (const auto& stick : kSticks)
         if (name == stick.name) out.push_back({seconds, 0, hold, stick.axis, stick.value});
     }
@@ -350,6 +352,8 @@ bool ScriptedStickPushes(X_INPUT_GAMEPAD& pad) {
       case 0: pad.thumb_lx = press.value; break;
       case 1: pad.thumb_ly = press.value; break;
       case 2: pad.thumb_rx = press.value; break;
+      case 4: pad.left_trigger = uint8_t(press.value); break;
+      case 5: pad.right_trigger = uint8_t(press.value); break;
       default: pad.thumb_ry = press.value; break;
     }
     any = true;

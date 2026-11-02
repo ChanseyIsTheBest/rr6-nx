@@ -63,7 +63,7 @@ REX_HOOK_RAW(sub_82247F80) {
   }
   if (result == kErrorFileNotFound || result == kErrorPathNotFound) {
     REXLOG_INFO("[save] content open: not found ({}): reporting ERROR_FUNCTION_FAILED ('no save data yet')", result);
-    REX_STORE_U32(overlapped, kErrorFunctionFailed);
+    *reinterpret_cast<rex::be<uint32_t>*>(base + overlapped) = kErrorFunctionFailed;  // XOVERLAPPED.InternalLow
     ctx.r3.u64 = kErrorFunctionFailed;
   }
 }

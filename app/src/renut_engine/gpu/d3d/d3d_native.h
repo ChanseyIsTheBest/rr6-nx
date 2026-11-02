@@ -171,7 +171,7 @@ struct Device {
   void TouchRange(u32 offset, u32 size) const { g_touch[slot].chunks |= TouchBits(offset, size); }
   void TouchAll() const { g_touch[slot].chunks = ~uint64_t(0); }
   // banjo-nx (2026-10-26): before m_Pending words 2-4 are cleared other than by an op (TagChunks).
-  void TouchTags() const { g_touch[slot].chunks |= TagChunks(Q(2 * 8), Q(3 * 8), Q(4 * 8)); }
+  void TouchTags() const { g_touch[slot].chunks |= TagChunks(Pending(2), Pending(3), Pending(4)); }
 
   u32 W(u32 offset) const { return *reinterpret_cast<const be_u32 *>(bytes + offset); }
   void SetW(u32 offset, u32 value) {
@@ -209,8 +209,8 @@ struct Device {
   }
 
   // m_Pending[word] (D3DTAGCOLLECTION).
-  u64 Pending(u32 word) const { return Q(word * 8); }
-  void SetPending(u32 word, u64 value) { SetQ(word * 8, value); }
+  u64 Pending(u32 word) const { return Q(16 + word * 8); }  // rr6-nx: XDK 2135's place
+  void SetPending(u32 word, u64 value) { SetQ(16 + word * 8, value); }
   void Dirty(u32 word, u64 bits) {
     if (word >= 2 && g_tags_apart && slot - 1 < kTouchSlots - 1)  // banjo-nx (2026-10-26): banjo_renut_tags_apart
       return;
@@ -263,13 +263,13 @@ inline i64 TruncateToI64(double value) {
 
 // Device fields used by more than one part of the runtime.
 namespace off {
-constexpr u32 Ring = 0x30;                 // m_pRing
-constexpr u32 RingLimit = 0x34;            // m_pRingLimit
-constexpr u32 RingGuarantee = 0x38;        // m_pRingGuarantee
-constexpr u32 PredicatedPending2 = 0x28;   // m_Predicated_PendingMask2
-constexpr u32 SetRenderStateCall = 0x40;   // [101]
-constexpr u32 SetSamplerStateCall = 0x1D4; // [20]
-constexpr u32 GetRenderStateCall = 0x224;  // [101]
+constexpr u32 Ring = 0;                    // m_pRing (rr6-nx: XDK 2135)
+constexpr u32 RingLimit = 4;               // m_pRingLimit
+constexpr u32 RingGuarantee = 8;           // m_pRingGuarantee
+constexpr u32 PredicatedPending2 = 0x38;   // m_Predicated_PendingMask2
+constexpr u32 SetRenderStateCall = 0x60;   // [97]
+constexpr u32 SetSamplerStateCall = 0x1E4; // [20]
+constexpr u32 GetRenderStateCall = 0x234;  // [97]
 constexpr u32 GetSamplerStateCall = 0x3B8; // [20]
 constexpr u32 TextureFetch = 0x480;        // m_Constants.TextureFetch[26], 24 bytes each
 constexpr u32 VertexFetch = 0x6F0;         // m_Constants.VertexFetch[18], 8 bytes each
@@ -346,6 +346,15 @@ void SetFence(u32 device_va);
 // D3DDevice_CreateSurface(Width, Height, D3DFORMAT, D3DMULTISAMPLE_TYPE,
 //     const D3DSURFACE_PARAMETERS*): the new surface, or 0.
 u32 CreateSurface(u32 width, u32 height, u32 format, u32 multisample, u32 parameters_va);
+// pacman-nx: the automatic front buffer, InitializePresentationParameters' CreateTexture(Width, Height, 1, 1, 0, format, 0, 3).
+u32 CreateFrontBufferTexture(u32 width, u32 height, u32 format);
+// rr6-nx: XDK 2.0.2135's own objects (hooks/resource.cpp): their shadows, and the bindings Set* keeps on them.
+u32 Rr6TextureShadow(u32 texture);
+u32 Rr6SurfaceShadow(u32 surface);
+u32 Rr6SurfaceGuest(u32 shadow);
+void Rr6Bind(u32 resource);
+void Rr6Unbind(u32 resource);
+u32 Rr6AddRefAny(u32 resource);
 // D3DResource_AddRef (a texture level's first reference is one on its texture).
 u32 AddRefResource(u32 resource);
 

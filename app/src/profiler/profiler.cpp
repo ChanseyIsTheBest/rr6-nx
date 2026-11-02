@@ -20,7 +20,7 @@
 REXCVAR_DEFINE_BOOL(banjo_show_profiler, false, "Nuts&Bolts/Profiler",
     "Show the CPU/GPU profiler window (Unleashed's F1 profiler; F5 toggles it on PC).");
 // banjo-nx (2026-10-21, the user's request: off in every config): reNut's FPS counter in the top-left corner (F1 on PC).
-REXCVAR_DEFINE_BOOL(banjo_show_fps, true, "Nuts&Bolts/Profiler",
+REXCVAR_DEFINE_BOOL(banjo_show_fps, false, "Nuts&Bolts/Profiler",  // rr6-nx (pacman-nx): false: on the PC the dialog draws with the executable's ImGui copy, which has no frame open
     "Show reNut's FPS counter (frames per second, CPU and GPU ms) in the top-left corner (F1 toggles it on PC). Read "
     "at start.");
 REXCVAR_DEFINE_BOOL(banjo_cpu_profiler, false, "Nuts&Bolts/Profiler",

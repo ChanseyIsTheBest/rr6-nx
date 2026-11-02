@@ -219,15 +219,17 @@ constexpr u32 kDeviceAllocSize = 0x5700;  // katamari-nx: 0x5E00->0x5700
 constexpr u32 kDeviceAlignment = 0x80;
 
 struct Device {
-  be_u64 m_Pending[5];                // +0x0000  D3DTAGCOLLECTION dirty masks
-  be_u64 m_Predicated_PendingMask2;   // +0x0028
-  be_u32 m_pRing;                     // +0x0030
-  be_u32 m_pRingLimit;                // +0x0034
-  be_u32 m_pRingGuarantee;            // +0x0038
-  be_u32 m_ReferenceCount;            // +0x003C
-  be_u32 m_SetRenderStateCall[101];   // +0x0040
-  be_u32 m_SetSamplerStateCall[20];   // +0x01D4
-  be_u32 m_GetRenderStateCall[101];   // +0x0224
+  // rr6-nx: the head as XDK 2.0.2135's inline code uses it (N&B: masks at +0, ring at +0x30, tables at +0x40).
+  be_u32 m_pRing;                     // +0x0000
+  be_u32 m_pRingLimit;                // +0x0004
+  be_u32 m_pRingGuarantee;            // +0x0008
+  be_u32 m_ReferenceCount;            // +0x000C
+  be_u64 m_Pending[5];                // +0x0010  D3DTAGCOLLECTION dirty masks: vertex and pixel float constants first
+  be_u64 m_Predicated_PendingMask2;   // +0x0038
+  u8 pad_0040[0x60 - 0x40];           // +0x0040
+  be_u32 m_SetRenderStateCall[97];    // +0x0060
+  be_u32 m_SetSamplerStateCall[20];   // +0x01E4
+  be_u32 m_GetRenderStateCall[97];    // +0x0234
   be_u32 m_GetSamplerStateCall[20];   // +0x03B8
   u8 pad_0408[0x480 - 0x408];         // +0x0408
   Constants m_Constants;              // +0x0480
@@ -246,11 +248,12 @@ struct Device {
   u8 private_[kDeviceAllocSize - 0x2B00];  // +0x2B00  CDevice private state
 };
 static_assert(sizeof(Device) == kDeviceAllocSize);
-static_assert(offsetof(Device, m_pRing) == 0x30);
-static_assert(offsetof(Device, m_ReferenceCount) == 0x3C);
-static_assert(offsetof(Device, m_SetRenderStateCall) == 0x40);
-static_assert(offsetof(Device, m_SetSamplerStateCall) == 0x1D4);
-static_assert(offsetof(Device, m_GetRenderStateCall) == 0x224);
+static_assert(offsetof(Device, m_pRing) == 0);
+static_assert(offsetof(Device, m_ReferenceCount) == 12);
+static_assert(offsetof(Device, m_Pending) == 16);
+static_assert(offsetof(Device, m_SetRenderStateCall) == 0x60);
+static_assert(offsetof(Device, m_SetSamplerStateCall) == 0x1E4);
+static_assert(offsetof(Device, m_GetRenderStateCall) == 0x234);
 static_assert(offsetof(Device, m_GetSamplerStateCall) == 0x3B8);
 static_assert(offsetof(Device, m_Constants) == 0x480);
 static_assert(offsetof(Device, m_ClipPlanes) == 0x2820);

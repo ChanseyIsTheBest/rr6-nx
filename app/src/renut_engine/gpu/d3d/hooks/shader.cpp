@@ -459,7 +459,9 @@ u32 CreateShaderRecord(const be_u32 *function, bool pixel) {
     return 0;
   const auto *container = reinterpret_cast<const uint8_t *>(function);
   const auto *header = reinterpret_cast<const d3d::ShaderContainer *>(container);
-  if ((u32(header->flags) & 0xFFFFFF00u) != 0x102A1100u) {
+  // feedingfrenzy-nx (2026-10-26): version 0x0E too (XDK 2135's compiler); the translator reads it through
+  // XenosRecomp/container_0e.h, and only the sizes are read here.
+  if ((u32(header->flags) & 0xFFFFFF00u) != 0x102A1100u && (u32(header->flags) & 0xFFFFFF00u) != 0x102A0E00u) {
     RGPU_ERROR("Create{}Shader: not a shader container (flags {:08X})", pixel ? "Pixel" : "Vertex",
                u32(header->flags));
     return 0;
@@ -658,9 +660,9 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 declaration_va, mapped_u32 str
 
 } // namespace
 
-BANJO_RENUT_HOOK(sub_824D6120, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader  // katamari-nx: N&B sub_826377C0, signature 0.85 (next 0.55)
-BANJO_RENUT_HOOK(sub_824D6010, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader  // katamari-nx: N&B sub_826375D8, D3DDevice_CreatePixelShader: CreateVertexShader takes sub_824D6120 (0.85); this one's next best, 0.66
-BANJO_RENUT_HOOK(sub_824D4C50, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration  // katamari-nx: N&B sub_826379A0, signature 0.77 (next 0.47)
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263FBD0, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind  // katamari-nx: not hooked (D3DVertexShader_Bind: no clear counterpart (sig 0.35/0.28))
-BANJO_RENUT_HOOK(sub_824D4838, XGRegisterVertexShader_hook);  // XGRegisterVertexShader  // katamari-nx: N&B sub_826376C8, signature 0.91 (next 0.32)
-BANJO_RENUT_UNHOOKED_HOOK(sub_826375A0, XGRegisterPixelShader_hook);  // XGRegisterPixelShader  // katamari-nx: not hooked (XGRegisterPixelShader: no counterpart (sig 0.26))
+BANJO_RENUT_HOOK(sub_8224EF40, D3DDevice_CreateVertexShader_hook);  // D3DDevice_CreateVertexShader  // rr6-nx: Zuma pair of sub_82125BB8; 1 site; Katamari 824D6120
+BANJO_RENUT_HOOK(sub_8224EE50, D3DDevice_CreatePixelShader_hook);  // D3DDevice_CreatePixelShader  // rr6-nx: Zuma pair of sub_82125AC8; 1 site; Katamari 824D6010
+BANJO_RENUT_HOOK(sub_8224ECA0, D3DDevice_CreateVertexDeclaration_hook);  // D3DDevice_CreateVertexDeclaration  // rr6-nx: Zuma pair of sub_82124AB8; 2 sites; Katamari 824D4C50
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263FBD0, D3DVertexShader_Bind_hook);  // D3DVertexShader_Bind  // rr6-nx: not hooked in this XDK; Katamari 8263FBD0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D4838, XGRegisterVertexShader_hook);  // XGRegisterVertexShader  // rr6-nx: not hooked in this XDK; Katamari 824D4838
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_826375A0, XGRegisterPixelShader_hook);  // XGRegisterPixelShader  // rr6-nx: not hooked in this XDK; Katamari 826375A0

@@ -47,6 +47,79 @@ u32 AddRefResource(u32 resource) {
   return native::AddRefResource(resource);
 }
 
+// rr6-nx (2026-11-02): XDK 2.0.2135's setters take the game's own objects and keep a binding on them (hooks/resource.cpp, "XDK
+// 2.0.2135's own objects"). Renut's state code sees the object's shadow. What each slot holds as the game knows it is kept
+// here: one title device in this game (1 CreateDevice call site).
+constexpr u32 kRr6Samplers = 26, kRr6Streams = 16, kRr6Targets = 4;
+u32 g_rr6_textures[kRr6Samplers] = {}, g_rr6_streams[kRr6Streams] = {}, g_rr6_targets[kRr6Targets] = {};
+u32 g_rr6_depth = 0, g_rr6_indices = 0, g_rr6_declaration = 0;
+
+// Binds the new, unbinds the old.
+inline void Rr6Rebind(u32 &slot, u32 value) {
+  if (slot == value)
+    return;
+  native::Rr6Bind(value);
+  const u32 old = slot;
+  slot = value;
+  native::Rr6Unbind(old);
+}
+
+void Rr6SetTexture(u32 device, u32 sampler, u32 texture) {
+  if (sampler < kRr6Samplers)
+    Rr6Rebind(g_rr6_textures[sampler], texture);
+  native::SetTexture(native::DeviceAt(device), sampler, native::Rr6TextureShadow(texture));
+}
+void Rr6SetRenderTarget(u32 device, u32 index, u32 surface) {
+  const u32 shadow = native::Rr6SurfaceShadow(surface);
+  if (index < kRr6Targets)
+    Rr6Rebind(g_rr6_targets[index], surface);
+  native::SetRenderTarget(native::DeviceAt(device), index, shadow);
+}
+void Rr6SetDepthStencil(u32 device, u32 surface) {
+  const u32 shadow = native::Rr6SurfaceShadow(surface);
+  Rr6Rebind(g_rr6_depth, surface);
+  native::SetDepthStencilSurface(native::DeviceAt(device), shadow);
+}
+u32 Rr6GetRenderTarget(u32 device, u32 index) {
+  const native::Device d = native::DeviceAt(device);
+  const u32 shadow = d && index < 4 ? d.W(native::off::RenderTargets + index * 4) : 0;
+  const u32 surface = shadow ? native::Rr6SurfaceGuest(shadow) : 0;
+  if (surface)
+    native::Rr6AddRefAny(surface);
+  return surface;
+}
+u32 Rr6GetDepthStencil(u32 device) {
+  const native::Device d = native::DeviceAt(device);
+  const u32 shadow = d ? d.W(native::off::DepthStencil) : 0;
+  const u32 surface = shadow ? native::Rr6SurfaceGuest(shadow) : 0;
+  if (surface)
+    native::Rr6AddRefAny(surface);
+  return surface;
+}
+void Rr6SetStreamSource(u32 device, u32 stream, u32 vertex_buffer, u32 offset, u32 stride) {
+  if (stream < kRr6Streams)
+    Rr6Rebind(g_rr6_streams[stream], vertex_buffer);
+  native::SetStreamSource(native::DeviceAt(device), stream, vertex_buffer, offset, stride);
+}
+void Rr6SetIndices(u32 device, u32 index_buffer) {
+  Rr6Rebind(g_rr6_indices, index_buffer);
+  native::SetIndices(native::DeviceAt(device), index_buffer);
+}
+void Rr6SetVertexDeclaration(u32 device, u32 declaration) {
+  Rr6Rebind(g_rr6_declaration, declaration);
+  native::SetVertexDeclaration(native::DeviceAt(device), declaration);
+}
+
+// XDK 2135's render state 57 (between ColorWriteEnable3 and TessellationMode), which N&B's order does not have: its setter
+// stores the value in four device words where Renut's device has its own fields, so it is kept here (zuma-nx's).
+u32 g_rr6_render_state57 = 0;
+void Rr6SetRenderState57(u32 /*device*/, u32 value) {
+  g_rr6_render_state57 = value;
+}
+u32 Rr6GetRenderState57(u32 /*device*/) {
+  return g_rr6_render_state57;
+}
+
 // D3DSurface *GetRenderTarget(D3DDevice*, DWORD Index) [0x82636ED0]
 u32 D3DDevice_GetRenderTarget_hook(u32 device, u32 index) {
   const native::Device d = native::DeviceAt(device);
@@ -297,266 +370,268 @@ void D3DDevice_BlockUntilIdle_hook(u32 device) {
 } // namespace
 
 // Render states, by their index in N&B's table (off_82E506F0).
-BANJO_RENUT_HOOK(sub_824DC2F8, SetRenderStateHook<10>);  // D3DDevice_SetRenderState_ZEnable  // katamari-nx: N&B sub_82635740, render state 10 setter (state tables, this game index 10)
-BANJO_RENUT_HOOK(sub_824DC368, SetRenderStateHook<11>);  // D3DDevice_SetRenderState_ZFunc  // katamari-nx: N&B sub_821CB040, render state 11 setter (state tables, this game index 11)
-BANJO_RENUT_HOOK(sub_824DC338, SetRenderStateHook<12>);  // D3DDevice_SetRenderState_ZWriteEnable  // katamari-nx: N&B sub_82635780, render state 12 setter (state tables, this game index 12)
-BANJO_RENUT_HOOK(sub_824DBBD8, SetRenderStateHook<13>);  // D3DDevice_SetRenderState_FillMode  // katamari-nx: N&B sub_8225D148, render state 13 setter (state tables, this game index 13)
-BANJO_RENUT_HOOK(sub_824DBBA8, SetRenderStateHook<14>);  // D3DDevice_SetRenderState_CullMode  // katamari-nx: N&B sub_8225D168, render state 14 setter (state tables, this game index 14)
-BANJO_RENUT_HOOK(sub_824DBC40, SetRenderStateHook<15>);  // D3DDevice_SetRenderState_AlphaBlendEnable  // katamari-nx: N&B sub_821F9748, render state 15 setter (state tables, this game index 15)
-BANJO_RENUT_HOOK(sub_824DBFD0, SetRenderStateHook<16>);  // D3DDevice_SetRenderState_SeparateAlphaBlendEnable  // katamari-nx: N&B sub_821F96C0, render state 16 setter (state tables, this game index 16)
-BANJO_RENUT_HOOK(sub_824DC100, SetRenderStateHook<17>);  // D3DDevice_SetRenderState_BlendFactor  // katamari-nx: N&B sub_8223D118, render state 17 setter (state tables, this game index 17)
-BANJO_RENUT_HOOK(sub_824DBD60, SetRenderStateHook<18>);  // D3DDevice_SetRenderState_SrcBlend  // katamari-nx: N&B sub_821FF1D0, render state 18 setter (state tables, this game index 18)
-BANJO_RENUT_HOOK(sub_824DBDF0, SetRenderStateHook<19>);  // D3DDevice_SetRenderState_DestBlend  // katamari-nx: N&B sub_821FF8D8, render state 19 setter (state tables, this game index 19)
-BANJO_RENUT_HOOK(sub_824DBCD0, SetRenderStateHook<20>);  // D3DDevice_SetRenderState_BlendOp  // katamari-nx: N&B sub_821F54F0, render state 20 setter (state tables, this game index 20)
-BANJO_RENUT_HOOK(sub_824DBEF0, SetRenderStateHook<21>);  // D3DDevice_SetRenderState_SrcBlendAlpha  // katamari-nx: N&B sub_82235CD8, render state 21 setter (state tables, this game index 21)
-BANJO_RENUT_HOOK(sub_824DBF60, SetRenderStateHook<22>);  // D3DDevice_SetRenderState_DestBlendAlpha  // katamari-nx: N&B sub_821EFB00, render state 22 setter (state tables, this game index 22)
-BANJO_RENUT_HOOK(sub_824DBE80, SetRenderStateHook<23>);  // D3DDevice_SetRenderState_BlendOpAlpha  // katamari-nx: N&B sub_821EE830, render state 23 setter (state tables, this game index 23)
-BANJO_RENUT_HOOK(sub_824DBC08, SetRenderStateHook<24>);  // D3DDevice_SetRenderState_AlphaTestEnable  // katamari-nx: N&B sub_82635498, render state 24 setter (state tables, this game index 24)
-BANJO_RENUT_HOOK(sub_824DC068, SetRenderStateHook<25>);  // D3DDevice_SetRenderState_AlphaRef  // katamari-nx: N&B sub_82635550, render state 25 setter (state tables, this game index 25)
-BANJO_RENUT_HOOK(sub_824DC0D0, SetRenderStateHook<26>);  // D3DDevice_SetRenderState_AlphaFunc  // katamari-nx: N&B sub_826355B8, render state 26 setter (state tables, this game index 26)
-BANJO_RENUT_HOOK(sub_824DC3A0, SetRenderStateHook<27>);  // D3DDevice_SetRenderState_StencilEnable  // katamari-nx: N&B sub_826357C0, render state 27 setter (state tables, this game index 27)
-BANJO_RENUT_HOOK(sub_824DC3E0, SetRenderStateHook<28>);  // D3DDevice_SetRenderState_TwoSidedStencilMode  // katamari-nx: N&B sub_82635800, render state 28 setter (state tables, this game index 28)
-BANJO_RENUT_HOOK(sub_824DC448, SetRenderStateHook<29>);  // D3DDevice_SetRenderState_StencilFail  // katamari-nx: N&B sub_82635868, render state 29 setter (state tables, this game index 29)
-BANJO_RENUT_HOOK(sub_824DC480, SetRenderStateHook<30>);  // D3DDevice_SetRenderState_StencilZFail  // katamari-nx: N&B sub_826358A0, render state 30 setter (state tables, this game index 30)
-BANJO_RENUT_HOOK(sub_824DC4B8, SetRenderStateHook<31>);  // D3DDevice_SetRenderState_StencilPass  // katamari-nx: N&B sub_826358D8, render state 31 setter (state tables, this game index 31)
-BANJO_RENUT_HOOK(sub_824DC418, SetRenderStateHook<32>);  // D3DDevice_SetRenderState_StencilFunc  // katamari-nx: N&B sub_82635838, render state 32 setter (state tables, this game index 32)
-BANJO_RENUT_HOOK(sub_824DC5B8, SetRenderStateHook<33>);  // D3DDevice_SetRenderState_StencilRef  // katamari-nx: N&B sub_826359D8, render state 33 setter (state tables, this game index 33)
-BANJO_RENUT_HOOK(sub_824DC5D8, SetRenderStateHook<34>);  // D3DDevice_SetRenderState_StencilMask  // katamari-nx: N&B sub_826359F8, render state 34 setter (state tables, this game index 34)
-BANJO_RENUT_HOOK(sub_824DC5F8, SetRenderStateHook<35>);  // D3DDevice_SetRenderState_StencilWriteMask  // katamari-nx: N&B sub_82635A18, render state 35 setter (state tables, this game index 35)
-BANJO_RENUT_HOOK(sub_824DC518, SetRenderStateHook<36>);  // D3DDevice_SetRenderState_CCWStencilFail  // katamari-nx: N&B sub_82635938, render state 36 setter (state tables, this game index 36)
-BANJO_RENUT_HOOK(sub_824DC550, SetRenderStateHook<37>);  // D3DDevice_SetRenderState_CCWStencilZFail  // katamari-nx: N&B sub_82635970, render state 37 setter (state tables, this game index 37)
-BANJO_RENUT_HOOK(sub_824DC588, SetRenderStateHook<38>);  // D3DDevice_SetRenderState_CCWStencilPass  // katamari-nx: N&B sub_826359A8, render state 38 setter (state tables, this game index 38)
-BANJO_RENUT_HOOK(sub_824DC4E8, SetRenderStateHook<39>);  // D3DDevice_SetRenderState_CCWStencilFunc  // katamari-nx: N&B sub_82635908, render state 39 setter (state tables, this game index 39)
-BANJO_RENUT_HOOK(sub_824DC618, SetRenderStateHook<40>);  // D3DDevice_SetRenderState_CCWStencilRef  // katamari-nx: N&B sub_82635A38, render state 40 setter (state tables, this game index 40)
-BANJO_RENUT_HOOK(sub_824DC638, SetRenderStateHook<41>);  // D3DDevice_SetRenderState_CCWStencilMask  // katamari-nx: N&B sub_82635A58, render state 41 setter (state tables, this game index 41)
-BANJO_RENUT_HOOK(sub_824DC658, SetRenderStateHook<42>);  // D3DDevice_SetRenderState_CCWStencilWriteMask  // katamari-nx: N&B sub_82635A78, render state 42 setter (state tables, this game index 42)
-BANJO_RENUT_HOOK(sub_824DC678, SetRenderStateHook<43>);  // D3DDevice_SetRenderState_ClipPlaneEnable  // katamari-nx: N&B sub_8225D188, render state 43 setter (state tables, this game index 43)
-BANJO_RENUT_HOOK(sub_824DC9A0, SetRenderStateHook<44>);  // D3DDevice_SetRenderState_PointSize  // katamari-nx: N&B sub_82635CC0, render state 44 setter (state tables, this game index 44)
-BANJO_RENUT_HOOK(sub_824DCA00, SetRenderStateHook<45>);  // D3DDevice_SetRenderState_PointSizeMin  // katamari-nx: N&B sub_82635D20, render state 45 setter (state tables, this game index 45)
-BANJO_RENUT_HOOK(sub_824DC990, SetRenderStateHook<46>);  // D3DDevice_SetRenderState_PointSpriteEnable  // katamari-nx: N&B sub_82635CB0, render state 46 setter (state tables, this game index 46)
-BANJO_RENUT_HOOK(sub_824DCA58, SetRenderStateHook<47>);  // D3DDevice_SetRenderState_PointSizeMax  // katamari-nx: N&B sub_822371C0, render state 47 setter (state tables, this game index 47)
-BANJO_RENUT_HOOK(sub_824DC840, SetRenderStateHook<48>);  // D3DDevice_SetRenderState_MultiSampleAntiAlias  // katamari-nx: N&B sub_82635B98, render state 48 setter (state tables, this game index 48)
-BANJO_RENUT_HOOK(sub_824DC870, SetRenderStateHook<49>);  // D3DDevice_SetRenderState_MultiSampleMask  // katamari-nx: N&B sub_82635BC8, render state 49 setter (state tables, this game index 49)
-BANJO_RENUT_HOOK(sub_824DE720, SetRenderStateHook<50>);  // D3DDevice_SetRenderState_ScissorTestEnable  // katamari-nx: N&B sub_82635AA8, render state 50 setter (state tables, this game index 50)
-BANJO_RENUT_HOOK(sub_824DC6D0, SetRenderStateHook<51>);  // D3DDevice_SetRenderState_SlopeScaleDepthBias  // katamari-nx: N&B sub_82635AC0, render state 51 setter (state tables, this game index 51)
-BANJO_RENUT_HOOK(sub_824DC798, SetRenderStateHook<52>);  // D3DDevice_SetRenderState_DepthBias  // katamari-nx: N&B sub_821CAFA8, render state 52 setter (state tables, this game index 52)
-BANJO_RENUT_HOOK(sub_824DC890, SetRenderStateHook<53>);  // D3DDevice_SetRenderState_ColorWriteEnable  // katamari-nx: N&B sub_821CAF70, render state 53 setter (state tables, this game index 53)
-BANJO_RENUT_HOOK(sub_824DC8D0, SetRenderStateHook<54>);  // D3DDevice_SetRenderState_ColorWriteEnable1  // katamari-nx: N&B sub_82635BF0, render state 54 setter (state tables, this game index 54)
-BANJO_RENUT_HOOK(sub_824DC910, SetRenderStateHook<55>);  // D3DDevice_SetRenderState_ColorWriteEnable2  // katamari-nx: N&B sub_82635C30, render state 55 setter (state tables, this game index 55)
-BANJO_RENUT_HOOK(sub_824DC950, SetRenderStateHook<56>);  // D3DDevice_SetRenderState_ColorWriteEnable3  // katamari-nx: N&B sub_82635C70, render state 56 setter (state tables, this game index 56)
-BANJO_RENUT_HOOK(sub_824DD190, SetRenderStateHook<57>);  // D3DDevice_SetRenderState_TessellationMode  // katamari-nx: N&B sub_826363C8, render state 57 setter (state tables, this game index 57)
-BANJO_RENUT_HOOK(sub_824DD120, SetRenderStateHook<58>);  // D3DDevice_SetRenderState_MinTessellationLevel  // katamari-nx: N&B sub_82636358, render state 58 setter (state tables, this game index 58)
-BANJO_RENUT_HOOK(sub_824DD158, SetRenderStateHook<59>);  // D3DDevice_SetRenderState_MaxTessellationLevel  // katamari-nx: N&B sub_82636390, render state 59 setter (state tables, this game index 59)
-BANJO_RENUT_HOOK(sub_824DCAB0, SetRenderStateHook<60>);  // D3DDevice_SetRenderState_Wrap0  // katamari-nx: N&B sub_82635D88, render state 60 setter (state tables, this game index 60)
-BANJO_RENUT_HOOK(sub_824DCAD0, SetRenderStateHook<61>);  // D3DDevice_SetRenderState_Wrap1  // katamari-nx: N&B sub_82635DA8, render state 61 setter (state tables, this game index 61)
-BANJO_RENUT_HOOK(sub_824DCAF8, SetRenderStateHook<62>);  // D3DDevice_SetRenderState_Wrap2  // katamari-nx: N&B sub_82635DD0, render state 62 setter (state tables, this game index 62)
-BANJO_RENUT_HOOK(sub_824DCB20, SetRenderStateHook<63>);  // D3DDevice_SetRenderState_Wrap3  // katamari-nx: N&B sub_82635DF8, render state 63 setter (state tables, this game index 63)
-BANJO_RENUT_HOOK(sub_824DCB48, SetRenderStateHook<64>);  // D3DDevice_SetRenderState_Wrap4  // katamari-nx: N&B sub_82635E20, render state 64 setter (state tables, this game index 64)
-BANJO_RENUT_HOOK(sub_824DCB70, SetRenderStateHook<65>);  // D3DDevice_SetRenderState_Wrap5  // katamari-nx: N&B sub_82635E48, render state 65 setter (state tables, this game index 65)
-BANJO_RENUT_HOOK(sub_824DCB98, SetRenderStateHook<66>);  // D3DDevice_SetRenderState_Wrap6  // katamari-nx: N&B sub_82635E70, render state 66 setter (state tables, this game index 66)
-BANJO_RENUT_HOOK(sub_824DCBC0, SetRenderStateHook<67>);  // D3DDevice_SetRenderState_Wrap7  // katamari-nx: N&B sub_82635E98, render state 67 setter (state tables, this game index 67)
-BANJO_RENUT_HOOK(sub_824DCBE0, SetRenderStateHook<68>);  // D3DDevice_SetRenderState_Wrap8  // katamari-nx: N&B sub_82635EB8, render state 68 setter (state tables, this game index 68)
-BANJO_RENUT_HOOK(sub_824DCC00, SetRenderStateHook<69>);  // D3DDevice_SetRenderState_Wrap9  // katamari-nx: N&B sub_82635ED8, render state 69 setter (state tables, this game index 69)
-BANJO_RENUT_HOOK(sub_824DCC28, SetRenderStateHook<70>);  // D3DDevice_SetRenderState_Wrap10  // katamari-nx: N&B sub_82635F00, render state 70 setter (state tables, this game index 70)
-BANJO_RENUT_HOOK(sub_824DCC50, SetRenderStateHook<71>);  // D3DDevice_SetRenderState_Wrap11  // katamari-nx: N&B sub_82635F28, render state 71 setter (state tables, this game index 71)
-BANJO_RENUT_HOOK(sub_824DCC78, SetRenderStateHook<72>);  // D3DDevice_SetRenderState_Wrap12  // katamari-nx: N&B sub_82635F50, render state 72 setter (state tables, this game index 72)
-BANJO_RENUT_HOOK(sub_824DCCA0, SetRenderStateHook<73>);  // D3DDevice_SetRenderState_Wrap13  // katamari-nx: N&B sub_82635F78, render state 73 setter (state tables, this game index 73)
-BANJO_RENUT_HOOK(sub_824DCCC8, SetRenderStateHook<74>);  // D3DDevice_SetRenderState_Wrap14  // katamari-nx: N&B sub_82635FA0, render state 74 setter (state tables, this game index 74)
-BANJO_RENUT_HOOK(sub_824DCCF0, SetRenderStateHook<75>);  // D3DDevice_SetRenderState_Wrap15  // katamari-nx: N&B sub_82635FC8, render state 75 setter (state tables, this game index 75)
-BANJO_RENUT_HOOK(sub_824DCE10, SetRenderStateHook<76>);  // D3DDevice_SetRenderState_ViewportEnable  // katamari-nx: N&B sub_821D53E8, render state 76 setter (state tables, this game index 76)
-BANJO_RENUT_HOOK(sub_824DCE60, SetRenderStateHook<77>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable  // katamari-nx: N&B sub_826360F8, render state 77 setter (state tables, this game index 77)
-BANJO_RENUT_HOOK(sub_824DCF10, SetRenderStateHook<78>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable1  // katamari-nx: N&B sub_82636190, render state 78 setter (state tables, this game index 78)
-BANJO_RENUT_HOOK(sub_824DCFC0, SetRenderStateHook<79>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable2  // katamari-nx: N&B sub_82636228, render state 79 setter (state tables, this game index 79)
-BANJO_RENUT_HOOK(sub_824DD070, SetRenderStateHook<80>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable3  // katamari-nx: N&B sub_826362C0, render state 80 setter (state tables, this game index 80)
-BANJO_RENUT_HOOK(sub_824DD1C8, SetRenderStateHook<81>);  // D3DDevice_SetRenderState_HalfPixelOffset  // katamari-nx: N&B sub_82636400, render state 81 setter (state tables, this game index 81)
-BANJO_RENUT_HOOK(sub_824DD200, SetRenderStateHook<82>);  // D3DDevice_SetRenderState_PrimitiveResetEnable  // katamari-nx: N&B sub_82636438, render state 82 setter (state tables, this game index 82)
-BANJO_RENUT_HOOK(sub_824DD230, SetRenderStateHook<83>);  // D3DDevice_SetRenderState_PrimitiveResetIndex  // katamari-nx: N&B sub_82636468, render state 83 setter (state tables, this game index 83)
-BANJO_RENUT_HOOK(sub_824DD258, SetRenderStateHook<84>);  // D3DDevice_SetRenderState_AlphaToMaskEnable  // katamari-nx: N&B sub_82636490, render state 84 setter (state tables, this game index 84)
-BANJO_RENUT_HOOK(sub_824DD288, SetRenderStateHook<85>);  // D3DDevice_SetRenderState_AlphaToMaskOffsets  // katamari-nx: N&B sub_826364C0, render state 85 setter (state tables, this game index 85)
-BANJO_RENUT_HOOK(sub_824DD2C0, SetRenderStateHook<86>);  // D3DDevice_SetRenderState_GuardBand_X  // katamari-nx: N&B sub_826364E8, render state 86 setter (state tables, this game index 86)
-BANJO_RENUT_HOOK(sub_824DD2F0, SetRenderStateHook<87>);  // D3DDevice_SetRenderState_GuardBand_Y  // katamari-nx: N&B sub_82636518, render state 87 setter (state tables, this game index 87)
-BANJO_RENUT_HOOK(sub_824DD320, SetRenderStateHook<88>);  // D3DDevice_SetRenderState_DiscardBand_X  // katamari-nx: N&B sub_82636548, render state 88 setter (state tables, this game index 88)
-BANJO_RENUT_HOOK(sub_824DD348, SetRenderStateHook<89>);  // D3DDevice_SetRenderState_DiscardBand_Y  // katamari-nx: N&B sub_82636570, render state 89 setter (state tables, this game index 89)
-BANJO_RENUT_HOOK(sub_824DD410, SetRenderStateHook<90>);  // D3DDevice_SetRenderState_HiStencilEnable  // katamari-nx: N&B sub_826365E0, render state 90 setter (state tables, this game index 90)
-BANJO_RENUT_HOOK(sub_824DD440, SetRenderStateHook<91>);  // D3DDevice_SetRenderState_HiStencilWriteEnable  // katamari-nx: N&B sub_82636610, render state 91 setter (state tables, this game index 91)
-BANJO_RENUT_HOOK(sub_824DD470, SetRenderStateHook<92>);  // D3DDevice_SetRenderState_HiStencilFunc  // katamari-nx: N&B sub_82636640, render state 92 setter (state tables, this game index 92)
-BANJO_RENUT_HOOK(sub_824DD4A0, SetRenderStateHook<93>);  // D3DDevice_SetRenderState_HiStencilRef  // katamari-nx: N&B sub_82636670, render state 93 setter (state tables, this game index 93)
-BANJO_RENUT_HOOK(sub_824DD4C0, SetRenderStateHook<94>);  // D3DDevice_SetRenderState_PresentInterval  // katamari-nx: N&B sub_82636690, render state 94 setter (state tables, this game index 94)
-BANJO_RENUT_HOOK(sub_824DD4D0, SetRenderStateHook<95>);  // D3DDevice_SetRenderState_PresentImmediateThreshold  // katamari-nx: N&B sub_826366A0, render state 95 setter (state tables, this game index 95)
-BANJO_RENUT_HOOK(sub_824DD378, SetRenderStateHook<96>);  // D3DDevice_SetRenderState_HiZEnable  // katamari-nx: N&B sub_826365A0, render state 96 setter (state tables, this game index 96)
-BANJO_RENUT_HOOK(sub_824DD3A8, SetRenderStateHook<97>);  // D3DDevice_SetRenderState_HiZWriteEnable  // katamari-nx: N&B sub_82257938, render state 97 setter (state tables, this game index 97)
-BANJO_RENUT_HOOK(sub_824DC220, SetRenderStateHook<98>);  // D3DDevice_SetRenderState_LastPixel  // katamari-nx: N&B sub_82635660, render state 98 setter (state tables, this game index 98)
-BANJO_RENUT_HOOK(sub_824DC258, SetRenderStateHook<99>);  // D3DDevice_SetRenderState_LineWidth  // katamari-nx: N&B sub_82635698, render state 99 setter (state tables, this game index 99)
-BANJO_RENUT_HOOK(sub_824DC2C8, SetRenderStateHook<100>);  // D3DDevice_SetRenderState_Buffer2Frames  // katamari-nx: N&B sub_82635710, render state 100 setter (state tables, this game index 100)
+BANJO_RENUT_HOOK(sub_82255838, SetRenderStateHook<10>);  // D3DDevice_SetRenderState_ZEnable  // rr6-nx: the game's state table; Katamari 824DC2F8
+BANJO_RENUT_HOOK(sub_822558C0, SetRenderStateHook<11>);  // D3DDevice_SetRenderState_ZFunc  // rr6-nx: the game's state table; Katamari 824DC368
+BANJO_RENUT_HOOK(sub_82255888, SetRenderStateHook<12>);  // D3DDevice_SetRenderState_ZWriteEnable  // rr6-nx: the game's state table; Katamari 824DC338
+BANJO_RENUT_HOOK(sub_82255180, SetRenderStateHook<13>);  // D3DDevice_SetRenderState_FillMode  // rr6-nx: the game's state table; Katamari 824DBBD8
+BANJO_RENUT_HOOK(sub_82255148, SetRenderStateHook<14>);  // D3DDevice_SetRenderState_CullMode  // rr6-nx: the game's state table; Katamari 824DBBA8
+BANJO_RENUT_HOOK(sub_82255200, SetRenderStateHook<15>);  // D3DDevice_SetRenderState_AlphaBlendEnable  // rr6-nx: the game's state table; Katamari 824DBC40
+BANJO_RENUT_HOOK(sub_822555D0, SetRenderStateHook<16>);  // D3DDevice_SetRenderState_SeparateAlphaBlendEnable  // rr6-nx: the game's state table; Katamari 824DBFD0
+BANJO_RENUT_HOOK(sub_82255718, SetRenderStateHook<17>);  // D3DDevice_SetRenderState_BlendFactor  // rr6-nx: the game's state table; Katamari 824DC100
+BANJO_RENUT_HOOK(sub_82255338, SetRenderStateHook<18>);  // D3DDevice_SetRenderState_SrcBlend  // rr6-nx: the game's state table; Katamari 824DBD60
+BANJO_RENUT_HOOK(sub_822553D0, SetRenderStateHook<19>);  // D3DDevice_SetRenderState_DestBlend  // rr6-nx: the game's state table; Katamari 824DBDF0
+BANJO_RENUT_HOOK(sub_822552A0, SetRenderStateHook<20>);  // D3DDevice_SetRenderState_BlendOp  // rr6-nx: the game's state table; Katamari 824DBCD0
+BANJO_RENUT_HOOK(sub_822554E0, SetRenderStateHook<21>);  // D3DDevice_SetRenderState_SrcBlendAlpha  // rr6-nx: the game's state table; Katamari 824DBEF0
+BANJO_RENUT_HOOK(sub_82255558, SetRenderStateHook<22>);  // D3DDevice_SetRenderState_DestBlendAlpha  // rr6-nx: the game's state table; Katamari 824DBF60
+BANJO_RENUT_HOOK(sub_82255468, SetRenderStateHook<23>);  // D3DDevice_SetRenderState_BlendOpAlpha  // rr6-nx: the game's state table; Katamari 824DBE80
+BANJO_RENUT_HOOK(sub_822551B8, SetRenderStateHook<24>);  // D3DDevice_SetRenderState_AlphaTestEnable  // rr6-nx: the game's state table; Katamari 824DBC08
+BANJO_RENUT_HOOK(sub_82255670, SetRenderStateHook<25>);  // D3DDevice_SetRenderState_AlphaRef  // rr6-nx: the game's state table; Katamari 824DC068
+BANJO_RENUT_HOOK(sub_822556E0, SetRenderStateHook<26>);  // D3DDevice_SetRenderState_AlphaFunc  // rr6-nx: the game's state table; Katamari 824DC0D0
+BANJO_RENUT_HOOK(sub_82255908, SetRenderStateHook<27>);  // D3DDevice_SetRenderState_StencilEnable  // rr6-nx: the game's state table; Katamari 824DC3A0
+BANJO_RENUT_HOOK(sub_82255958, SetRenderStateHook<28>);  // D3DDevice_SetRenderState_TwoSidedStencilMode  // rr6-nx: the game's state table; Katamari 824DC3E0
+BANJO_RENUT_HOOK(sub_822559D8, SetRenderStateHook<29>);  // D3DDevice_SetRenderState_StencilFail  // rr6-nx: the game's state table; Katamari 824DC448
+BANJO_RENUT_HOOK(sub_82255A20, SetRenderStateHook<30>);  // D3DDevice_SetRenderState_StencilZFail  // rr6-nx: the game's state table; Katamari 824DC480
+BANJO_RENUT_HOOK(sub_82255A68, SetRenderStateHook<31>);  // D3DDevice_SetRenderState_StencilPass  // rr6-nx: the game's state table; Katamari 824DC4B8
+BANJO_RENUT_HOOK(sub_822559A0, SetRenderStateHook<32>);  // D3DDevice_SetRenderState_StencilFunc  // rr6-nx: the game's state table; Katamari 824DC418
+BANJO_RENUT_HOOK(sub_82255BA0, SetRenderStateHook<33>);  // D3DDevice_SetRenderState_StencilRef  // rr6-nx: the game's state table; Katamari 824DC5B8
+BANJO_RENUT_HOOK(sub_82255BC8, SetRenderStateHook<34>);  // D3DDevice_SetRenderState_StencilMask  // rr6-nx: the game's state table; Katamari 824DC5D8
+BANJO_RENUT_HOOK(sub_82255BF0, SetRenderStateHook<35>);  // D3DDevice_SetRenderState_StencilWriteMask  // rr6-nx: the game's state table; Katamari 824DC5F8
+BANJO_RENUT_HOOK(sub_82255AD8, SetRenderStateHook<36>);  // D3DDevice_SetRenderState_CCWStencilFail  // rr6-nx: the game's state table; Katamari 824DC518
+BANJO_RENUT_HOOK(sub_82255B20, SetRenderStateHook<37>);  // D3DDevice_SetRenderState_CCWStencilZFail  // rr6-nx: the game's state table; Katamari 824DC550
+BANJO_RENUT_HOOK(sub_82255B68, SetRenderStateHook<38>);  // D3DDevice_SetRenderState_CCWStencilPass  // rr6-nx: the game's state table; Katamari 824DC588
+BANJO_RENUT_HOOK(sub_82255AA0, SetRenderStateHook<39>);  // D3DDevice_SetRenderState_CCWStencilFunc  // rr6-nx: the game's state table; Katamari 824DC4E8
+BANJO_RENUT_HOOK(sub_82255C18, SetRenderStateHook<40>);  // D3DDevice_SetRenderState_CCWStencilRef  // rr6-nx: the game's state table; Katamari 824DC618
+BANJO_RENUT_HOOK(sub_82255C40, SetRenderStateHook<41>);  // D3DDevice_SetRenderState_CCWStencilMask  // rr6-nx: the game's state table; Katamari 824DC638
+BANJO_RENUT_HOOK(sub_82255C68, SetRenderStateHook<42>);  // D3DDevice_SetRenderState_CCWStencilWriteMask  // rr6-nx: the game's state table; Katamari 824DC658
+BANJO_RENUT_HOOK(sub_82255C90, SetRenderStateHook<43>);  // D3DDevice_SetRenderState_ClipPlaneEnable  // rr6-nx: the game's state table; Katamari 824DC678
+BANJO_RENUT_HOOK(sub_82255FD8, SetRenderStateHook<44>);  // D3DDevice_SetRenderState_PointSize  // rr6-nx: the game's state table; Katamari 824DC9A0
+BANJO_RENUT_HOOK(sub_82256030, SetRenderStateHook<45>);  // D3DDevice_SetRenderState_PointSizeMin  // rr6-nx: the game's state table; Katamari 824DCA00
+BANJO_RENUT_HOOK(sub_82255FC8, SetRenderStateHook<46>);  // D3DDevice_SetRenderState_PointSpriteEnable  // rr6-nx: the game's state table; Katamari 824DC990
+BANJO_RENUT_HOOK(sub_82256080, SetRenderStateHook<47>);  // D3DDevice_SetRenderState_PointSizeMax  // rr6-nx: the game's state table; Katamari 824DCA58
+BANJO_RENUT_HOOK(sub_82255E40, SetRenderStateHook<48>);  // D3DDevice_SetRenderState_MultiSampleAntiAlias  // rr6-nx: the game's state table; Katamari 824DC840
+BANJO_RENUT_HOOK(sub_82255E78, SetRenderStateHook<49>);  // D3DDevice_SetRenderState_MultiSampleMask  // rr6-nx: the game's state table; Katamari 824DC870
+BANJO_RENUT_HOOK(sub_82257C68, SetRenderStateHook<50>);  // D3DDevice_SetRenderState_ScissorTestEnable  // rr6-nx: the game's state table; Katamari 824DE720
+BANJO_RENUT_HOOK(sub_82255CD8, SetRenderStateHook<51>);  // D3DDevice_SetRenderState_SlopeScaleDepthBias  // rr6-nx: the game's state table; Katamari 824DC6D0
+BANJO_RENUT_HOOK(sub_82255D98, SetRenderStateHook<52>);  // D3DDevice_SetRenderState_DepthBias  // rr6-nx: the game's state table; Katamari 824DC798
+BANJO_RENUT_HOOK(sub_82255EA8, SetRenderStateHook<53>);  // D3DDevice_SetRenderState_ColorWriteEnable  // rr6-nx: the game's state table; Katamari 824DC890
+BANJO_RENUT_HOOK(sub_82255EF0, SetRenderStateHook<54>);  // D3DDevice_SetRenderState_ColorWriteEnable1  // rr6-nx: the game's state table; Katamari 824DC8D0
+BANJO_RENUT_HOOK(sub_82255F38, SetRenderStateHook<55>);  // D3DDevice_SetRenderState_ColorWriteEnable2  // rr6-nx: the game's state table; Katamari 824DC910
+BANJO_RENUT_HOOK(sub_82255F80, SetRenderStateHook<56>);  // D3DDevice_SetRenderState_ColorWriteEnable3  // rr6-nx: the game's state table; Katamari 824DC950
+BANJO_RENUT_HOOK(sub_82256820, SetRenderStateHook<57>);  // D3DDevice_SetRenderState_TessellationMode  // rr6-nx: the game's state table; Katamari 824DD190
+BANJO_RENUT_HOOK(sub_822567C0, SetRenderStateHook<58>);  // D3DDevice_SetRenderState_MinTessellationLevel  // rr6-nx: the game's state table; Katamari 824DD120
+BANJO_RENUT_HOOK(sub_822567F0, SetRenderStateHook<59>);  // D3DDevice_SetRenderState_MaxTessellationLevel  // rr6-nx: the game's state table; Katamari 824DD158
+BANJO_RENUT_HOOK(sub_822560D0, SetRenderStateHook<60>);  // D3DDevice_SetRenderState_Wrap0  // rr6-nx: the game's state table; Katamari 824DCAB0
+BANJO_RENUT_HOOK(sub_82256100, SetRenderStateHook<61>);  // D3DDevice_SetRenderState_Wrap1  // rr6-nx: the game's state table; Katamari 824DCAD0
+BANJO_RENUT_HOOK(sub_82256130, SetRenderStateHook<62>);  // D3DDevice_SetRenderState_Wrap2  // rr6-nx: the game's state table; Katamari 824DCAF8
+BANJO_RENUT_HOOK(sub_82256160, SetRenderStateHook<63>);  // D3DDevice_SetRenderState_Wrap3  // rr6-nx: the game's state table; Katamari 824DCB20
+BANJO_RENUT_HOOK(sub_82256190, SetRenderStateHook<64>);  // D3DDevice_SetRenderState_Wrap4  // rr6-nx: the game's state table; Katamari 824DCB48
+BANJO_RENUT_HOOK(sub_822561C0, SetRenderStateHook<65>);  // D3DDevice_SetRenderState_Wrap5  // rr6-nx: the game's state table; Katamari 824DCB70
+BANJO_RENUT_HOOK(sub_822561F0, SetRenderStateHook<66>);  // D3DDevice_SetRenderState_Wrap6  // rr6-nx: the game's state table; Katamari 824DCB98
+BANJO_RENUT_HOOK(sub_82256220, SetRenderStateHook<67>);  // D3DDevice_SetRenderState_Wrap7  // rr6-nx: the game's state table; Katamari 824DCBC0
+BANJO_RENUT_HOOK(sub_82256248, SetRenderStateHook<68>);  // D3DDevice_SetRenderState_Wrap8  // rr6-nx: the game's state table; Katamari 824DCBE0
+BANJO_RENUT_HOOK(sub_82256278, SetRenderStateHook<69>);  // D3DDevice_SetRenderState_Wrap9  // rr6-nx: the game's state table; Katamari 824DCC00
+BANJO_RENUT_HOOK(sub_822562A8, SetRenderStateHook<70>);  // D3DDevice_SetRenderState_Wrap10  // rr6-nx: the game's state table; Katamari 824DCC28
+BANJO_RENUT_HOOK(sub_822562D8, SetRenderStateHook<71>);  // D3DDevice_SetRenderState_Wrap11  // rr6-nx: the game's state table; Katamari 824DCC50
+BANJO_RENUT_HOOK(sub_82256308, SetRenderStateHook<72>);  // D3DDevice_SetRenderState_Wrap12  // rr6-nx: the game's state table; Katamari 824DCC78
+BANJO_RENUT_HOOK(sub_82256338, SetRenderStateHook<73>);  // D3DDevice_SetRenderState_Wrap13  // rr6-nx: the game's state table; Katamari 824DCCA0
+BANJO_RENUT_HOOK(sub_82256368, SetRenderStateHook<74>);  // D3DDevice_SetRenderState_Wrap14  // rr6-nx: the game's state table; Katamari 824DCCC8
+BANJO_RENUT_HOOK(sub_82256398, SetRenderStateHook<75>);  // D3DDevice_SetRenderState_Wrap15  // rr6-nx: the game's state table; Katamari 824DCCF0
+BANJO_RENUT_HOOK(sub_82256480, SetRenderStateHook<76>);  // D3DDevice_SetRenderState_ViewportEnable  // rr6-nx: the game's state table; Katamari 824DCE10
+BANJO_RENUT_HOOK(sub_822564E0, SetRenderStateHook<77>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable  // rr6-nx: the game's state table; Katamari 824DCE60
+BANJO_RENUT_HOOK(sub_82256598, SetRenderStateHook<78>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable1  // rr6-nx: the game's state table; Katamari 824DCF10
+BANJO_RENUT_HOOK(sub_82256650, SetRenderStateHook<79>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable2  // rr6-nx: the game's state table; Katamari 824DCFC0
+BANJO_RENUT_HOOK(sub_82256708, SetRenderStateHook<80>);  // D3DDevice_SetRenderState_HighPrecisionBlendEnable3  // rr6-nx: the game's state table; Katamari 824DD070
+BANJO_RENUT_HOOK(sub_82256850, SetRenderStateHook<81>);  // D3DDevice_SetRenderState_HalfPixelOffset  // rr6-nx: the game's state table; Katamari 824DD1C8
+BANJO_RENUT_HOOK(sub_82256888, SetRenderStateHook<82>);  // D3DDevice_SetRenderState_PrimitiveResetEnable  // rr6-nx: the game's state table; Katamari 824DD200
+BANJO_RENUT_HOOK(sub_822568C0, SetRenderStateHook<83>);  // D3DDevice_SetRenderState_PrimitiveResetIndex  // rr6-nx: the game's state table; Katamari 824DD230
+BANJO_RENUT_HOOK(sub_822568E8, SetRenderStateHook<84>);  // D3DDevice_SetRenderState_AlphaToMaskEnable  // rr6-nx: the game's state table; Katamari 824DD258
+BANJO_RENUT_HOOK(sub_82256920, SetRenderStateHook<85>);  // D3DDevice_SetRenderState_AlphaToMaskOffsets  // rr6-nx: the game's state table; Katamari 824DD288
+BANJO_RENUT_HOOK(sub_82256960, SetRenderStateHook<86>);  // D3DDevice_SetRenderState_GuardBand_X  // rr6-nx: the game's state table; Katamari 824DD2C0
+BANJO_RENUT_HOOK(sub_82256990, SetRenderStateHook<87>);  // D3DDevice_SetRenderState_GuardBand_Y  // rr6-nx: the game's state table; Katamari 824DD2F0
+BANJO_RENUT_HOOK(sub_822569C0, SetRenderStateHook<88>);  // D3DDevice_SetRenderState_DiscardBand_X  // rr6-nx: the game's state table; Katamari 824DD320
+BANJO_RENUT_HOOK(sub_822569F0, SetRenderStateHook<89>);  // D3DDevice_SetRenderState_DiscardBand_Y  // rr6-nx: the game's state table; Katamari 824DD348
+BANJO_RENUT_HOOK(sub_82256A20, SetRenderStateHook<90>);  // D3DDevice_SetRenderState_HiStencilEnable  // rr6-nx: the game's state table; Katamari 824DD410
+BANJO_RENUT_HOOK(sub_82256A58, SetRenderStateHook<91>);  // D3DDevice_SetRenderState_HiStencilWriteEnable  // rr6-nx: the game's state table; Katamari 824DD440
+BANJO_RENUT_HOOK(sub_82256A90, SetRenderStateHook<92>);  // D3DDevice_SetRenderState_HiStencilFunc  // rr6-nx: the game's state table; Katamari 824DD470
+BANJO_RENUT_HOOK(sub_82256AC8, SetRenderStateHook<93>);  // D3DDevice_SetRenderState_HiStencilRef  // rr6-nx: the game's state table; Katamari 824DD4A0
+BANJO_RENUT_HOOK(sub_82256AF0, SetRenderStateHook<94>);  // D3DDevice_SetRenderState_PresentInterval  // rr6-nx: the game's state table; Katamari 824DD4C0
+BANJO_RENUT_HOOK(sub_82256B00, SetRenderStateHook<95>);  // D3DDevice_SetRenderState_PresentImmediateThreshold  // rr6-nx: the game's state table; Katamari 824DD4D0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DD378, SetRenderStateHook<96>);  // D3DDevice_SetRenderState_HiZEnable  // rr6-nx: not hooked in this XDK; Katamari 824DD378
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DD3A8, SetRenderStateHook<97>);  // D3DDevice_SetRenderState_HiZWriteEnable  // rr6-nx: not hooked in this XDK; Katamari 824DD3A8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC220, SetRenderStateHook<98>);  // D3DDevice_SetRenderState_LastPixel  // rr6-nx: not hooked in this XDK; Katamari 824DC220
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC258, SetRenderStateHook<99>);  // D3DDevice_SetRenderState_LineWidth  // rr6-nx: not hooked in this XDK; Katamari 824DC258
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC2C8, SetRenderStateHook<100>);  // D3DDevice_SetRenderState_Buffer2Frames  // rr6-nx: not hooked in this XDK; Katamari 824DC2C8
 
 // Sampler states, by their index in N&B's table (off_82E50BD0).
-BANJO_RENUT_HOOK(sub_824DDC30, SetSamplerStateHook<0>);  // D3DDevice_SetSamplerState_AddressU  // katamari-nx: N&B sub_8224B2C0, sampler state 0 setter (state tables, this game index 0)
-BANJO_RENUT_HOOK(sub_824DDC80, SetSamplerStateHook<1>);  // D3DDevice_SetSamplerState_AddressV  // katamari-nx: N&B sub_821DB8C8, sampler state 1 setter (state tables, this game index 1)
-BANJO_RENUT_HOOK(sub_824DDCD0, SetSamplerStateHook<2>);  // D3DDevice_SetSamplerState_AddressW  // katamari-nx: N&B sub_82636C30, sampler state 2 setter (state tables, this game index 2)
-BANJO_RENUT_HOOK(sub_824DDBC0, SetSamplerStateHook<3>);  // D3DDevice_SetSamplerState_BorderColor  // katamari-nx: N&B sub_82636B90, sampler state 3 setter (state tables, this game index 3)
-BANJO_RENUT_HOOK(sub_824DD680, SetSamplerStateHook<4>);  // D3DDevice_SetSamplerState_MagFilter  // katamari-nx: N&B sub_821FE308, sampler state 4 setter (state tables, this game index 4)
-BANJO_RENUT_HOOK(sub_824DD4F0, SetSamplerStateHook<5>);  // D3DDevice_SetSamplerState_MinFilter  // katamari-nx: N&B sub_821FE3D0, sampler state 5 setter (state tables, this game index 5)
-BANJO_RENUT_HOOK(sub_824DD810, SetSamplerStateHook<6>);  // D3DDevice_SetSamplerState_MipFilter  // katamari-nx: N&B sub_8225D108, sampler state 6 setter (state tables, this game index 6)
-BANJO_RENUT_HOOK(sub_824DDA20, SetSamplerStateHook<7>);  // D3DDevice_SetSamplerState_MipMapLodBias  // katamari-nx: N&B sub_82636A58, sampler state 7 setter (state tables, this game index 7)
-BANJO_RENUT_HOOK(sub_824DDAC0, SetSamplerStateHook<8>);  // D3DDevice_SetSamplerState_MaxMipLevel  // katamari-nx: N&B sub_821FE6D8, sampler state 8 setter (state tables, this game index 8)
-BANJO_RENUT_HOOK(sub_824DD900, SetSamplerStateHook<9>);  // D3DDevice_SetSamplerState_MaxAnisotropy  // katamari-nx: N&B sub_82636938, sampler state 9 setter (state tables, this game index 9)
-BANJO_RENUT_HOOK(sub_824DD778, SetSamplerStateHook<10>);  // D3DDevice_SetSamplerState_MagFilterZ  // katamari-nx: N&B sub_826367D8, sampler state 10 setter (state tables, this game index 10)
-BANJO_RENUT_HOOK(sub_824DD5E8, SetSamplerStateHook<11>);  // D3DDevice_SetSamplerState_MinFilterZ  // katamari-nx: N&B sub_826366F8, sampler state 11 setter (state tables, this game index 11)
-BANJO_RENUT_HOOK(sub_824DD868, SetSamplerStateHook<12>);  // D3DDevice_SetSamplerState_SeparateZFilterEnable  // katamari-nx: N&B sub_82636890, sampler state 12 setter (state tables, this game index 12)
-BANJO_RENUT_HOOK(sub_824DDB40, SetSamplerStateHook<13>);  // D3DDevice_SetSamplerState_MinMipLevel  // katamari-nx: N&B sub_82636B10, sampler state 13 setter (state tables, this game index 13)
-BANJO_RENUT_HOOK(sub_824DDD20, SetSamplerStateHook<14>);  // D3DDevice_SetSamplerState_TrilinearThreshold  // katamari-nx: N&B sub_82636C80, sampler state 14 setter (state tables, this game index 14)
-BANJO_RENUT_HOOK(sub_824DD978, SetSamplerStateHook<15>);  // D3DDevice_SetSamplerState_AnisotropyBias  // katamari-nx: N&B sub_826369B0, sampler state 15 setter (state tables, this game index 15)
-BANJO_RENUT_HOOK(sub_824DDD78, SetSamplerStateHook<16>);  // D3DDevice_SetSamplerState_HGradientExpBias  // katamari-nx: N&B sub_82636CD8, sampler state 16 setter (state tables, this game index 16)
-BANJO_RENUT_HOOK(sub_824DDDD0, SetSamplerStateHook<17>);  // D3DDevice_SetSamplerState_VGradientExpBias  // katamari-nx: N&B sub_82636D30, sampler state 17 setter (state tables, this game index 17)
-BANJO_RENUT_HOOK(sub_824DDE28, SetSamplerStateHook<18>);  // D3DDevice_SetSamplerState_WhiteBorderColorW  // katamari-nx: N&B sub_82636D88, sampler state 18 setter (state tables, this game index 18)
-BANJO_RENUT_HOOK(sub_824DDE80, SetSamplerStateHook<19>);  // D3DDevice_SetSamplerState_PointBorderEnable  // katamari-nx: N&B sub_82636DE0, sampler state 19 setter (state tables, this game index 19)
+BANJO_RENUT_HOOK(sub_82257110, SetSamplerStateHook<0>);  // D3DDevice_SetSamplerState_AddressU  // rr6-nx: the game's state table; Katamari 824DDC30
+BANJO_RENUT_HOOK(sub_82257160, SetSamplerStateHook<1>);  // D3DDevice_SetSamplerState_AddressV  // rr6-nx: the game's state table; Katamari 824DDC80
+BANJO_RENUT_HOOK(sub_822571B0, SetSamplerStateHook<2>);  // D3DDevice_SetSamplerState_AddressW  // rr6-nx: the game's state table; Katamari 824DDCD0
+BANJO_RENUT_HOOK(sub_822570A0, SetSamplerStateHook<3>);  // D3DDevice_SetSamplerState_BorderColor  // rr6-nx: the game's state table; Katamari 824DDBC0
+BANJO_RENUT_HOOK(sub_82256C30, SetSamplerStateHook<4>);  // D3DDevice_SetSamplerState_MagFilter  // rr6-nx: the game's state table; Katamari 824DD680
+BANJO_RENUT_HOOK(sub_82256B20, SetSamplerStateHook<5>);  // D3DDevice_SetSamplerState_MinFilter  // rr6-nx: the game's state table; Katamari 824DD4F0
+BANJO_RENUT_HOOK(sub_82256D38, SetSamplerStateHook<6>);  // D3DDevice_SetSamplerState_MipFilter  // rr6-nx: the game's state table; Katamari 824DD810
+BANJO_RENUT_HOOK(sub_82256F00, SetSamplerStateHook<7>);  // D3DDevice_SetSamplerState_MipMapLodBias  // rr6-nx: the game's state table; Katamari 824DDA20
+BANJO_RENUT_HOOK(sub_82256FA0, SetSamplerStateHook<8>);  // D3DDevice_SetSamplerState_MaxMipLevel  // rr6-nx: the game's state table; Katamari 824DDAC0
+BANJO_RENUT_HOOK(sub_82256DE0, SetSamplerStateHook<9>);  // D3DDevice_SetSamplerState_MaxAnisotropy  // rr6-nx: the game's state table; Katamari 824DD900
+BANJO_RENUT_HOOK(sub_82256CF0, SetSamplerStateHook<10>);  // D3DDevice_SetSamplerState_MagFilterZ  // rr6-nx: the game's state table; Katamari 824DD778
+BANJO_RENUT_HOOK(sub_82256BE0, SetSamplerStateHook<11>);  // D3DDevice_SetSamplerState_MinFilterZ  // rr6-nx: the game's state table; Katamari 824DD5E8
+BANJO_RENUT_HOOK(sub_82256D90, SetSamplerStateHook<12>);  // D3DDevice_SetSamplerState_SeparateZFilterEnable  // rr6-nx: the game's state table; Katamari 824DD868
+BANJO_RENUT_HOOK(sub_82257020, SetSamplerStateHook<13>);  // D3DDevice_SetSamplerState_MinMipLevel  // rr6-nx: the game's state table; Katamari 824DDB40
+BANJO_RENUT_HOOK(sub_82257200, SetSamplerStateHook<14>);  // D3DDevice_SetSamplerState_TrilinearThreshold  // rr6-nx: the game's state table; Katamari 824DDD20
+BANJO_RENUT_HOOK(sub_82256E58, SetSamplerStateHook<15>);  // D3DDevice_SetSamplerState_AnisotropyBias  // rr6-nx: the game's state table; Katamari 824DD978
+BANJO_RENUT_HOOK(sub_82257258, SetSamplerStateHook<16>);  // D3DDevice_SetSamplerState_HGradientExpBias  // rr6-nx: the game's state table; Katamari 824DDD78
+BANJO_RENUT_HOOK(sub_822572B0, SetSamplerStateHook<17>);  // D3DDevice_SetSamplerState_VGradientExpBias  // rr6-nx: the game's state table; Katamari 824DDDD0
+BANJO_RENUT_HOOK(sub_82257308, SetSamplerStateHook<18>);  // D3DDevice_SetSamplerState_WhiteBorderColorW  // rr6-nx: the game's state table; Katamari 824DDE28
+BANJO_RENUT_HOOK(sub_82257360, SetSamplerStateHook<19>);  // D3DDevice_SetSamplerState_PointBorderEnable  // rr6-nx: the game's state table; Katamari 824DDE80
 
-BANJO_RENUT_HOOK(sub_824D2640, D3DDevice_SetTexture_hook);  // D3DDevice_SetTexture  // katamari-nx: N&B sub_821FE558, signature 0.82 (next 0.39)
-BANJO_RENUT_HOOK(sub_824A3D40, D3DDevice_SetTexture_hook);  // D3DDevice_SetTexture_Inline  // katamari-nx: N&B sub_82BF2578, signature 1.00 (next 0.71)
-BANJO_RENUT_HOOK(sub_824DDFE0, D3DDevice_SetStreamSource_hook);  // D3DDevice_SetStreamSource  // katamari-nx: N&B sub_821F9438, signature 0.83 (next 0.38)
-BANJO_RENUT_HOOK(sub_824DE188, D3DDevice_SetIndices_hook);  // D3DDevice_SetIndices  // katamari-nx: N&B sub_821DE438, signature 0.76 (next 0.34)
-BANJO_RENUT_HOOK(sub_824D4B48, D3DDevice_SetVertexDeclaration_hook);  // D3DDevice_SetVertexDeclaration  // katamari-nx: N&B sub_821D5060, D3DDevice_SetVertexDeclaration: 5 instructions, VertexDeclaration +11812 (N&B +11824); sig 0.67/0.43
-BANJO_RENUT_HOOK(sub_824DE730, D3DDevice_SetViewport_hook);  // D3DDevice_SetViewport  // katamari-nx: N&B sub_821F2090, D3DDevice_SetViewport: sig 0.63/0.30
-BANJO_RENUT_HOOK(sub_824DE4B8, D3D_SetViewport_hook);  // D3D_SetViewport  // katamari-nx: N&B sub_821F2110, D3D_SetViewport: sig 0.64/0.27
-BANJO_RENUT_HOOK(sub_824DDEE0, D3DDevice_SetScissorRect_hook);  // D3DDevice_SetScissorRect  // katamari-nx: N&B sub_821F2368, D3DDevice_SetScissorRect: Present's tail calls it; sig 0.49/0.24
-BANJO_RENUT_HOOK(sub_824DB8C8, D3D_SetSurfaceClip_hook);  // D3D_SetSurfaceClip  // katamari-nx: N&B sub_821F2460, signature 0.83 (next 0.37)
-BANJO_RENUT_HOOK(sub_824DE868, D3DDevice_SetRenderTarget_hook);  // D3DDevice_SetRenderTarget  // katamari-nx: N&B sub_82248BD0, D3DDevice_SetRenderTarget: InitializePresentationParameters calls it after CreateSurface, as N&B's; sig 0.62/0.31
-BANJO_RENUT_HOOK(sub_824DEBD0, D3DDevice_SetDepthStencilSurface_hook);  // D3DDevice_SetDepthStencilSurface  // katamari-nx: N&B sub_82248FB0, D3DDevice_SetDepthStencilSurface: likewise after the depth surface; sig 0.71/0.30
-BANJO_RENUT_HOOK(sub_824DE7D0, D3D_SetSurfaceInfo_hook);  // D3D_SetSurfaceInfo  // katamari-nx: N&B sub_82248F20, D3D_SetSurfaceInfo: sig 0.57/0.19; full viewport 0x820FAEB4
-BANJO_RENUT_HOOK(sub_824EFA58, D3DDevice_SetPredication_hook);  // D3DDevice_SetPredication  // katamari-nx: N&B sub_821F9A48, D3DDevice_SetPredication: sig 0.69 (SetCommandBufferPredication's best is the same function at 0.63: XDK 2.0.5632 has one)
-BANJO_RENUT_UNHOOKED_HOOK_SHARED(sub_826411C0, D3DDevice_SetCommandBufferPredication_hook);  // D3DDevice_SetCommandBufferPredication  // katamari-nx: not hooked (D3DDevice_SetCommandBufferPredication: see SetPredication)
-BANJO_RENUT_HOOK(sub_824D4CD8, D3DDevice_SetShaderGPRAllocation_hook);  // D3DDevice_SetShaderGPRAllocation  // katamari-nx: N&B sub_821EFD38, signature 0.78 (next 0.30)
-BANJO_RENUT_HOOK(sub_824D3FE0, D3D_CleanupGprAllocationSetup_hook);  // D3D_CleanupGprAllocationSetup  // katamari-nx: N&B sub_82637208, signature 0.98 (next 0.13)
-BANJO_RENUT_HOOK(sub_824E67C8, D3DDevice_SetScreenExtentQueryMode_hook);  // D3DDevice_SetScreenExtentQueryMode  // katamari-nx: N&B sub_826414C0, signature 1.00 (next 0.75)
-BANJO_RENUT_HOOK(sub_824D0488, D3DDevice_UnsetAll_hook);  // D3DDevice_UnsetAll  // katamari-nx: N&B sub_82634C10, signature 0.81 (next 0.34)
-BANJO_RENUT_HOOK(sub_824DE3C0, D3D_ResetAllState_hook);  // D3D_ResetAllState  // katamari-nx: N&B sub_82255C98, D3D_ResetAllState: sig 0.73/0.33; the device init sub_824E18D0 calls it last
-BANJO_RENUT_UNHOOKED_HOOK_SHARED(sub_82634B90, D3D_InvalidateConstants_hook);  // D3D_InvalidateConstants  // katamari-nx: not hooked (D3D_InvalidateConstants: ambiguous (0.65 / 0.61))
-BANJO_RENUT_HOOK(sub_824E0518, D3DDevice_BlockUntilIdle_hook);  // D3DDevice_BlockUntilIdle  // katamari-nx: N&B sub_82640010, signature 0.87 (next 0.63)
+BANJO_RENUT_HOOK(sub_822530A8, Rr6SetTexture);  // D3DDevice_SetTexture  // rr6-nx: Zuma pair of sub_8212A900; 51 sites; the game's texture, on its shadow; Katamari 824D2640
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824A3D40, D3DDevice_SetTexture_hook);  // D3DDevice_SetTexture_Inline  // rr6-nx: not hooked in this XDK; Katamari 824A3D40
+BANJO_RENUT_HOOK(sub_822576F8, Rr6SetStreamSource);  // D3DDevice_SetStreamSource  // rr6-nx: Zuma pair; 11 sites; keeps a reference, as this XDK does; Katamari 824DDFE0
+BANJO_RENUT_HOOK(sub_82257798, Rr6SetIndices);  // D3DDevice_SetIndices  // rr6-nx: stored at +12532, the old released; 7 sites; Katamari 824DE188
+BANJO_RENUT_HOOK(sub_8224F018, Rr6SetVertexDeclaration);  // D3DDevice_SetVertexDeclaration  // rr6-nx: Zuma pair; 47 sites; keeps a reference; Katamari 824D4B48
+BANJO_RENUT_HOOK(sub_82257488, D3DDevice_SetViewport_hook);  // D3DDevice_SetViewport  // rr6-nx: writes the 6 words at +12808 and the viewport floats; 3 sites; Katamari 824DE730
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DE4B8, D3D_SetViewport_hook);  // D3D_SetViewport  // rr6-nx: not hooked in this XDK; Katamari 824DE4B8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DDEE0, D3DDevice_SetScissorRect_hook);  // D3DDevice_SetScissorRect  // rr6-nx: not hooked in this XDK; Katamari 824DDEE0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DB8C8, D3D_SetSurfaceClip_hook);  // D3D_SetSurfaceClip  // rr6-nx: not hooked in this XDK; Katamari 824DB8C8
+BANJO_RENUT_HOOK(sub_82257C78, Rr6SetRenderTarget);  // D3DDevice_SetRenderTarget  // rr6-nx: (dev, index, surface); 7 sites; the bind count in Common, on the surface's shadow; Katamari 824DE868
+BANJO_RENUT_HOOK(sub_82257FE0, Rr6SetDepthStencil);  // D3DDevice_SetDepthStencilSurface  // rr6-nx: (dev, surface); 11 sites; Katamari 824DEBD0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DE7D0, D3D_SetSurfaceInfo_hook);  // D3D_SetSurfaceInfo  // rr6-nx: not hooked in this XDK; Katamari 824DE7D0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824EFA58, D3DDevice_SetPredication_hook);  // D3DDevice_SetPredication  // rr6-nx: not hooked in this XDK; Katamari 824EFA58
+BANJO_RENUT_UNHOOKED_HOOK_SHARED(unlinked_826411C0, D3DDevice_SetCommandBufferPredication_hook);  // D3DDevice_SetCommandBufferPredication  // rr6-nx: not hooked in this XDK; Katamari 826411C0
+BANJO_RENUT_HOOK(sub_8224EDA0, D3DDevice_SetShaderGPRAllocation_hook);  // D3DDevice_SetShaderGPRAllocation  // rr6-nx: Feeding Frenzy pair of sub_820B6258, register 0x0D00 (imm 3328); 3 sites; Katamari 824D4CD8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D3FE0, D3D_CleanupGprAllocationSetup_hook);  // D3D_CleanupGprAllocationSetup  // rr6-nx: not hooked in this XDK; Katamari 824D3FE0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E67C8, D3DDevice_SetScreenExtentQueryMode_hook);  // D3DDevice_SetScreenExtentQueryMode  // rr6-nx: not hooked in this XDK; Katamari 824E67C8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D0488, D3DDevice_UnsetAll_hook);  // D3DDevice_UnsetAll  // rr6-nx: not hooked in this XDK; Katamari 824D0488
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DE3C0, D3D_ResetAllState_hook);  // D3D_ResetAllState  // rr6-nx: not hooked in this XDK; Katamari 824DE3C0
+BANJO_RENUT_UNHOOKED_HOOK_SHARED(unlinked_82634B90, D3D_InvalidateConstants_hook);  // D3D_InvalidateConstants  // rr6-nx: not hooked in this XDK; Katamari 82634B90
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824E0518, D3DDevice_BlockUntilIdle_hook);  // D3DDevice_BlockUntilIdle  // rr6-nx: not hooked in this XDK; Katamari 824E0518
 // Through a thunk (j_D3DDevice_SetRenderTarget 0x82636EC8).
-BANJO_RENUT_UNHOOKED_HOOK(sub_82636EC8, D3DDevice_SetRenderTarget_hook);  // D3DDevice_SetRenderTarget_Thunk  // katamari-nx: not hooked (signature too weak or ambiguous (sub_8257F318 1.00, next 1.00))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82636ED0, D3DDevice_GetRenderTarget_hook);  // D3DDevice_GetRenderTarget  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824B12B8 0.63, next 0.63))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82636F10, D3DDevice_GetDepthStencilSurface_hook);  // D3DDevice_GetDepthStencilSurface  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824B12B8 0.69, next 0.69))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82636E40, D3DDevice_GetStreamSource_hook);  // D3DDevice_GetStreamSource  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824DE100 0.56, next 0.42))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82244B18, D3DDevice_GetViewport_hook);  // D3DDevice_GetViewport  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824DC1A0 0.20, next 0.11))
-BANJO_RENUT_UNHOOKED_HOOK(sub_826370E8, D3DDevice_SetClipPlane_hook);  // D3DDevice_SetClipPlane  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824D5048 0.34, next 0.33))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82637138, D3DDevice_SetVertexFetchConstant_hook);  // D3DDevice_SetVertexFetchConstant  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824DE100 0.38, next 0.29))
-BANJO_RENUT_HOOK(sub_824D4470, D3DDevice_SetVertexShaderConstantB_hook);  // D3DDevice_SetVertexShaderConstantB  // katamari-nx: N&B sub_821F0B40, signature 0.84 (next 0.77)
-BANJO_RENUT_HOOK(sub_824D44D0, D3DDevice_SetPixelShaderConstantB_hook);  // D3DDevice_SetPixelShaderConstantB  // katamari-nx: N&B sub_82237208, signature 0.84 (next 0.77)
-BANJO_RENUT_UNHOOKED_HOOK(sub_826374B0, D3DDevice_SetVertexShaderConstantI_hook);  // D3DDevice_SetVertexShaderConstantI  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824D4588 0.33, next 0.33))
-BANJO_RENUT_UNHOOKED_HOOK(sub_82637500, D3DDevice_SetPixelShaderConstantI_hook);  // D3DDevice_SetPixelShaderConstantI  // katamari-nx: not hooked (signature too weak or ambiguous (sub_824D4588 0.33, next 0.33))
-BANJO_RENUT_UNHOOKED_HOOK(sub_8263ED90, D3DDevice_EndIndexedVertices_hook);  // D3DDevice_EndIndexedVertices  // katamari-nx: not hooked (signature too weak or ambiguous (sub_8255A1E8 0.63, next 0.31))
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_82636EC8, D3DDevice_SetRenderTarget_hook);  // D3DDevice_SetRenderTarget_Thunk  // rr6-nx: not hooked in this XDK; Katamari 82636EC8
+BANJO_RENUT_HOOK(sub_82257818, Rr6GetRenderTarget);  // D3DDevice_GetRenderTarget  // rr6-nx: 18 instructions, AddRef; the game's surface back from its shadow; Katamari 82636ED0
+BANJO_RENUT_HOOK(sub_82257860, Rr6GetDepthStencil);  // D3DDevice_GetDepthStencilSurface  // rr6-nx: +12552, AddRef; Katamari 82636F10
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_82636E40, D3DDevice_GetStreamSource_hook);  // D3DDevice_GetStreamSource  // rr6-nx: not hooked in this XDK; Katamari 82636E40
+BANJO_RENUT_HOOK(sub_822576D0, D3DDevice_GetViewport_hook);  // D3DDevice_GetViewport  // rr6-nx: copies 6 words from +12808; 6 sites; Katamari 82244B18
+BANJO_RENUT_HOOK(sub_822579C0, D3DDevice_SetClipPlane_hook);  // D3DDevice_SetClipPlane  // rr6-nx: four floats at register 1480; 1 site; Katamari 826370E8
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_82637138, D3DDevice_SetVertexFetchConstant_hook);  // D3DDevice_SetVertexFetchConstant  // rr6-nx: not hooked in this XDK; Katamari 82637138
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D4470, D3DDevice_SetVertexShaderConstantB_hook);  // D3DDevice_SetVertexShaderConstantB  // rr6-nx: not hooked in this XDK; Katamari 824D4470
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824D44D0, D3DDevice_SetPixelShaderConstantB_hook);  // D3DDevice_SetPixelShaderConstantB  // rr6-nx: not hooked in this XDK; Katamari 824D44D0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_826374B0, D3DDevice_SetVertexShaderConstantI_hook);  // D3DDevice_SetVertexShaderConstantI  // rr6-nx: not hooked in this XDK; Katamari 826374B0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_82637500, D3DDevice_SetPixelShaderConstantI_hook);  // D3DDevice_SetPixelShaderConstantI  // rr6-nx: not hooked in this XDK; Katamari 82637500
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_8263ED90, D3DDevice_EndIndexedVertices_hook);  // D3DDevice_EndIndexedVertices  // rr6-nx: not hooked in this XDK; Katamari 8263ED90
 
 // Render state getters, by their index in N&B's table (off_82E506F0, field 0).
-BANJO_RENUT_HOOK(sub_824DC330, GetRenderStateHook<10>);  // D3DDevice_GetRenderState_ZEnable  // katamari-nx: N&B sub_82635778, render state 10 getter (state tables, this game index 10)
-BANJO_RENUT_HOOK(sub_824DC390, GetRenderStateHook<11>);  // D3DDevice_GetRenderState_ZFunc  // katamari-nx: N&B sub_826357B0, render state 11 getter (state tables, this game index 11)
-BANJO_RENUT_HOOK(sub_824DC358, GetRenderStateHook<12>);  // D3DDevice_GetRenderState_ZWriteEnable  // katamari-nx: N&B sub_826357A0, render state 12 getter (state tables, this game index 12)
-BANJO_RENUT_HOOK(sub_824DBBF8, GetRenderStateHook<13>);  // D3DDevice_GetRenderState_FillMode  // katamari-nx: N&B sub_82635488, render state 13 getter (state tables, this game index 13)
-BANJO_RENUT_HOOK(sub_824DBBC8, GetRenderStateHook<14>);  // D3DDevice_GetRenderState_CullMode  // katamari-nx: N&B sub_82635478, render state 14 getter (state tables, this game index 14)
-BANJO_RENUT_HOOK(sub_824DBCC0, GetRenderStateHook<15>);  // D3DDevice_GetRenderState_AlphaBlendEnable  // katamari-nx: N&B sub_826354D0, render state 15 getter (state tables, this game index 15)
-BANJO_RENUT_HOOK(sub_824DC058, GetRenderStateHook<16>);  // D3DDevice_GetRenderState_SeparateAlphaBlendEnable  // katamari-nx: N&B sub_82635540, render state 16 getter (state tables, this game index 16)
-BANJO_RENUT_HOOK(sub_824DC1A0, GetRenderStateHook<17>);  // D3DDevice_GetRenderState_BlendFactor  // katamari-nx: N&B sub_826355E8, render state 17 getter (state tables, this game index 17)
-BANJO_RENUT_HOOK(sub_824DBDE0, GetRenderStateHook<18>);  // D3DDevice_GetRenderState_SrcBlend  // katamari-nx: N&B sub_826354F0, render state 18 getter (state tables, this game index 18)
-BANJO_RENUT_HOOK(sub_824DBE70, GetRenderStateHook<19>);  // D3DDevice_GetRenderState_DestBlend  // katamari-nx: N&B sub_82635500, render state 19 getter (state tables, this game index 19)
-BANJO_RENUT_HOOK(sub_824DBD50, GetRenderStateHook<20>);  // D3DDevice_GetRenderState_BlendOp  // katamari-nx: N&B sub_826354E0, render state 20 getter (state tables, this game index 20)
-BANJO_RENUT_HOOK(sub_824DBF50, GetRenderStateHook<21>);  // D3DDevice_GetRenderState_SrcBlendAlpha  // katamari-nx: N&B sub_82635520, render state 21 getter (state tables, this game index 21)
-BANJO_RENUT_HOOK(sub_824DBFC0, GetRenderStateHook<22>);  // D3DDevice_GetRenderState_DestBlendAlpha  // katamari-nx: N&B sub_82635530, render state 22 getter (state tables, this game index 22)
-BANJO_RENUT_HOOK(sub_824DBEE0, GetRenderStateHook<23>);  // D3DDevice_GetRenderState_BlendOpAlpha  // katamari-nx: N&B sub_82635510, render state 23 getter (state tables, this game index 23)
-BANJO_RENUT_HOOK(sub_824DBC30, GetRenderStateHook<24>);  // D3DDevice_GetRenderState_AlphaTestEnable  // katamari-nx: N&B sub_826354C0, render state 24 getter (state tables, this game index 24)
-BANJO_RENUT_HOOK(sub_824DC0A0, GetRenderStateHook<25>);  // D3DDevice_GetRenderState_AlphaRef  // katamari-nx: N&B sub_82635588, render state 25 getter (state tables, this game index 25)
-BANJO_RENUT_HOOK(sub_824DC0F0, GetRenderStateHook<26>);  // D3DDevice_GetRenderState_AlphaFunc  // katamari-nx: N&B sub_826355D8, render state 26 getter (state tables, this game index 26)
-BANJO_RENUT_HOOK(sub_824DC3D8, GetRenderStateHook<27>);  // D3DDevice_GetRenderState_StencilEnable  // katamari-nx: N&B sub_826357F8, render state 27 getter (state tables, this game index 27)
-BANJO_RENUT_HOOK(sub_824DC408, GetRenderStateHook<28>);  // D3DDevice_GetRenderState_TwoSidedStencilMode  // katamari-nx: N&B sub_82635828, render state 28 getter (state tables, this game index 28)
-BANJO_RENUT_HOOK(sub_824DC470, GetRenderStateHook<29>);  // D3DDevice_GetRenderState_StencilFail  // katamari-nx: N&B sub_82635890, render state 29 getter (state tables, this game index 29)
-BANJO_RENUT_HOOK(sub_824DC4A8, GetRenderStateHook<30>);  // D3DDevice_GetRenderState_StencilZFail  // katamari-nx: N&B sub_826358C8, render state 30 getter (state tables, this game index 30)
-BANJO_RENUT_HOOK(sub_824DC4D8, GetRenderStateHook<31>);  // D3DDevice_GetRenderState_StencilPass  // katamari-nx: N&B sub_826358F8, render state 31 getter (state tables, this game index 31)
-BANJO_RENUT_HOOK(sub_824DC438, GetRenderStateHook<32>);  // D3DDevice_GetRenderState_StencilFunc  // katamari-nx: N&B sub_82635858, render state 32 getter (state tables, this game index 32)
-BANJO_RENUT_HOOK(sub_824DC5D0, GetRenderStateHook<33>);  // D3DDevice_GetRenderState_StencilRef  // katamari-nx: N&B sub_826359F0, render state 33 getter (state tables, this game index 33)
-BANJO_RENUT_HOOK(sub_824DC5F0, GetRenderStateHook<34>);  // D3DDevice_GetRenderState_StencilMask  // katamari-nx: N&B sub_82635A10, render state 34 getter (state tables, this game index 34)
-BANJO_RENUT_HOOK(sub_824DC610, GetRenderStateHook<35>);  // D3DDevice_GetRenderState_StencilWriteMask  // katamari-nx: N&B sub_82635A30, render state 35 getter (state tables, this game index 35)
-BANJO_RENUT_HOOK(sub_824DC540, GetRenderStateHook<36>);  // D3DDevice_GetRenderState_CCWStencilFail  // katamari-nx: N&B sub_82635960, render state 36 getter (state tables, this game index 36)
-BANJO_RENUT_HOOK(sub_824DC578, GetRenderStateHook<37>);  // D3DDevice_GetRenderState_CCWStencilZFail  // katamari-nx: N&B sub_82635998, render state 37 getter (state tables, this game index 37)
-BANJO_RENUT_HOOK(sub_824DC5A8, GetRenderStateHook<38>);  // D3DDevice_GetRenderState_CCWStencilPass  // katamari-nx: N&B sub_826359C8, render state 38 getter (state tables, this game index 38)
-BANJO_RENUT_HOOK(sub_824DC508, GetRenderStateHook<39>);  // D3DDevice_GetRenderState_CCWStencilFunc  // katamari-nx: N&B sub_82635928, render state 39 getter (state tables, this game index 39)
-BANJO_RENUT_HOOK(sub_824DC630, GetRenderStateHook<40>);  // D3DDevice_GetRenderState_CCWStencilRef  // katamari-nx: N&B sub_82635A50, render state 40 getter (state tables, this game index 40)
-BANJO_RENUT_HOOK(sub_824DC650, GetRenderStateHook<41>);  // D3DDevice_GetRenderState_CCWStencilMask  // katamari-nx: N&B sub_82635A70, render state 41 getter (state tables, this game index 41)
-BANJO_RENUT_HOOK(sub_824DC670, GetRenderStateHook<42>);  // D3DDevice_GetRenderState_CCWStencilWriteMask  // katamari-nx: N&B sub_82635A90, render state 42 getter (state tables, this game index 42)
-BANJO_RENUT_HOOK(sub_824DC6B8, GetRenderStateHook<43>);  // D3DDevice_GetRenderState_ClipPlaneEnable  // katamari-nx: N&B sub_82635A98, render state 43 getter (state tables, this game index 43)
-BANJO_RENUT_HOOK(sub_824DC9F0, GetRenderStateHook<44>);  // D3DDevice_GetRenderState_PointSize  // katamari-nx: N&B sub_82635D10, render state 44 getter (state tables, this game index 44)
-BANJO_RENUT_HOOK(sub_824DCA48, GetRenderStateHook<45>);  // D3DDevice_GetRenderState_PointSizeMin  // katamari-nx: N&B sub_82635D68, render state 45 getter (state tables, this game index 45)
-BANJO_RENUT_HOOK(sub_824DC998, GetRenderStateHook<46>);  // D3DDevice_GetRenderState_PointSpriteEnable  // katamari-nx: N&B sub_82635CB8, render state 46 getter (state tables, this game index 46)
-BANJO_RENUT_HOOK(sub_824DCAA0, GetRenderStateHook<47>);  // D3DDevice_GetRenderState_PointSizeMax  // katamari-nx: N&B sub_82635D78, render state 47 getter (state tables, this game index 47)
-BANJO_RENUT_HOOK(sub_824DC860, GetRenderStateHook<48>);  // D3DDevice_GetRenderState_MultiSampleAntiAlias  // katamari-nx: N&B sub_82635BB8, render state 48 getter (state tables, this game index 48)
-BANJO_RENUT_HOOK(sub_824DC888, GetRenderStateHook<49>);  // D3DDevice_GetRenderState_MultiSampleMask  // katamari-nx: N&B sub_82635BE0, render state 49 getter (state tables, this game index 49)
-BANJO_RENUT_HOOK(sub_824DC6C8, GetRenderStateHook<50>);  // D3DDevice_GetRenderState_ScissorTestEnable  // katamari-nx: N&B sub_82635AB8, render state 50 getter (state tables, this game index 50)
-BANJO_RENUT_HOOK(sub_824DC778, GetRenderStateHook<51>);  // D3DDevice_GetRenderState_SlopeScaleDepthBias  // katamari-nx: N&B sub_82635B68, render state 51 getter (state tables, this game index 51)
-BANJO_RENUT_HOOK(sub_824DC830, GetRenderStateHook<52>);  // D3DDevice_GetRenderState_DepthBias  // katamari-nx: N&B sub_82635B88, render state 52 getter (state tables, this game index 52)
-BANJO_RENUT_HOOK(sub_824DC8C8, GetRenderStateHook<53>);  // D3DDevice_GetRenderState_ColorWriteEnable  // katamari-nx: N&B sub_82635BE8, render state 53 getter (state tables, this game index 53)
-BANJO_RENUT_HOOK(sub_824DC908, GetRenderStateHook<54>);  // D3DDevice_GetRenderState_ColorWriteEnable1  // katamari-nx: N&B sub_82635C28, render state 54 getter (state tables, this game index 54)
-BANJO_RENUT_HOOK(sub_824DC948, GetRenderStateHook<55>);  // D3DDevice_GetRenderState_ColorWriteEnable2  // katamari-nx: N&B sub_82635C68, render state 55 getter (state tables, this game index 55)
-BANJO_RENUT_HOOK(sub_824DC988, GetRenderStateHook<56>);  // D3DDevice_GetRenderState_ColorWriteEnable3  // katamari-nx: N&B sub_82635CA8, render state 56 getter (state tables, this game index 56)
-BANJO_RENUT_HOOK(sub_824DD1B8, GetRenderStateHook<57>);  // D3DDevice_GetRenderState_TessellationMode  // katamari-nx: N&B sub_826363F0, render state 57 getter (state tables, this game index 57)
-BANJO_RENUT_HOOK(sub_824DD148, GetRenderStateHook<58>);  // D3DDevice_GetRenderState_MinTessellationLevel  // katamari-nx: N&B sub_82636380, render state 58 getter (state tables, this game index 58)
-BANJO_RENUT_HOOK(sub_824DD180, GetRenderStateHook<59>);  // D3DDevice_GetRenderState_MaxTessellationLevel  // katamari-nx: N&B sub_826363B8, render state 59 getter (state tables, this game index 59)
-BANJO_RENUT_HOOK(sub_824DCD10, GetRenderStateHook<60>);  // D3DDevice_GetRenderState_Wrap0  // katamari-nx: N&B sub_82635FE8, render state 60 getter (state tables, this game index 60)
-BANJO_RENUT_HOOK(sub_824DCD20, GetRenderStateHook<61>);  // D3DDevice_GetRenderState_Wrap1  // katamari-nx: N&B sub_82635FF8, render state 61 getter (state tables, this game index 61)
-BANJO_RENUT_HOOK(sub_824DCD30, GetRenderStateHook<62>);  // D3DDevice_GetRenderState_Wrap2  // katamari-nx: N&B sub_82636008, render state 62 getter (state tables, this game index 62)
-BANJO_RENUT_HOOK(sub_824DCD40, GetRenderStateHook<63>);  // D3DDevice_GetRenderState_Wrap3  // katamari-nx: N&B sub_82636018, render state 63 getter (state tables, this game index 63)
-BANJO_RENUT_HOOK(sub_824DCD50, GetRenderStateHook<64>);  // D3DDevice_GetRenderState_Wrap4  // katamari-nx: N&B sub_82636028, render state 64 getter (state tables, this game index 64)
-BANJO_RENUT_HOOK(sub_824DCD60, GetRenderStateHook<65>);  // D3DDevice_GetRenderState_Wrap5  // katamari-nx: N&B sub_82636038, render state 65 getter (state tables, this game index 65)
-BANJO_RENUT_HOOK(sub_824DCD70, GetRenderStateHook<66>);  // D3DDevice_GetRenderState_Wrap6  // katamari-nx: N&B sub_82636048, render state 66 getter (state tables, this game index 66)
-BANJO_RENUT_HOOK(sub_824DCD80, GetRenderStateHook<67>);  // D3DDevice_GetRenderState_Wrap7  // katamari-nx: N&B sub_82636058, render state 67 getter (state tables, this game index 67)
-BANJO_RENUT_HOOK(sub_824DCD90, GetRenderStateHook<68>);  // D3DDevice_GetRenderState_Wrap8  // katamari-nx: N&B sub_82636068, render state 68 getter (state tables, this game index 68)
-BANJO_RENUT_HOOK(sub_824DCDA0, GetRenderStateHook<69>);  // D3DDevice_GetRenderState_Wrap9  // katamari-nx: N&B sub_82636078, render state 69 getter (state tables, this game index 69)
-BANJO_RENUT_HOOK(sub_824DCDB0, GetRenderStateHook<70>);  // D3DDevice_GetRenderState_Wrap10  // katamari-nx: N&B sub_82636088, render state 70 getter (state tables, this game index 70)
-BANJO_RENUT_HOOK(sub_824DCDC0, GetRenderStateHook<71>);  // D3DDevice_GetRenderState_Wrap11  // katamari-nx: N&B sub_82636098, render state 71 getter (state tables, this game index 71)
-BANJO_RENUT_HOOK(sub_824DCDD0, GetRenderStateHook<72>);  // D3DDevice_GetRenderState_Wrap12  // katamari-nx: N&B sub_826360A8, render state 72 getter (state tables, this game index 72)
-BANJO_RENUT_HOOK(sub_824DCDE0, GetRenderStateHook<73>);  // D3DDevice_GetRenderState_Wrap13  // katamari-nx: N&B sub_826360B8, render state 73 getter (state tables, this game index 73)
-BANJO_RENUT_HOOK(sub_824DCDF0, GetRenderStateHook<74>);  // D3DDevice_GetRenderState_Wrap14  // katamari-nx: N&B sub_826360C8, render state 74 getter (state tables, this game index 74)
-BANJO_RENUT_HOOK(sub_824DCE00, GetRenderStateHook<75>);  // D3DDevice_GetRenderState_Wrap15  // katamari-nx: N&B sub_826360D8, render state 75 getter (state tables, this game index 75)
-BANJO_RENUT_HOOK(sub_824DCE50, GetRenderStateHook<76>);  // D3DDevice_GetRenderState_ViewportEnable  // katamari-nx: N&B sub_826360E8, render state 76 getter (state tables, this game index 76)
-BANJO_RENUT_HOOK(sub_824DCF08, GetRenderStateHook<77>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable  // katamari-nx: N&B sub_82636188, render state 77 getter (state tables, this game index 77)
-BANJO_RENUT_HOOK(sub_824DCFB8, GetRenderStateHook<78>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable1  // katamari-nx: N&B sub_82636220, render state 78 getter (state tables, this game index 78)
-BANJO_RENUT_HOOK(sub_824DD068, GetRenderStateHook<79>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable2  // katamari-nx: N&B sub_826362B8, render state 79 getter (state tables, this game index 79)
-BANJO_RENUT_HOOK(sub_824DD118, GetRenderStateHook<80>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable3  // katamari-nx: N&B sub_82636350, render state 80 getter (state tables, this game index 80)
-BANJO_RENUT_HOOK(sub_824DD1F0, GetRenderStateHook<81>);  // D3DDevice_GetRenderState_HalfPixelOffset  // katamari-nx: N&B sub_82636428, render state 81 getter (state tables, this game index 81)
-BANJO_RENUT_HOOK(sub_824DD220, GetRenderStateHook<82>);  // D3DDevice_GetRenderState_PrimitiveResetEnable  // katamari-nx: N&B sub_82636458, render state 82 getter (state tables, this game index 82)
-BANJO_RENUT_HOOK(sub_824DD250, GetRenderStateHook<83>);  // D3DDevice_GetRenderState_PrimitiveResetIndex  // katamari-nx: N&B sub_82636488, render state 83 getter (state tables, this game index 83)
-BANJO_RENUT_HOOK(sub_824DD278, GetRenderStateHook<84>);  // D3DDevice_GetRenderState_AlphaToMaskEnable  // katamari-nx: N&B sub_826364B0, render state 84 getter (state tables, this game index 84)
-BANJO_RENUT_HOOK(sub_824DD2A8, GetRenderStateHook<85>);  // D3DDevice_GetRenderState_AlphaToMaskOffsets  // katamari-nx: N&B sub_826364E0, render state 85 getter (state tables, this game index 85)
-BANJO_RENUT_HOOK(sub_824DD2E8, GetRenderStateHook<86>);  // D3DDevice_GetRenderState_GuardBand_X  // katamari-nx: N&B sub_82636510, render state 86 getter (state tables, this game index 86)
-BANJO_RENUT_HOOK(sub_824DD318, GetRenderStateHook<87>);  // D3DDevice_GetRenderState_GuardBand_Y  // katamari-nx: N&B sub_82636540, render state 87 getter (state tables, this game index 87)
-BANJO_RENUT_HOOK(sub_824DD340, GetRenderStateHook<88>);  // D3DDevice_GetRenderState_DiscardBand_X  // katamari-nx: N&B sub_82636568, render state 88 getter (state tables, this game index 88)
-BANJO_RENUT_HOOK(sub_824DD370, GetRenderStateHook<89>);  // D3DDevice_GetRenderState_DiscardBand_Y  // katamari-nx: N&B sub_82636598, render state 89 getter (state tables, this game index 89)
-BANJO_RENUT_HOOK(sub_824DD430, GetRenderStateHook<90>);  // D3DDevice_GetRenderState_HiStencilEnable  // katamari-nx: N&B sub_82636600, render state 90 getter (state tables, this game index 90)
-BANJO_RENUT_HOOK(sub_824DD460, GetRenderStateHook<91>);  // D3DDevice_GetRenderState_HiStencilWriteEnable  // katamari-nx: N&B sub_82636630, render state 91 getter (state tables, this game index 91)
-BANJO_RENUT_HOOK(sub_824DD490, GetRenderStateHook<92>);  // D3DDevice_GetRenderState_HiStencilFunc  // katamari-nx: N&B sub_82636660, render state 92 getter (state tables, this game index 92)
-BANJO_RENUT_HOOK(sub_824DD4B8, GetRenderStateHook<93>);  // D3DDevice_GetRenderState_HiStencilRef  // katamari-nx: N&B sub_82636688, render state 93 getter (state tables, this game index 93)
-BANJO_RENUT_HOOK(sub_824DD4C8, GetRenderStateHook<94>);  // D3DDevice_GetRenderState_PresentInterval  // katamari-nx: N&B sub_82636698, render state 94 getter (state tables, this game index 94)
-BANJO_RENUT_HOOK(sub_824DD4E0, GetRenderStateHook<95>);  // D3DDevice_GetRenderState_PresentImmediateThreshold  // katamari-nx: N&B sub_826366B0, render state 95 getter (state tables, this game index 95)
-BANJO_RENUT_HOOK(sub_824DD398, GetRenderStateHook<96>);  // D3DDevice_GetRenderState_HiZEnable  // katamari-nx: N&B sub_826365C0, render state 96 getter (state tables, this game index 96)
-BANJO_RENUT_HOOK(sub_824DD400, GetRenderStateHook<97>);  // D3DDevice_GetRenderState_HiZWriteEnable  // katamari-nx: N&B sub_826365D0, render state 97 getter (state tables, this game index 97)
-BANJO_RENUT_HOOK(sub_824DC248, GetRenderStateHook<98>);  // D3DDevice_GetRenderState_LastPixel  // katamari-nx: N&B sub_82635688, render state 98 getter (state tables, this game index 98)
-BANJO_RENUT_HOOK(sub_824DC298, GetRenderStateHook<99>);  // D3DDevice_GetRenderState_LineWidth  // katamari-nx: N&B sub_826356D8, render state 99 getter (state tables, this game index 99)
-BANJO_RENUT_HOOK(sub_824DC2E8, GetRenderStateHook<100>);  // D3DDevice_GetRenderState_Buffer2Frames  // katamari-nx: N&B sub_82635730, render state 100 getter (state tables, this game index 100)
+BANJO_RENUT_HOOK(sub_82255880, GetRenderStateHook<10>);  // D3DDevice_GetRenderState_ZEnable  // rr6-nx: the game's state table; Katamari 824DC330
+BANJO_RENUT_HOOK(sub_822558F8, GetRenderStateHook<11>);  // D3DDevice_GetRenderState_ZFunc  // rr6-nx: the game's state table; Katamari 824DC390
+BANJO_RENUT_HOOK(sub_822558B0, GetRenderStateHook<12>);  // D3DDevice_GetRenderState_ZWriteEnable  // rr6-nx: the game's state table; Katamari 824DC358
+BANJO_RENUT_HOOK(sub_822551A8, GetRenderStateHook<13>);  // D3DDevice_GetRenderState_FillMode  // rr6-nx: the game's state table; Katamari 824DBBF8
+BANJO_RENUT_HOOK(sub_82255170, GetRenderStateHook<14>);  // D3DDevice_GetRenderState_CullMode  // rr6-nx: the game's state table; Katamari 824DBBC8
+BANJO_RENUT_HOOK(sub_82255290, GetRenderStateHook<15>);  // D3DDevice_GetRenderState_AlphaBlendEnable  // rr6-nx: the game's state table; Katamari 824DBCC0
+BANJO_RENUT_HOOK(sub_82255660, GetRenderStateHook<16>);  // D3DDevice_GetRenderState_SeparateAlphaBlendEnable  // rr6-nx: the game's state table; Katamari 824DC058
+BANJO_RENUT_HOOK(sub_822557B8, GetRenderStateHook<17>);  // D3DDevice_GetRenderState_BlendFactor  // rr6-nx: the game's state table; Katamari 824DC1A0
+BANJO_RENUT_HOOK(sub_822553C0, GetRenderStateHook<18>);  // D3DDevice_GetRenderState_SrcBlend  // rr6-nx: the game's state table; Katamari 824DBDE0
+BANJO_RENUT_HOOK(sub_82255458, GetRenderStateHook<19>);  // D3DDevice_GetRenderState_DestBlend  // rr6-nx: the game's state table; Katamari 824DBE70
+BANJO_RENUT_HOOK(sub_82255328, GetRenderStateHook<20>);  // D3DDevice_GetRenderState_BlendOp  // rr6-nx: the game's state table; Katamari 824DBD50
+BANJO_RENUT_HOOK(sub_82255548, GetRenderStateHook<21>);  // D3DDevice_GetRenderState_SrcBlendAlpha  // rr6-nx: the game's state table; Katamari 824DBF50
+BANJO_RENUT_HOOK(sub_822555C0, GetRenderStateHook<22>);  // D3DDevice_GetRenderState_DestBlendAlpha  // rr6-nx: the game's state table; Katamari 824DBFC0
+BANJO_RENUT_HOOK(sub_822554D0, GetRenderStateHook<23>);  // D3DDevice_GetRenderState_BlendOpAlpha  // rr6-nx: the game's state table; Katamari 824DBEE0
+BANJO_RENUT_HOOK(sub_822551F0, GetRenderStateHook<24>);  // D3DDevice_GetRenderState_AlphaTestEnable  // rr6-nx: the game's state table; Katamari 824DBC30
+BANJO_RENUT_HOOK(sub_822556B0, GetRenderStateHook<25>);  // D3DDevice_GetRenderState_AlphaRef  // rr6-nx: the game's state table; Katamari 824DC0A0
+BANJO_RENUT_HOOK(sub_82255708, GetRenderStateHook<26>);  // D3DDevice_GetRenderState_AlphaFunc  // rr6-nx: the game's state table; Katamari 824DC0F0
+BANJO_RENUT_HOOK(sub_82255950, GetRenderStateHook<27>);  // D3DDevice_GetRenderState_StencilEnable  // rr6-nx: the game's state table; Katamari 824DC3D8
+BANJO_RENUT_HOOK(sub_82255990, GetRenderStateHook<28>);  // D3DDevice_GetRenderState_TwoSidedStencilMode  // rr6-nx: the game's state table; Katamari 824DC408
+BANJO_RENUT_HOOK(sub_82255A10, GetRenderStateHook<29>);  // D3DDevice_GetRenderState_StencilFail  // rr6-nx: the game's state table; Katamari 824DC470
+BANJO_RENUT_HOOK(sub_82255A58, GetRenderStateHook<30>);  // D3DDevice_GetRenderState_StencilZFail  // rr6-nx: the game's state table; Katamari 824DC4A8
+BANJO_RENUT_HOOK(sub_82255A90, GetRenderStateHook<31>);  // D3DDevice_GetRenderState_StencilPass  // rr6-nx: the game's state table; Katamari 824DC4D8
+BANJO_RENUT_HOOK(sub_822559C8, GetRenderStateHook<32>);  // D3DDevice_GetRenderState_StencilFunc  // rr6-nx: the game's state table; Katamari 824DC438
+BANJO_RENUT_HOOK(sub_82255BC0, GetRenderStateHook<33>);  // D3DDevice_GetRenderState_StencilRef  // rr6-nx: the game's state table; Katamari 824DC5D0
+BANJO_RENUT_HOOK(sub_82255BE8, GetRenderStateHook<34>);  // D3DDevice_GetRenderState_StencilMask  // rr6-nx: the game's state table; Katamari 824DC5F0
+BANJO_RENUT_HOOK(sub_82255C10, GetRenderStateHook<35>);  // D3DDevice_GetRenderState_StencilWriteMask  // rr6-nx: the game's state table; Katamari 824DC610
+BANJO_RENUT_HOOK(sub_82255B10, GetRenderStateHook<36>);  // D3DDevice_GetRenderState_CCWStencilFail  // rr6-nx: the game's state table; Katamari 824DC540
+BANJO_RENUT_HOOK(sub_82255B58, GetRenderStateHook<37>);  // D3DDevice_GetRenderState_CCWStencilZFail  // rr6-nx: the game's state table; Katamari 824DC578
+BANJO_RENUT_HOOK(sub_82255B90, GetRenderStateHook<38>);  // D3DDevice_GetRenderState_CCWStencilPass  // rr6-nx: the game's state table; Katamari 824DC5A8
+BANJO_RENUT_HOOK(sub_82255AC8, GetRenderStateHook<39>);  // D3DDevice_GetRenderState_CCWStencilFunc  // rr6-nx: the game's state table; Katamari 824DC508
+BANJO_RENUT_HOOK(sub_82255C38, GetRenderStateHook<40>);  // D3DDevice_GetRenderState_CCWStencilRef  // rr6-nx: the game's state table; Katamari 824DC630
+BANJO_RENUT_HOOK(sub_82255C60, GetRenderStateHook<41>);  // D3DDevice_GetRenderState_CCWStencilMask  // rr6-nx: the game's state table; Katamari 824DC650
+BANJO_RENUT_HOOK(sub_82255C88, GetRenderStateHook<42>);  // D3DDevice_GetRenderState_CCWStencilWriteMask  // rr6-nx: the game's state table; Katamari 824DC670
+BANJO_RENUT_HOOK(sub_82255CC0, GetRenderStateHook<43>);  // D3DDevice_GetRenderState_ClipPlaneEnable  // rr6-nx: the game's state table; Katamari 824DC6B8
+BANJO_RENUT_HOOK(sub_82256020, GetRenderStateHook<44>);  // D3DDevice_GetRenderState_PointSize  // rr6-nx: the game's state table; Katamari 824DC9F0
+BANJO_RENUT_HOOK(sub_82256070, GetRenderStateHook<45>);  // D3DDevice_GetRenderState_PointSizeMin  // rr6-nx: the game's state table; Katamari 824DCA48
+BANJO_RENUT_HOOK(sub_82255FD0, GetRenderStateHook<46>);  // D3DDevice_GetRenderState_PointSpriteEnable  // rr6-nx: the game's state table; Katamari 824DC998
+BANJO_RENUT_HOOK(sub_822560C0, GetRenderStateHook<47>);  // D3DDevice_GetRenderState_PointSizeMax  // rr6-nx: the game's state table; Katamari 824DCAA0
+BANJO_RENUT_HOOK(sub_82255E68, GetRenderStateHook<48>);  // D3DDevice_GetRenderState_MultiSampleAntiAlias  // rr6-nx: the game's state table; Katamari 824DC860
+BANJO_RENUT_HOOK(sub_82255EA0, GetRenderStateHook<49>);  // D3DDevice_GetRenderState_MultiSampleMask  // rr6-nx: the game's state table; Katamari 824DC888
+BANJO_RENUT_HOOK(sub_82255CD0, GetRenderStateHook<50>);  // D3DDevice_GetRenderState_ScissorTestEnable  // rr6-nx: the game's state table; Katamari 824DC6C8
+BANJO_RENUT_HOOK(sub_82255D78, GetRenderStateHook<51>);  // D3DDevice_GetRenderState_SlopeScaleDepthBias  // rr6-nx: the game's state table; Katamari 824DC778
+BANJO_RENUT_HOOK(sub_82255E30, GetRenderStateHook<52>);  // D3DDevice_GetRenderState_DepthBias  // rr6-nx: the game's state table; Katamari 824DC830
+BANJO_RENUT_HOOK(sub_82255EE8, GetRenderStateHook<53>);  // D3DDevice_GetRenderState_ColorWriteEnable  // rr6-nx: the game's state table; Katamari 824DC8C8
+BANJO_RENUT_HOOK(sub_82255F30, GetRenderStateHook<54>);  // D3DDevice_GetRenderState_ColorWriteEnable1  // rr6-nx: the game's state table; Katamari 824DC908
+BANJO_RENUT_HOOK(sub_82255F78, GetRenderStateHook<55>);  // D3DDevice_GetRenderState_ColorWriteEnable2  // rr6-nx: the game's state table; Katamari 824DC948
+BANJO_RENUT_HOOK(sub_82255FC0, GetRenderStateHook<56>);  // D3DDevice_GetRenderState_ColorWriteEnable3  // rr6-nx: the game's state table; Katamari 824DC988
+BANJO_RENUT_HOOK(sub_82256840, GetRenderStateHook<57>);  // D3DDevice_GetRenderState_TessellationMode  // rr6-nx: the game's state table; Katamari 824DD1B8
+BANJO_RENUT_HOOK(sub_822567E0, GetRenderStateHook<58>);  // D3DDevice_GetRenderState_MinTessellationLevel  // rr6-nx: the game's state table; Katamari 824DD148
+BANJO_RENUT_HOOK(sub_82256810, GetRenderStateHook<59>);  // D3DDevice_GetRenderState_MaxTessellationLevel  // rr6-nx: the game's state table; Katamari 824DD180
+BANJO_RENUT_HOOK(sub_822563C0, GetRenderStateHook<60>);  // D3DDevice_GetRenderState_Wrap0  // rr6-nx: the game's state table; Katamari 824DCD10
+BANJO_RENUT_HOOK(sub_822563D0, GetRenderStateHook<61>);  // D3DDevice_GetRenderState_Wrap1  // rr6-nx: the game's state table; Katamari 824DCD20
+BANJO_RENUT_HOOK(sub_822563E0, GetRenderStateHook<62>);  // D3DDevice_GetRenderState_Wrap2  // rr6-nx: the game's state table; Katamari 824DCD30
+BANJO_RENUT_HOOK(sub_822563F0, GetRenderStateHook<63>);  // D3DDevice_GetRenderState_Wrap3  // rr6-nx: the game's state table; Katamari 824DCD40
+BANJO_RENUT_HOOK(sub_82256400, GetRenderStateHook<64>);  // D3DDevice_GetRenderState_Wrap4  // rr6-nx: the game's state table; Katamari 824DCD50
+BANJO_RENUT_HOOK(sub_82256410, GetRenderStateHook<65>);  // D3DDevice_GetRenderState_Wrap5  // rr6-nx: the game's state table; Katamari 824DCD60
+BANJO_RENUT_HOOK(sub_82256420, GetRenderStateHook<66>);  // D3DDevice_GetRenderState_Wrap6  // rr6-nx: the game's state table; Katamari 824DCD70
+BANJO_RENUT_HOOK(sub_82256430, GetRenderStateHook<67>);  // D3DDevice_GetRenderState_Wrap7  // rr6-nx: the game's state table; Katamari 824DCD80
+BANJO_RENUT_HOOK(sub_82256440, GetRenderStateHook<68>);  // D3DDevice_GetRenderState_Wrap8  // rr6-nx: the game's state table; Katamari 824DCD90
+BANJO_RENUT_HOOK(sub_82256450, GetRenderStateHook<69>);  // D3DDevice_GetRenderState_Wrap9  // rr6-nx: the game's state table; Katamari 824DCDA0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCDB0, GetRenderStateHook<70>);  // D3DDevice_GetRenderState_Wrap10  // rr6-nx: not hooked in this XDK; Katamari 824DCDB0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCDC0, GetRenderStateHook<71>);  // D3DDevice_GetRenderState_Wrap11  // rr6-nx: not hooked in this XDK; Katamari 824DCDC0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCDD0, GetRenderStateHook<72>);  // D3DDevice_GetRenderState_Wrap12  // rr6-nx: not hooked in this XDK; Katamari 824DCDD0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCDE0, GetRenderStateHook<73>);  // D3DDevice_GetRenderState_Wrap13  // rr6-nx: not hooked in this XDK; Katamari 824DCDE0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCDF0, GetRenderStateHook<74>);  // D3DDevice_GetRenderState_Wrap14  // rr6-nx: not hooked in this XDK; Katamari 824DCDF0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DCE00, GetRenderStateHook<75>);  // D3DDevice_GetRenderState_Wrap15  // rr6-nx: not hooked in this XDK; Katamari 824DCE00
+BANJO_RENUT_HOOK(sub_822564D0, GetRenderStateHook<76>);  // D3DDevice_GetRenderState_ViewportEnable  // rr6-nx: the game's state table; Katamari 824DCE50
+BANJO_RENUT_HOOK(sub_82256590, GetRenderStateHook<77>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable  // rr6-nx: the game's state table; Katamari 824DCF08
+BANJO_RENUT_HOOK(sub_82256648, GetRenderStateHook<78>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable1  // rr6-nx: the game's state table; Katamari 824DCFB8
+BANJO_RENUT_HOOK(sub_82256700, GetRenderStateHook<79>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable2  // rr6-nx: the game's state table; Katamari 824DD068
+BANJO_RENUT_HOOK(sub_822567B8, GetRenderStateHook<80>);  // D3DDevice_GetRenderState_HighPrecisionBlendEnable3  // rr6-nx: the game's state table; Katamari 824DD118
+BANJO_RENUT_HOOK(sub_82256878, GetRenderStateHook<81>);  // D3DDevice_GetRenderState_HalfPixelOffset  // rr6-nx: the game's state table; Katamari 824DD1F0
+BANJO_RENUT_HOOK(sub_822568B0, GetRenderStateHook<82>);  // D3DDevice_GetRenderState_PrimitiveResetEnable  // rr6-nx: the game's state table; Katamari 824DD220
+BANJO_RENUT_HOOK(sub_822568E0, GetRenderStateHook<83>);  // D3DDevice_GetRenderState_PrimitiveResetIndex  // rr6-nx: the game's state table; Katamari 824DD250
+BANJO_RENUT_HOOK(sub_82256910, GetRenderStateHook<84>);  // D3DDevice_GetRenderState_AlphaToMaskEnable  // rr6-nx: the game's state table; Katamari 824DD278
+BANJO_RENUT_HOOK(sub_82256948, GetRenderStateHook<85>);  // D3DDevice_GetRenderState_AlphaToMaskOffsets  // rr6-nx: the game's state table; Katamari 824DD2A8
+BANJO_RENUT_HOOK(sub_82256988, GetRenderStateHook<86>);  // D3DDevice_GetRenderState_GuardBand_X  // rr6-nx: the game's state table; Katamari 824DD2E8
+BANJO_RENUT_HOOK(sub_822569B8, GetRenderStateHook<87>);  // D3DDevice_GetRenderState_GuardBand_Y  // rr6-nx: the game's state table; Katamari 824DD318
+BANJO_RENUT_HOOK(sub_822569E8, GetRenderStateHook<88>);  // D3DDevice_GetRenderState_DiscardBand_X  // rr6-nx: the game's state table; Katamari 824DD340
+BANJO_RENUT_HOOK(sub_82256A18, GetRenderStateHook<89>);  // D3DDevice_GetRenderState_DiscardBand_Y  // rr6-nx: the game's state table; Katamari 824DD370
+BANJO_RENUT_HOOK(sub_82256A48, GetRenderStateHook<90>);  // D3DDevice_GetRenderState_HiStencilEnable  // rr6-nx: the game's state table; Katamari 824DD430
+BANJO_RENUT_HOOK(sub_82256A80, GetRenderStateHook<91>);  // D3DDevice_GetRenderState_HiStencilWriteEnable  // rr6-nx: the game's state table; Katamari 824DD460
+BANJO_RENUT_HOOK(sub_82256AB8, GetRenderStateHook<92>);  // D3DDevice_GetRenderState_HiStencilFunc  // rr6-nx: the game's state table; Katamari 824DD490
+BANJO_RENUT_HOOK(sub_82256AE8, GetRenderStateHook<93>);  // D3DDevice_GetRenderState_HiStencilRef  // rr6-nx: the game's state table; Katamari 824DD4B8
+BANJO_RENUT_HOOK(sub_82256AF8, GetRenderStateHook<94>);  // D3DDevice_GetRenderState_PresentInterval  // rr6-nx: the game's state table; Katamari 824DD4C8
+BANJO_RENUT_HOOK(sub_82256B10, GetRenderStateHook<95>);  // D3DDevice_GetRenderState_PresentImmediateThreshold  // rr6-nx: the game's state table; Katamari 824DD4E0
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DD398, GetRenderStateHook<96>);  // D3DDevice_GetRenderState_HiZEnable  // rr6-nx: not hooked in this XDK; Katamari 824DD398
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DD400, GetRenderStateHook<97>);  // D3DDevice_GetRenderState_HiZWriteEnable  // rr6-nx: not hooked in this XDK; Katamari 824DD400
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC248, GetRenderStateHook<98>);  // D3DDevice_GetRenderState_LastPixel  // rr6-nx: not hooked in this XDK; Katamari 824DC248
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC298, GetRenderStateHook<99>);  // D3DDevice_GetRenderState_LineWidth  // rr6-nx: not hooked in this XDK; Katamari 824DC298
+BANJO_RENUT_UNHOOKED_HOOK(unlinked_824DC2E8, GetRenderStateHook<100>);  // D3DDevice_GetRenderState_Buffer2Frames  // rr6-nx: not hooked in this XDK; Katamari 824DC2E8
 
 // Sampler state getters (off_82E50BD0, field 0).
-BANJO_RENUT_HOOK(sub_824DDC68, GetSamplerStateHook<0>);  // D3DDevice_GetSamplerState_AddressU  // katamari-nx: N&B sub_82636C00, sampler state 0 getter (state tables, this game index 0)
-BANJO_RENUT_HOOK(sub_824DDCB8, GetSamplerStateHook<1>);  // D3DDevice_GetSamplerState_AddressV  // katamari-nx: N&B sub_82636C18, sampler state 1 getter (state tables, this game index 1)
-BANJO_RENUT_HOOK(sub_824DDD08, GetSamplerStateHook<2>);  // D3DDevice_GetSamplerState_AddressW  // katamari-nx: N&B sub_82636C68, sampler state 2 getter (state tables, this game index 2)
-BANJO_RENUT_HOOK(sub_824DDC10, GetSamplerStateHook<3>);  // D3DDevice_GetSamplerState_BorderColor  // katamari-nx: N&B sub_82636BD8, sampler state 3 getter (state tables, this game index 3)
-BANJO_RENUT_HOOK(sub_824DD740, GetSamplerStateHook<4>);  // D3DDevice_GetSamplerState_MagFilter  // katamari-nx: N&B sub_826367A0, sampler state 4 getter (state tables, this game index 4)
-BANJO_RENUT_HOOK(sub_824DD5B0, GetSamplerStateHook<5>);  // D3DDevice_GetSamplerState_MinFilter  // katamari-nx: N&B sub_826366C0, sampler state 5 getter (state tables, this game index 5)
-BANJO_RENUT_HOOK(sub_824DD850, GetSamplerStateHook<6>);  // D3DDevice_GetSamplerState_MipFilter  // katamari-nx: N&B sub_82636878, sampler state 6 getter (state tables, this game index 6)
-BANJO_RENUT_HOOK(sub_824DDA80, GetSamplerStateHook<7>);  // D3DDevice_GetSamplerState_MipMapLodBias  // katamari-nx: N&B sub_82636AB8, sampler state 7 getter (state tables, this game index 7)
-BANJO_RENUT_HOOK(sub_824DDB30, GetSamplerStateHook<8>);  // D3DDevice_GetSamplerState_MaxMipLevel  // katamari-nx: N&B sub_82636B00, sampler state 8 getter (state tables, this game index 8)
-BANJO_RENUT_HOOK(sub_824DD968, GetSamplerStateHook<9>);  // D3DDevice_GetSamplerState_MaxAnisotropy  // katamari-nx: N&B sub_826369A0, sampler state 9 getter (state tables, this game index 9)
-BANJO_RENUT_HOOK(sub_824DD800, GetSamplerStateHook<10>);  // D3DDevice_GetSamplerState_MagFilterZ  // katamari-nx: N&B sub_82636868, sampler state 10 getter (state tables, this game index 10)
-BANJO_RENUT_HOOK(sub_824DD670, GetSamplerStateHook<11>);  // D3DDevice_GetSamplerState_MinFilterZ  // katamari-nx: N&B sub_82636790, sampler state 11 getter (state tables, this game index 11)
-BANJO_RENUT_HOOK(sub_824DD8F0, GetSamplerStateHook<12>);  // D3DDevice_GetSamplerState_SeparateZFilterEnable  // katamari-nx: N&B sub_82636928, sampler state 12 getter (state tables, this game index 12)
-BANJO_RENUT_HOOK(sub_824DDBB0, GetSamplerStateHook<13>);  // D3DDevice_GetSamplerState_MinMipLevel  // katamari-nx: N&B sub_82636B80, sampler state 13 getter (state tables, this game index 13)
-BANJO_RENUT_HOOK(sub_824DDD60, GetSamplerStateHook<14>);  // D3DDevice_GetSamplerState_TrilinearThreshold  // katamari-nx: N&B sub_82636CC0, sampler state 14 getter (state tables, this game index 14)
-BANJO_RENUT_HOOK(sub_824DD9D8, GetSamplerStateHook<15>);  // D3DDevice_GetSamplerState_AnisotropyBias  // katamari-nx: N&B sub_82636A10, sampler state 15 getter (state tables, this game index 15)
-BANJO_RENUT_HOOK(sub_824DDDB8, GetSamplerStateHook<16>);  // D3DDevice_GetSamplerState_HGradientExpBias  // katamari-nx: N&B sub_82636D18, sampler state 16 getter (state tables, this game index 16)
-BANJO_RENUT_HOOK(sub_824DDE10, GetSamplerStateHook<17>);  // D3DDevice_GetSamplerState_VGradientExpBias  // katamari-nx: N&B sub_82636D70, sampler state 17 getter (state tables, this game index 17)
-BANJO_RENUT_HOOK(sub_824DDE68, GetSamplerStateHook<18>);  // D3DDevice_GetSamplerState_WhiteBorderColorW  // katamari-nx: N&B sub_82636DC8, sampler state 18 getter (state tables, this game index 18)
-BANJO_RENUT_HOOK(sub_824DDEC8, GetSamplerStateHook<19>);  // D3DDevice_GetSamplerState_PointBorderEnable  // katamari-nx: N&B sub_82636E28, sampler state 19 getter (state tables, this game index 19)
+BANJO_RENUT_HOOK(sub_82257148, GetSamplerStateHook<0>);  // D3DDevice_GetSamplerState_AddressU  // rr6-nx: the game's state table; Katamari 824DDC68
+BANJO_RENUT_HOOK(sub_82257198, GetSamplerStateHook<1>);  // D3DDevice_GetSamplerState_AddressV  // rr6-nx: the game's state table; Katamari 824DDCB8
+BANJO_RENUT_HOOK(sub_822571E8, GetSamplerStateHook<2>);  // D3DDevice_GetSamplerState_AddressW  // rr6-nx: the game's state table; Katamari 824DDD08
+BANJO_RENUT_HOOK(sub_822570F0, GetSamplerStateHook<3>);  // D3DDevice_GetSamplerState_BorderColor  // rr6-nx: the game's state table; Katamari 824DDC10
+BANJO_RENUT_HOOK(sub_82256CB8, GetSamplerStateHook<4>);  // D3DDevice_GetSamplerState_MagFilter  // rr6-nx: the game's state table; Katamari 824DD740
+BANJO_RENUT_HOOK(sub_82256BA8, GetSamplerStateHook<5>);  // D3DDevice_GetSamplerState_MinFilter  // rr6-nx: the game's state table; Katamari 824DD5B0
+BANJO_RENUT_HOOK(sub_82256D78, GetSamplerStateHook<6>);  // D3DDevice_GetSamplerState_MipFilter  // rr6-nx: the game's state table; Katamari 824DD850
+BANJO_RENUT_HOOK(sub_82256F60, GetSamplerStateHook<7>);  // D3DDevice_GetSamplerState_MipMapLodBias  // rr6-nx: the game's state table; Katamari 824DDA80
+BANJO_RENUT_HOOK(sub_82257010, GetSamplerStateHook<8>);  // D3DDevice_GetSamplerState_MaxMipLevel  // rr6-nx: the game's state table; Katamari 824DDB30
+BANJO_RENUT_HOOK(sub_82256E48, GetSamplerStateHook<9>);  // D3DDevice_GetSamplerState_MaxAnisotropy  // rr6-nx: the game's state table; Katamari 824DD968
+BANJO_RENUT_HOOK(sub_82256D28, GetSamplerStateHook<10>);  // D3DDevice_GetSamplerState_MagFilterZ  // rr6-nx: the game's state table; Katamari 824DD800
+BANJO_RENUT_HOOK(sub_82256C20, GetSamplerStateHook<11>);  // D3DDevice_GetSamplerState_MinFilterZ  // rr6-nx: the game's state table; Katamari 824DD670
+BANJO_RENUT_HOOK(sub_82256DD0, GetSamplerStateHook<12>);  // D3DDevice_GetSamplerState_SeparateZFilterEnable  // rr6-nx: the game's state table; Katamari 824DD8F0
+BANJO_RENUT_HOOK(sub_82257090, GetSamplerStateHook<13>);  // D3DDevice_GetSamplerState_MinMipLevel  // rr6-nx: the game's state table; Katamari 824DDBB0
+BANJO_RENUT_HOOK(sub_82257240, GetSamplerStateHook<14>);  // D3DDevice_GetSamplerState_TrilinearThreshold  // rr6-nx: the game's state table; Katamari 824DDD60
+BANJO_RENUT_HOOK(sub_82256EB8, GetSamplerStateHook<15>);  // D3DDevice_GetSamplerState_AnisotropyBias  // rr6-nx: the game's state table; Katamari 824DD9D8
+BANJO_RENUT_HOOK(sub_82257298, GetSamplerStateHook<16>);  // D3DDevice_GetSamplerState_HGradientExpBias  // rr6-nx: the game's state table; Katamari 824DDDB8
+BANJO_RENUT_HOOK(sub_822572F0, GetSamplerStateHook<17>);  // D3DDevice_GetSamplerState_VGradientExpBias  // rr6-nx: the game's state table; Katamari 824DDE10
+BANJO_RENUT_HOOK(sub_82257348, GetSamplerStateHook<18>);  // D3DDevice_GetSamplerState_WhiteBorderColorW  // rr6-nx: the game's state table; Katamari 824DDE68
+BANJO_RENUT_HOOK(sub_822573A8, GetSamplerStateHook<19>);  // D3DDevice_GetSamplerState_PointBorderEnable  // rr6-nx: the game's state table; Katamari 824DDEC8
+BANJO_RENUT_HOOK(sub_82256460, Rr6SetRenderState57);  // rr6-nx: the state table, row 57
+BANJO_RENUT_HOOK(sub_82256478, Rr6GetRenderState57);  // rr6-nx: the state table, row 57

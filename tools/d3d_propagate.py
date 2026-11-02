@@ -26,9 +26,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE = 0x82000000
 MAX_INSNS = 3000
 P2_TABLES = ((0x828DFDB8, 0x82600380, 101), (0x828E0278, 0x82600840, 20))
-# pacman-nx: the target's tables (tools/renut_state_tables.py: 101 + 20 records paired by default) and its code range
-TGT_TABLES = (0x8246A250, 0x8246A710)
-TGT_CODE = (0x820F0000, 0x82458B7C)
+# rr6-nx: the target's tables and its code range
+TGT_TABLES = (0x823763E0, 0x82376870)  # rr6-nx: XDK 2.0.2135, 97 + 20 records (as Zuma's)
+TGT_CODE = (0x820C0000, 0x823366CC)
 
 
 def starts_of(gen):
@@ -90,6 +90,8 @@ def main():
     ap.add_argument('--no-tables', action='store_true')
     # bangaio-nx: the reference's two state tables (101 and 20 rows), paired row by row with the target's
     ap.add_argument('--ref-tables', default='')
+    # rr6-nx: rows of the render table that pair one to one (97 with XDK 2.0.2135's own tables)
+    ap.add_argument('--render-rows', type=int, default=101)
     a = ap.parse_args()
     P = Img(a.ref_image or os.path.join(a.peggle, 'out', 'default_image.bin'),
             starts_of(a.ref_gen or os.path.join(a.peggle, 'app', 'generated', 'default')), 0x82000000, 0x83000000)
@@ -105,7 +107,7 @@ def main():
     tables = P2_TABLES
     if a.ref_tables:
         r = [int(x, 16) for x in a.ref_tables.split(',')]
-        tables = ((r[0], TGT_TABLES[0], 101), (r[1], TGT_TABLES[1], 20))
+        tables = ((r[0], TGT_TABLES[0], a.render_rows), (r[1], TGT_TABLES[1], 20))
     else:
         tables = ((0x828DFDB8, TGT_TABLES[0], 101), (0x828E0278, TGT_TABLES[1], 20))
     for pa, na, rows in (() if a.no_tables else tables):
