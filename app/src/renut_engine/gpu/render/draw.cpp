@@ -11376,7 +11376,10 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
     return;
   // banjo-nx (2026-10-21, internal resolution): colour and depth targets of different scales (the HUD's UI target with
   // the scene's depth, the post-processing buffers at 1x with it) cleared one at a time, each at its own scale.
-  if (t.depth && t.color_count && t.depth->scale != t.scale) {
+  // rr6-nx (2026-11-02): also a depth target smaller than the colour target (this game clears its 1440x800 buffer, flags 0x3F,
+  // with the 1280x720 depth bound): a framebuffer's attachments cannot be smaller than it. Vulkan lost the device on that one;
+  // Direct3D 12 let it pass. One at a time, as here, is the same pixels on both.
+  if (t.depth && t.color_count && (t.depth->scale != t.scale || t.depth->width < t.width || t.depth->height < t.height)) {
     Targets colors = t;
     colors.depth = nullptr;
     if (flags & 0xF)

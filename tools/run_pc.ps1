@@ -18,6 +18,7 @@ $args = @("--log_file=`"$log`"", "--audio_mute=true", "--window_start_minimized=
           "--nfsmw_captura_cada_s=$Every", "--nfsmw_captura_max=60", "--log_file_writer=false") +
         @($Extra -split ' ' | Where-Object { $_ })
 $style = if ($Visible) { "Normal" } else { "Minimized" }
+$started = Get-Date  # rr6-nx: the run's own time ($p.StartTime is empty once the process has been stopped)
 $p = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $dir -PassThru -WindowStyle $style `
      -RedirectStandardError (Join-Path $logs "stderr.txt") -RedirectStandardOutput (Join-Path $logs "stdout.txt")
 Write-Output "started pid $($p.Id)"
@@ -27,8 +28,8 @@ if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Output "stopped pi
 else { Write-Output "exited by itself with code $($p.ExitCode)" }
 Start-Sleep -Seconds 1
 # The captures land next to the executable (nfsmw_nativo_captura.cpp); move this run's into its folder.
-Get-ChildItem $dir -Filter "*.png" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $p.StartTime } |
+Get-ChildItem $dir -Filter "*.png" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $started } |
     Move-Item -Destination $logs -Force -ErrorAction SilentlyContinue
 Get-ChildItem (Join-Path $dir "capturas") -Filter "*.png" -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTime -gt $p.StartTime } | Move-Item -Destination $logs -Force -ErrorAction SilentlyContinue
+    Where-Object { $_.LastWriteTime -ge $started } | Move-Item -Destination $logs -Force -ErrorAction SilentlyContinue
 if (Test-Path $log) { Get-Content $log -Tail 25 }
