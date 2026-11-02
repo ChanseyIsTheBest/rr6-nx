@@ -363,7 +363,7 @@ REXCVAR_DEFINE_BOOL(rr6_depth_bias, true, "Banjo/Enhancements",
                     "A/B target 72 (the off half draws with no bias)");
 REXCVAR_DEFINE_BOOL(rr6_alpha_near_one, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): an alpha test of >= 1 runs at >= 0.999. The game draws its foliage twice, >= 1 with "
-                    "depth and then > 0 for the edges, and a filter that returns just under 1 for opaque texels fails the "
+                    "depth and then > 0 for the edges, and the test reads the texture times the interpolated colour: an alpha that arrives just under 1 fails the "
                     "exact compare: on NVIDIA GPUs the trees flickered. No 8-bit alpha below 1 passes (254/255 is 0.996). Ridge "
                     "Racer 6 Recomp's use_fuzzy_alpha_epsilon has the same limit for this test. The threshold is a constant: "
                     "no cost. In-run A/B target 74");
