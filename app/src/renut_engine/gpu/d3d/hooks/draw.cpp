@@ -648,10 +648,10 @@ BANJO_RENUT_UNHOOKED_HOOK(unlinked_821E17C0, D3DDevice_EndTiling_hook);  // D3DD
 // the targets at TilingSurfaces +0x31B0, where the zones put N&B's fields; the game calls it at 0x8271E62C) and
 // EndTiling (sub_824F0150: sig 0.66/0.36, resolves through Resolve sub_824F12B8; called at 0x8272F2E0..0x8272F384),
 // with their full arguments read from the registers (the float argument takes r8's place: ClearStencil is r9).
-BANJO_RENUT_UNHOOKED_HOOK_RAW(unlinked_824EFBC8, );  // None  // rr6-nx: not hooked in this XDK; Katamari 824EFBC8
+BANJO_RENUT_UNHOOKED_HOOK_RAW(unlinked_824EFBC8) {  // rr6-nx: not in this XDK; Katamari 824EFBC8
   BeginTilingImpl(ctx.r3.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r4.u32, float(ctx.f1.f64), ctx.r9.u32);
 }
-BANJO_RENUT_UNHOOKED_HOOK_RAW(unlinked_824F0150, );  // None  // rr6-nx: not hooked in this XDK; Katamari 824F0150
+BANJO_RENUT_UNHOOKED_HOOK_RAW(unlinked_824F0150) {  // rr6-nx: not in this XDK; Katamari 824F0150
   ctx.r3.u64 = EndTilingImpl(ctx.r3.u32, true, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, float(ctx.f1.f64),
                              ctx.r9.u32, ctx.r10.u32);
 }

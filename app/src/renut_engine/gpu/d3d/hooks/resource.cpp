@@ -1485,11 +1485,11 @@ u32 Rr6Release(u32 resource) {
 u32 Rr6GetType(u32 resource) {
   return Rr6IsRenutObject(resource) ? Rr6TypeFromRenut(ResourceType(resource)) : Rr6GuestGetType(resource);
 }
-void Rr6SurfaceGetDesc(u32 surface, u32 desc) {
+void Rr6SurfaceGetDesc(u32 surface, mapped_u32 desc) {
   if (Rr6IsRenutObject(surface))
-    D3DSurface_GetDesc_hook(surface, mapped_u32(desc));
+    D3DSurface_GetDesc_hook(surface, desc);
   else
-    Rr6GuestSurfaceGetDesc(surface, desc);
+    Rr6GuestSurfaceGetDesc(surface, desc.guest_address());
 }
 
 // D3DDevice_CreateIndexBuffer(Length, Usage, Format): this XDK's Format is 0 for 16-bit and 1 for 32-bit indices (sub_82254DA0:

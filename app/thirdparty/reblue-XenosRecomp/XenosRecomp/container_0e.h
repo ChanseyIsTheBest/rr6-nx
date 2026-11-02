@@ -49,13 +49,15 @@ inline bool IsContainer0E(const uint8_t *p, size_t available) {
 // The register field of a 0x0E literal: (register + 48) << 4. Feeding Frenzy's two vertex shaders have one literal,
 // field 0x12F0, and their microcode reads it as c255 (`oPos.xy = position + c255.x`, the half-pixel -0.5 offset):
 // 0x12F0 >> 4 = 303 = 255 + 48. One sample; a container whose literal does not decode to 0..255 is rejected.
+// rr6-nx (2026-11-02): a pixel shader's literals decode to 256..511 by the same formula (this game's field 0x22F0: 0x22F - 48 = 511,
+// c255 of the pixel shader's bank), which is what the 0x11 layout's register holds; below 256 is the vertex bank.
 inline uint32_t LiteralRegister(uint32_t field, bool pixel) {
   const uint32_t reg = (field >> 4) - 48u;
-  return reg + (pixel ? 256u : 0u);
+  return reg + (pixel && reg < 256u ? 256u : 0u);
 }
 
 inline bool LiteralRegisterValid(uint32_t field) {
-  return (field & 0xFu) == 0 && (field >> 4) >= 48u && (field >> 4) - 48u <= 255u;
+  return (field & 0xFu) == 0 && (field >> 4) >= 48u && (field >> 4) - 48u <= 511u;
 }
 
 inline std::vector<uint8_t> Convert(const uint8_t *src) {

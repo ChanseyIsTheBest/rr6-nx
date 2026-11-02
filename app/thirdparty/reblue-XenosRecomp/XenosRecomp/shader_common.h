@@ -51,7 +51,8 @@
     X(TexCoord,  7, 19) \
     X(TexCoord,  8, 20) \
     X(TexCoord,  9, 21) \
-    X(TexCoord, 10, 22)
+    X(TexCoord, 10, 22) \
+    X(Tangent,   1, 23)
 
 // SPEC_CONSTANTS_ONLY keeps the HLSL below out of host C++ TUs, which IntelliSense would otherwise parse.
 #if (!defined(__cplusplus) || defined(__INTELLISENSE__)) && !defined(SHADER_COMMON_SPEC_CONSTANTS_ONLY)
@@ -408,7 +409,7 @@ struct CubeMapData
     // every tfetchCube reads OOB -> point-light shadows vanish.
     float3 cubeMapDirections[9];
     #else
-    float3 cubeMapDirections[2];
+    float3 cubeMapDirections[4];  // rr6-nx: three cube fetches in one shader here; two overflowed ("coord uninitialized")
     #endif
     uint cubeMapIndex;
 };
