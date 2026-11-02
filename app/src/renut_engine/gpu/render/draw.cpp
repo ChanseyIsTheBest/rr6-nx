@@ -2123,6 +2123,22 @@ constexpr u32 kConstantGroupBytes = 4 * 16;
 #endif
 }
 
+// rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71): Shader Model 3's multiply gives 0 for 0 times anything, NaN included; the console has
+// it, and so does the emulated renderer, while XenosRecomp's shaders multiply as HLSL does. At car select the game's FogPhaseY and
+// FogPhaseZ (registers 21 and 22 of both banks) are NaN, multiplied by 0: the fog terms came out NaN and the car's paint black. Giving
+// every multiply the rule would add work to every pixel; only these registers hold NaN (docs/rr6-notes.md), so they are cleared where
+// they are copied. A group's little-endian lanes in normal memory, not the write-combined upload: this reads them.
+constexpr u32 kFogPhaseGroup = 5;  // registers 20 to 23
+inline void ClearFogPhaseNans(u8 *swapped) {
+  u32 lanes[8];
+  std::memcpy(lanes, swapped + 16, sizeof(lanes));  // registers 21 and 22
+  for (u32 &lane : lanes) {
+    if ((lane & 0x7FFFFFFFu) > 0x7F800000u)
+      lane = 0;
+  }
+  std::memcpy(swapped + 16, lanes, sizeof(lanes));
+}
+
 // The groups holding a register the shader reads.
 constexpr uint64_t UsedGroups(const u32 used[8]) {
   uint64_t groups = 0;
@@ -2358,8 +2374,27 @@ UploadAllocation UploadFloatConstants(const FloatConstants &constants, const u32
   for (uint64_t remaining = groups; remaining;) {
     const u32 group = u32(std::countl_zero(remaining));
     remaining &= ~(uint64_t(1) << (63 - group));
-    CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
-                     out + group * kConstantGroupBytes);  // banjo-nx (2026-10-28)
+    // RR6DIAG: every register holding a NaN, once each (RR6_NAN_CENSUS). Temporary.
+    static const bool rr6_nan_census = std::getenv("RR6_NAN_CENSUS") != nullptr;
+    if (rr6_nan_census) {
+      static bool seen[256];
+      const auto *g = reinterpret_cast<const be_u32 *>(constants.Register(group * 4));
+      for (u32 i = 0; i < 16; ++i) {
+        if ((u32(g[i]) & 0x7FFFFFFFu) > 0x7F800000u && !seen[group * 4 + i / 4]) {
+          seen[group * 4 + i / 4] = true;
+          RGPU_INFO("[nancensus] register {} has a NaN", group * 4 + i / 4);
+        }
+      }
+    }
+    if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn()) {
+      alignas(16) u8 fog[kConstantGroupBytes];
+      CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes, fog);
+      ClearFogPhaseNans(fog);
+      std::memcpy(out + group * kConstantGroupBytes, fog, kConstantGroupBytes);
+    } else {
+      CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                       out + group * kConstantGroupBytes);  // banjo-nx (2026-10-28)
+    }
   }
   // Every register of those groups is in the upload, with the bytes it has
   // now.
@@ -2582,6 +2617,8 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
       // banjo-nx (2026-10-28): both copies from one NEON load (CopyAndSwapGroup).
       CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
                        reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)));
+      if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn())  // rr6-nx (2026-11-03, rr6_fog_nan_zero)
+        ClearFogPhaseNans(reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)));
       last.valid[group / 8] |= 0xFu << (group % 8 * 4);
       for (u32 q = 0; q < 4; ++q)
         last.lit_owner[group * 4 + q] = nullptr;  // banjo-nx (2026-10-27): the device's bytes now
@@ -10326,6 +10363,42 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     for (u32 bits = g_draw_sc_track.fetch_slots & ~fetch_mask; bits; bits &= bits - 1)
       SetShared(sc, sc.vertex_fetch_slots[64 + std::countr_zero(bits)], 0u);
     g_draw_sc_track.fetch_slots = fetch_mask;
+  }
+  {
+    // RR6DIAG: a pixel shader's constants and fetch words, from RR6_PS_DUMP (its hash). Temporary.
+    static const uint64_t want_ps = [] {
+      const char *v = std::getenv("RR6_PS_DUMP");
+      return v ? uint64_t(std::strtoull(v, nullptr, 16)) : 0ull;
+    }();
+    if (want_ps && store_device_ps && store_device_ps->hash == want_ps) {
+      static uint32_t seen = 0;
+      if (seen++ % 600 < 2) {
+        const auto &con = device.dev().m_Constants;
+        RGPU_INFO("[psdump] #{} VS {:016X} textures {:08X} targets {}x{} depth {}", seen, vs->hash, texture_mask, targets.width,
+                  targets.height, targets.depth != nullptr);
+        for (u32 r = 0; r < 40; ++r) {
+          const float x = con.PixelShaderF[r][0], y = con.PixelShaderF[r][1], z = con.PixelShaderF[r][2],
+                      w = con.PixelShaderF[r][3];
+          if (x != 0.0f || y != 0.0f || z != 0.0f || w != 0.0f)
+            RGPU_INFO("[psdump] c{} = {} {} {} {}", r, x, y, z, w);
+        }
+        for (u32 r = 17; r <= 22; ++r) {
+          RGPU_INFO("[psdump] vs c{} = {} {} {} {}", r, float(con.VertexShaderF[r][0]), float(con.VertexShaderF[r][1]),
+                    float(con.VertexShaderF[r][2]), float(con.VertexShaderF[r][3]));
+        }
+        for (u32 bits = texture_mask; bits; bits &= bits - 1) {
+          const u32 slot = std::countr_zero(bits);
+          const auto *w = reinterpret_cast<const be_u32 *>(&con.TextureFetch[slot]);
+          // What the texture's memory holds now, through the physical window: all zero means nothing was written there.
+          const auto *mem = GuestPtr<const u8>(0xA0000000u + (u32(w[1]) & 0x1FFFF000u));
+          u32 nonzero = 0;
+          for (u32 i = 0; mem && i < 4096; ++i)
+            nonzero += mem[i] != 0;
+          RGPU_INFO("[psdump] slot {} fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, {} of 4096 bytes not zero", slot, u32(w[0]),
+                    u32(w[1]), u32(w[2]), u32(w[3]), u32(w[4]), u32(w[5]), nonzero);
+        }
+      }
+    }
   }
   {
     static const uint64_t want = [] {

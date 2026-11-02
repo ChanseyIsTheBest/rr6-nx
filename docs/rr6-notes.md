@@ -159,3 +159,9 @@ This is the keys' presence and values, not a measurement. Each key's in-run A/B 
 **Consequence:** the record-time items of the guide's sections 4.5 to 4.7 serve recorded command buffers, and this game records none, so they should do little here. To be measured with their A/B targets, not assumed.
 
 **Not measured yet:** resources by creation call or built by the game (`UnleashedCensusOn`), setters or inline writes (the tags census), memexport pending per draw, threads on the emulator.
+
+## Hypothesis under test: the black car at car select (2026-11-03)
+
+The reference's translator gives every multiply Shader Model 3's rule, zero times anything is zero, even NaN (`dxbc_translator_alu.cpp`, `kMul`, `kMad`). XenosRecomp emits a plain multiply. At car select the pixel bank's `c21` and `c22` are NaN, and those are `FogPhaseY` and `FogPhaseZ`. The vertex shader 877AAC07400C0F33 multiplies its own constants of those names into the fog terms, and the paint shader ends `r0.xyz = r1.xyz * r3.xyz + r4.xyz` with those terms in r3 and r4. A NaN there comes out black. In the race those constants are finite and the same paint draws correctly. **Not yet proved:** the vertex bank's values have not been read, and no fix has been tried.
+
+**Proved (2026-11-03, renut27):** with `RR6_NAN_ZERO` zeroing registers 21 and 22 at upload, the car at car select draws textured and matches the reference (`out/pc_runs/renut27/captura_014_0211s.png`, `out/pc_runs/emu4/captura_014_0210s.png`). Both banks' c21 and c22 are NaN there, and the fog colours and coefficient are 0. Its texture memory holds data. The cause is Shader Model 3's multiply (0 x NaN = 0), which the reference has and XenosRecomp lacks.

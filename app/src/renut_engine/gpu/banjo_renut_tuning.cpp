@@ -356,6 +356,10 @@ REXCVAR_DEFINE_BOOL(rr6_depth_covers_colour, true, "Banjo/Enhancements",
                     "size, once (the race draws 1440x800 over a depth surface made 1280x720, which the console's "
                     "EDRAM allows). Off: black bars on Direct3D 12 and device lost on Vulkan, so it has no in-run A/B "
                     "target; it runs only when the targets change, and adds nothing per draw");
+REXCVAR_DEFINE_BOOL(rr6_fog_nan_zero, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-03): NaNs in float constant registers 21 and 22 (the game's FogPhaseY and FogPhaseZ) "
+                    "reach the shaders as 0. The console's multiply gives 0 for 0 times NaN, HLSL's gives NaN: off, the "
+                    "car at car select is black. Its cost: one compare per constant group copied. In-run A/B target 71");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_depth24, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-19, GPU): a D24S8 depth target (the shadow maps, small render-to-texture "
                     "targets) as 24-bit unorm depth with stencil, the Xenos's own format, instead of 32-bit float: half "
@@ -916,6 +920,7 @@ const char *AbName(int target) {
   // katamari-nx (2026-10-30): Beautiful Katamari's CPU items (cpu/hot/banjo_hand_natives.h, cpu/banjo_hot_guest.h).
   case 69: return "Katamari's hand-written matrix natives (katamari_hand_matrix_*; off half: the generated copies)";
   case 70: return "the localized copies of the hot functions (localized.txt; off half: the generated originals)";
+  case 71: return "rr6_fog_nan_zero (NaNs in the fog constants as 0)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
 }
@@ -1546,6 +1551,11 @@ void CountDeviceSwizzle(uint32_t frame) {
 bool DepthCoversColourOn() {
   static const bool on = REXCVAR_GET(rr6_depth_covers_colour);
   return on;
+}
+
+bool FogNanZeroOn() {
+  static const bool on = REXCVAR_GET(rr6_fog_nan_zero);
+  return on && g_ab_off.load(std::memory_order_relaxed) != 71;
 }
 
 bool DepthHandOverReadOnlyOn() {
