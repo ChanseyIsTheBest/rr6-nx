@@ -1,6 +1,6 @@
 // banjo-nx (2026-10-29): reNut upstream's DLC installer (ab60251, src/renut_engine/app/dlc_install.cpp; GPL-3.0, credit reNut),
 // the DLC folder next to the NRO / exe (sdmc:/switch/banjo-nx/dlc on the Switch). katamari-nx (2026-10-31): the same
-// file, game-agnostic (the running title's packages only): sdmc:/switch/katamari-nx/dlc, Beautiful Katamari's 16 packs.
+// file, game-agnostic (the running title's packages only): sdmc:/switch/rr6-nx/dlc, Beautiful Katamari's 16 packs.
 #include "renut_engine/dlc_install.h"
 
 #include <algorithm>
@@ -24,14 +24,11 @@
 REXCVAR_DEFINE_STRING(renut_dlc_folder, "dlc", "Nuts&Bolts/DLC",
     "Folder of DLC packages (Xbox Live content files) reNut installs when the game starts, relative to "
     "reNut's folder.");
-// katamari-nx (2026-11-01, the user's request): Beautiful Katamari's packs that only unlock presents and cousins the
-// game unlocks by itself, which takes the fun out of unlocking them; off by default (the user, the same day). The
-// stage packs (Shopping Spree, Milky Way Constellations, High-calorie, Dangerous, Mechanical and Perfectly Sized
-// Katamari, The Weaver Girl) are not in it.
-REXCVAR_DEFINE_BOOL(katamari_dlc_unlock_packs, false, "Nuts&Bolts/DLC",
-    "Beautiful Katamari's DLC packs that only unlock presents and cousins (Accessory Sets A-D, Character Sets A-D, "
-    "Special Accessory): false (the default) keeps them from the game, though they stay installed; true shows them "
-    "too. The stage packs are shown either way.");
+// rr6-nx (2026-11-02, the user's request): the 36 small "Unlock Key" packs unlock cars; off by default, the user's
+// decision. The 41 music packs are not in the list.
+REXCVAR_DEFINE_BOOL(rr6_dlc_unlock_keys, false, "Nuts&Bolts/DLC",
+    "Ridge Racer 6's 36 car unlock keys (DLC): false (the default) keeps them from the game, though they stay "
+    "installed; true shows them too. The music packs are shown either way.");
 REXCVAR_DECLARE(std::string, dlc_hidden);  // sdk/src/system/xam/content_manager.cpp
 
 namespace renut::dlc {
@@ -40,10 +37,27 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// The display names of the packs katamari_dlc_unlock_packs = false hides (their package headers' names).
-constexpr std::array<const char *, 9> kKatamariUnlockPacks = {
-    "Accessory Set A", "Accessory Set B", "Accessory Set C", "Accessory Set D", "Character Set A",
-    "Character Set B", "Character Set C", "Character Set D", "Special Accessory"};
+// The display names of the packs rr6_dlc_unlock_keys = false hides (their package headers' names).
+constexpr std::array<const char *, 36> kRr6UnlockKeys = {
+    "Unlock Key01 CL1 BARADUKE FIERA", "Unlock Key02 CL1 neucom ABEILLE",
+    "Unlock Key03 CL1 KANTARIS PROPHETIE", "Unlock Key04 CL1 KILIK WILD GANG",
+    "Unlock Key05 CL1 ELECTROSPHERE BAYONET", "Unlock Key06 CL1 DRAGONSABER STARNOSE",
+    "Unlock Key07 CL2 XEVIOUS FATALITA", "Unlock Key08 CL2 SOLVALOU BISONTE",
+    "Unlock Key09 CL2 POPKA MELTFIRE", "Unlock Key10 CL2 PAC-MAN EO",
+    "Unlock Key11 CL2 FINALLAP ESPERANZA", "Unlock Key12 CL2 NENEKO RAGGIO",
+    "Unlock Key13 CL2 SHOOTAWAY HIJACK", "Unlock Key14 CL3 HYPER KNIGHT FIERA",
+    "Unlock Key15 CL3 TOYPOP ABEILLE", "Unlock Key16 CL3 KLONOA PROPHETIE",
+    "Unlock Key17 CL3 DRAGONSABER WILD GANG", "Unlock Key18 CL3 SHOOTAWAY BAYONET",
+    "Unlock Key19 CL3 DRAGONSPIRIT STARNOSE", "Unlock Key20 CL4 NightRaven FATALITA",
+    "Unlock Key21 CL4 BARADUKE BISONTE", "Unlock Key22 CL4 DRAGONSPIRIT MELTFIRE",
+    "Unlock Key23 CL4 XIAOYU EO", "Unlock Key24 CL4 MITSURUGI ESPERANZA",
+    "Unlock Key25 CL4 MAPPY RAGGIO", "Unlock Key26 CL4 WARPMAN HIJACK",
+    "Unlock Key27 SPC MITSURUGI ANGELUS", "Unlock Key28 SPC GALAGA CRINALE",
+    "Unlock Key29 SPC ANDORGENESIS ULTRANOVA", "Unlock Key30 SPC PAC-MAN TERRAJIN",
+    "Unlock Key31 SPC neucom PRONZIONE", "Unlock Key32 SPC ANDORGENESIS 490B",
+    "Unlock Key33 SPC ZASALAMEL G00", "Unlock Key34 SPC DANVER BASS CRUISER",
+    "Unlock Key35 SPC NAMCO PAC-MAN", "Unlock Key36 SPC MONSTROUS",
+};
 
 // An Xbox 360 package's header (big-endian): the magic, then at 0x344 the
 // content type, 0x360 the title ID and 0x411 the display name (UTF-16).
@@ -131,15 +145,14 @@ void SetUserDataRoot(const fs::path &root) {
 void InstallPackages(rex::Runtime *runtime) {
     if (!runtime || !runtime->kernel_state())
         return;
-    if (!REXCVAR_GET(katamari_dlc_unlock_packs)) {
+    if (!REXCVAR_GET(rr6_dlc_unlock_keys)) {
         std::string &hidden = REXCVAR_GET(dlc_hidden);
-        for (const char *name : kKatamariUnlockPacks) {
+        for (const char *name : kRr6UnlockKeys) {
             if (!hidden.empty())
                 hidden += ';';
             hidden += name;
         }
-        RNUT_INFO("DLC: katamari_dlc_unlock_packs = false: the accessory, character and special accessory packs "
-                  "are kept from the game");
+        RNUT_INFO("DLC: rr6_dlc_unlock_keys = false: the 36 car unlock keys are kept from the game");
     }
     fs::path folder = rex::to_path(REXCVAR_GET(renut_dlc_folder));
     if (folder.is_relative())
@@ -148,7 +161,9 @@ void InstallPackages(rex::Runtime *runtime) {
     fs::create_directories(folder, ec);
 
     std::vector<fs::path> files;
-    for (const auto &entry : fs::directory_iterator(folder, ec))
+    // rr6-nx: into subfolders: the packages keep their Xbox 360 layout (<name>/content/<profile>/<title>/00000002/<file>)
+    // and the folder is pointed at where they lie, not copied.
+    for (const auto &entry : fs::recursive_directory_iterator(folder, fs::directory_options::skip_permission_denied, ec))
         if (entry.is_regular_file(ec) && entry.path().filename() != kInstalledList)
             files.push_back(entry.path());
     std::sort(files.begin(), files.end());

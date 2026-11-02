@@ -11,7 +11,7 @@ $rdcDir = "D:\Banjo kazooie port\tools\RenderDoc_1.46_64"
 $ryu = "D:\New folder\Ryubing-src\ryubing\build\Ryujinx.exe"
 $data = "D:\New folder\ryu-data\katamari"
 $sd = Join-Path $data "sdcard\switch\katamari-nx"
-$nro = Join-Path $sd "katamari-nx.nro"
+$nro = Join-Path $sd "rr6-nx.nro"
 $out = Join-Path $root "out\emu_runs\$Name"
 if (Get-Process -Name Ryujinx -ErrorAction SilentlyContinue) { Write-Output "a Ryujinx is running (another port's?): not starting"; exit 2 }
 $os = Get-CimInstance Win32_OperatingSystem

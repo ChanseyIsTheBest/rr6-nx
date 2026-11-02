@@ -12,6 +12,9 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <array>
+#include <atomic>
+#include <bit>
 #include <cstring>
 
 #include <rex/assert.h>
@@ -195,17 +198,43 @@ u32 XMAInitializeContext_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_IN
   return 0;
 }
 
-u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_CONTEXT_DATA> loop_data) {
-  XMA_CONTEXT_DATA context(context_ptr);
-
-  context.loop_start = loop_data->loop_start;
-  context.loop_end = loop_data->loop_end;
-  context.loop_count = loop_data->loop_count;
-  context.loop_subframe_end = loop_data->loop_subframe_end;
-  context.loop_subframe_skip = loop_data->loop_subframe_skip;
-
-  context.Store(context_ptr);
-
+// rr6-nx (2026-11-02): the caller passes an XMA_LOOP_DATA (12 big-endian bytes), not a context: read as a context the
+// fields came from the wrong bytes (Ridge Racer 6 asks for a loop count of 255 and got 0, so its looping music stopped
+// after one pass). From Ridge Racer 6 Recomp's src/xma_loop_fix.cpp, by Sirhalo23 (BSD 3-Clause, THIRD_PARTY_NOTICES.md):
+// only the loop fields are written, each 32-bit word with one atomic update, so the decoder's own changes to the same
+// words (buffer valid flags, read offsets) made at that moment are not undone.
+u32 XMASetLoopData_entry(mapped_void context_ptr, ppc_ptr_t<XMA_LOOP_DATA> loop_data) {
+  constexpr int kContextWords = sizeof(XMA_CONTEXT_DATA) / 4;
+  auto bits = [](auto fill) {
+    uint8_t zero[sizeof(XMA_CONTEXT_DATA)] = {};
+    XMA_CONTEXT_DATA data(zero);
+    fill(data);
+    return std::bit_cast<std::array<uint32_t, kContextWords>>(data);
+  };
+  static const auto mask = bits([](XMA_CONTEXT_DATA& d) {
+    d.loop_count = 0xFF;
+    d.loop_subframe_end = 0x3;
+    d.loop_subframe_skip = 0x7;
+    d.loop_start = 0x3FFFFFF;
+    d.loop_end = 0x3FFFFFF;
+  });
+  const auto wanted = bits([&](XMA_CONTEXT_DATA& d) {
+    d.loop_start = uint32_t(loop_data->loop_start);
+    d.loop_end = uint32_t(loop_data->loop_end);
+    d.loop_count = loop_data->loop_count;
+    d.loop_subframe_end = loop_data->loop_subframe_end;
+    d.loop_subframe_skip = loop_data->loop_subframe_skip;
+  });
+  auto* context = reinterpret_cast<uint32_t*>(context_ptr.host_address());
+  for (int i = 0; i < kContextWords; ++i) {
+    if (!mask[i]) continue;
+    std::atomic_ref<uint32_t> word(context[i]);
+    uint32_t old_be = word.load(std::memory_order_relaxed);
+    uint32_t new_be;
+    do {
+      new_be = rex::byte_swap((rex::byte_swap(old_be) & ~mask[i]) | (wanted[i] & mask[i]));
+    } while (!word.compare_exchange_weak(old_be, new_be, std::memory_order_acq_rel));
+  }
   return 0;
 }
 

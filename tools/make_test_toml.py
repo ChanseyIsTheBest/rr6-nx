@@ -2,7 +2,7 @@
 """katamari-nx (2026-10-30): a test toml: a package toml plus test keys (the scripted pad, captures, logs), each set
 above the [input_p*] sections (tools/make_katamari_tomls.py's rule).
 
-  python tools/make_test_toml.py --base dist/switch/katamari-nx/configs/renut_verify.toml --out out/emu_test.toml
+  python tools/make_test_toml.py --base dist/switch/rr6-nx/configs/renut_verify.toml --out out/emu_test.toml
          --set input_script="..." --set nfsmw_captura_cada_s=15 ...
 """
 import argparse

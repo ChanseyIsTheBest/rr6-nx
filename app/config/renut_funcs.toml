@@ -1,58 +1,52 @@
-# katamari-nx: named functions and function boundaries of Beautiful Katamari (docs/katamari-notes.md, "Code generation").
+# rr6-nx: named functions and function boundaries of Ridge Racer 6 (docs/rr6-notes.md, "Code generation").
+# Each entry was checked against this image (tools/rr6_check_manifest.py); the source is Ridge Racer 6 Recomp's manifest
+# (rr6_recomp_manifest.toml, by Sirhalo23, BSD 3-Clause: see THIRD_PARTY_NOTICES.md) unless the comment says otherwise.
 [functions]
-# First codegen (2026-10-30): three "target not in any function", each a function reached only by a tail jump from a
-# thunk, after its neighbour's blr / bctr and padding (tools/ppc_dis.py):
-#   0x825387E8 from 0x82538814 (`addi r3,r3,-4; b 0x825387E8`): `addi r11,r3,4; lwz r10,4(r11); addi r3,r10,1;
-#     stw r3,4(r11); blr` (an AddRef through an adjusted this).
-#   0x8266DEA0 from 0x82270930 (`b 0x8266DEA0`): `mr r11,r4; mr r4,r3; mr r3,r11; lwz r10,0(r11); lwz r11,136(r10);
-#     bctr` (a virtual call through the second argument's vtable, slot 34).
-#   0x82408488 from 0x823DD968 (`addi r3,r11,288; b 0x82408488`): a table lookup that tail-calls sub_824A3650.
-"0x825387E8" = { }
-"0x8266DEA0" = { }
-"0x82408488" = { }
-# Second codegen: three "Unresolved conditional branch". Each target is a `li r3,0; blr` tail that the scanner left
-# outside the function branching to it (0x822AC5C0's function ends at the blr before it; sub_82685530 is a registered
-# start that branches back to 0x82685528, its entry stub's tail). Declared as functions of their own, the branches
-# become conditional tail calls with the same effect (return 0). 0x82685520 (`cmplwi cr6,r4,0; bne cr6,0x82685530`,
-# then the tail) is the entry stub of the function the scanner started at 0x82685530: declared as one function over
-# the whole body (the generator emits no fall-through into a next function, and refuses overlapping declarations).
-"0x822AC5E8" = { end = 0x822AC5F0 }
-"0x82685520" = { end = 0x826855C8 }
 
-# katamari-nx (2026-10-30 evening, the register-diet codegen): split pieces that read non-volatile registers their
-# parent set up (tools/read_before_write.py on code generated WITH non_volatile_as_local, out/audit/gen2; the pieces
-# also listed in overrides.toml carry the mark there). Without it sub_824CF3F8 read a zeroed r31 and handed a wrong
-# frame to its __finally funclet: the boot crash of the first diet build.
-"0x824C97F0" = { share_registers = true }  # reads r30
-"0x824C9B80" = { share_registers = true }  # reads r30
-"0x827F91D4" = { share_registers = true }  # reads r31
-"0x828C74A8" = { share_registers = true }  # reads r24 r26 r27 r29
-"0x828C8DE8" = { share_registers = true }  # reads r30
-"0x828CC530" = { share_registers = true }  # reads r22
-"0x828D0AC8" = { share_registers = true }  # reads r29
-"0x828D27B0" = { share_registers = true }  # reads r30
-"0x828D2B28" = { share_registers = true }  # reads r17
-"0x828D6CA0" = { share_registers = true }  # reads r25
-"0x828D7780" = { share_registers = true }  # reads r15 r17 r27 r28 r29 r30
-"0x828E4F78" = { share_registers = true }  # reads r18 r19 r28
-"0x828ED618" = { share_registers = true }  # reads f26 f27 f28 f29 f30 r14 r22 r23 r26 r31
-"0x82904F58" = { share_registers = true }  # reads r22 r24
-"0x82912CF0" = { share_registers = true }  # reads r30
-"0x82917C90" = { share_registers = true }  # reads r26
-"0x8291A458" = { share_registers = true }  # reads r28 r29
-"0x82927520" = { share_registers = true }  # reads f31 r16 r17 r18 r23 r25 r28 r29
-"0x8292FC58" = { share_registers = true }  # reads r24 r25 r26
-"0x829304B8" = { share_registers = true }  # reads r25 r29
-"0x82939A30" = { share_registers = true }  # reads r28
-"0x8293C418" = { share_registers = true }  # reads r31
-"0x8293D220" = { share_registers = true }  # reads r22
-"0x829462A0" = { share_registers = true }  # reads r28 r30
-"0x829469A8" = { share_registers = true }  # reads r16 r22 r24 r25 r29
-"0x82949378" = { share_registers = true }  # reads r20 r28 r29 r30
-"0x82949DE8" = { share_registers = true }  # reads f31 r22 r23 r24 r25
-"0x82970030" = { share_registers = true }  # reads r28
-"0x829EC658" = { share_registers = true }  # reads v69 v72
-"0x829ECA00" = { share_registers = true }  # reads v69
-"0x829ECCC0" = { share_registers = true }  # reads v69 v72
-"0x829ECF28" = { share_registers = true }  # reads v69
-"0x829EE070" = { share_registers = true }  # reads v64 v65
+# Their manifest: small leaf functions reached only by tail-call thunks ("b target" from a two-instruction adjuster).
+"0x821111D0" = { }  # struct initialiser; tail-called from 0x8232C810 and 0x8232D8E0
+"0x82138AC8" = { }  # tail-called from 0x8215841C
+"0x82228898" = { }  # thunk: lwz r3,0x30(r3); b 0x8222AA38
+"0x822288A8" = { }  # thunk: lwz r3,0x34(r3); b 0x820C0708
+"0x822A8288" = { }  # AddRef-style method; tail-called from this-adjusting thunk 0x822A82A0
+"0x822A90D8" = { }  # tail-called from this-adjusting thunk 0x822AFBC8
+"0x82329200" = { }  # tail-called from 0x82324A88; itself tail-calls through a function pointer
+
+# Their manifest: functions reached only through pointers (vtable slots, callback tables, the C++ static-constructor
+# table; their tools/find_orphan_targets.py, analysis/orphan_targets.txt).
+"0x82162440" = { }  # referenced from code at 8216BEC0
+"0x82162450" = { }  # referenced from code at 82175F34
+"0x82162460" = { }  # referenced from code at 8216BE50
+"0x82162470" = { }  # referenced from code at 8216BED0
+"0x82162480" = { }  # referenced from code at 8216BEE0
+"0x82162490" = { }  # referenced from code at 8216BE60
+"0x821624A0" = { }  # referenced from code at 8216BEF0
+"0x821624B0" = { }  # referenced from code at 8216BE70
+"0x821624C0" = { }  # referenced from code at 8216BE00
+"0x821624D0" = { }  # referenced from code at 8216BE80
+"0x821624E0" = { }  # referenced from code at 8216BE10
+"0x821624F0" = { }  # referenced from code at 8216BE90
+"0x82162500" = { }  # referenced from code at 82175F88
+"0x82162510" = { }  # referenced from code at 8216BE20
+"0x82162520" = { }  # referenced from code at 8216BEA0
+"0x82162530" = { }  # referenced from code at 82175F0C
+"0x82162540" = { }  # referenced from code at 8216B1B0
+"0x82162550" = { }  # referenced from code at 8216BEB0
+"0x82179E98" = { }  # referenced from data at 8236CFB4
+"0x821C5B60" = { }  # referenced from data at 82027F10
+"0x822A8EA8" = { }  # referenced from data at 82091D54
+"0x822A8EB0" = { }  # referenced from data at 82091D58
+"0x822A8EB8" = { }  # referenced from data at 82091D5C
+"0x822B01F8" = { }  # referenced from data at 82092DC0
+"0x822B0200" = { }  # referenced from data at 82092DC4
+"0x822B0208" = { }  # referenced from data at 82092D5C
+"0x822B0230" = { }  # referenced from data at 82092D7C
+"0x822B0238" = { }  # referenced from data at 82092D80
+"0x822B0248" = { }  # referenced from data at 82092D88
+"0x822B0258" = { }  # referenced from data at 82092D90
+"0x822B1FB8" = { }  # referenced from data at 82092E44
+"0x822B1FC0" = { }  # referenced from data at 82092E68
+"0x822C49B0" = { }  # referenced from data at 82094670 and code at 822C49D0
+"0x822D6390" = { }  # referenced from data at 82099738
+"0x822E25C8" = { }  # referenced from data at 8209BE70
+"0x8232EF30" = { }  # referenced from data at 823403B4

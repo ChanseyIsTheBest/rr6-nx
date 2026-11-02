@@ -1,6 +1,6 @@
 # katamari-nx: the Switch package (the request's step 7), as banjo-nx's builds/ folders:
 #   builds/<date>_<time>_<name>/
-#     COPY_TO_SD_switch_katamari-nx/   katamari-nx.nro, renut.toml (shipped), renut_play.toml, renut_ab.toml, configs/,
+#     COPY_TO_SD_switch_katamari-nx/   rr6-nx.nro, renut.toml (shipped), renut_play.toml, renut_ab.toml, configs/,
 #                                      deko3d_shaders.bin (the prebuilt DKSH cache), game_root/ (your game files)
 #     COPY_TO_SD_ROOT/atmosphere/contents/05D6EA1333487100/exefs/main.npdm   (the four-core forwarder NPDM; only with
 #                                      -FourCore since rc6: the user runs on three cores)
@@ -26,7 +26,7 @@ $stamp = Get-Date -Format "yyyy-MM-dd_HHmm"
 $out = Join-Path (Split-Path -Parent $root) "builds\${stamp}_$Name"
 $sd = Join-Path $out "COPY_TO_SD_switch_katamari-nx"
 New-Item -ItemType Directory -Force $sd, (Join-Path $sd "configs"), (Join-Path $sd "game_root") | Out-Null
-Copy-Item $nro (Join-Path $sd "katamari-nx.nro")
+Copy-Item $nro (Join-Path $sd "rr6-nx.nro")
 $dist = Join-Path $root "dist\switch\katamari-nx"
 Copy-Item (Join-Path $dist "renut.toml"), (Join-Path $dist "renut_play.toml"), (Join-Path $dist "renut_ab.toml") $sd
 Copy-Item (Join-Path $dist "configs\*.toml") (Join-Path $sd "configs")
@@ -61,7 +61,7 @@ try {
     $sha = (& git rev-parse --short=12 HEAD).Trim()
     & git archive --format=tar.gz -o (Join-Path $out "source_$sha.tgz") HEAD
 } finally { Pop-Location }
-$md5 = (Get-FileHash -Algorithm MD5 (Join-Path $sd "katamari-nx.nro")).Hash.ToLower()
+$md5 = (Get-FileHash -Algorithm MD5 (Join-Path $sd "rr6-nx.nro")).Hash.ToLower()
 Write-Output "package: $out"
-Write-Output ("NRO {0:N1} MB, md5 {1}; commit {2}" -f ((Get-Item (Join-Path $sd "katamari-nx.nro")).Length / 1MB), $md5, $sha)
+Write-Output ("NRO {0:N1} MB, md5 {1}; commit {2}" -f ((Get-Item (Join-Path $sd "rr6-nx.nro")).Length / 1MB), $md5, $sha)
 Get-ChildItem -Recurse $out | Where-Object { -not $_.PSIsContainer } | Select-Object FullName, Length | Format-Table -AutoSize
