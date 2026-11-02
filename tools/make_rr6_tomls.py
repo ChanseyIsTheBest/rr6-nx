@@ -60,7 +60,7 @@ PLAY = {'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders
 # The targets that act on Ridge Racer 6's draws (direct calls, no command-buffer recordings: the census in docs/rr6-notes.md): the
 # fast draw (25), pipelines by content (28), whole-buffer copies (22), the setters' touch compare (26), merged draws (33), mesh
 # objects (42); 70 the localized copies of the hot functions; 1 (a Vulkan-only key) is the do-nothing control on the Switch.
-AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,1"', 'banjo_renut_ab_s': '30',
+AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,71,72,1"', 'banjo_renut_ab_s': '30',
       'banjo_renut_dynamic_resolution': 'false'}
 VERIFY = {k: 'true' for k in (
     'banjo_renut_fast_draw_verify', 'banjo_renut_resource_objects_verify', 'banjo_renut_fetch_cache_verify',
