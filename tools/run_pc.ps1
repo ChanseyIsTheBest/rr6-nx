@@ -4,7 +4,7 @@
 # The log is written unbuffered (log_file_writer = false): the run is stopped by force, which would drop the buffer.
 # -Visible: the window is shown (not minimised): Renut presents (and so captures and paces by vsync) only with a
 # swapchain, which a minimised window does not get.
-param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible)
+param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible, [int]$Max = 60)
 $root = Split-Path -Parent $PSScriptRoot
 $dir = Join-Path $root "app\out\pc"
 $exe = Join-Path $dir "renut.exe"
@@ -15,7 +15,7 @@ Remove-Item $log -ErrorAction SilentlyContinue
 $min = if ($Visible) { "false" } else { "true" }
 $args = @("--log_file=`"$log`"", "--audio_mute=true", "--window_start_minimized=$min", "--fullscreen=false",
           "--game_data_root=`"D:/ridge racer 6/game`"", "--user_data_root=`"$root/out/pc_user`"",
-          "--nfsmw_captura_cada_s=$Every", "--nfsmw_captura_max=60", "--log_file_writer=false") +
+          "--nfsmw_captura_cada_s=$Every", "--nfsmw_captura_max=$Max", "--log_file_writer=false") +
         @($Extra -split ' ' | Where-Object { $_ })
 $style = if ($Visible) { "Normal" } else { "Minimized" }
 $started = Get-Date  # rr6-nx: the run's own time ($p.StartTime is empty once the process has been stopped)

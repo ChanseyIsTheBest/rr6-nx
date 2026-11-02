@@ -51,6 +51,7 @@ extern "C" const bool g_banjo_store_cards = false;
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fmt/format.h>
@@ -550,6 +551,7 @@ void Check(Hook& h, PPCContext& ctx, uint8_t* base, uint32_t& counter) {
       h.compared.fetch_add(1, std::memory_order_relaxed);
       ::me::native::g_verify_native_checks.fetch_add(1, std::memory_order_relaxed);  // the "[verify]" line
       if (attempt > 1) h.not_repeated.fetch_add(1, std::memory_order_relaxed);
+      if (attempt > kAttempts) REXLOG_INFO("[hot] {} settled: equal at pass {}, so another thread was writing its inputs", h.name, attempt);
       return;
     }
     if (attempt < kAttempts) {
@@ -564,6 +566,22 @@ void Check(Hook& h, PPCContext& ctx, uint8_t* base, uint32_t& counter) {
       }
       continue;
     }
+    // rr6-nx (2026-11-03): it repeated, but three passes in a row take microseconds and a decoder fills a buffer for
+    // milliseconds (Ryujinx, machine under load: three audio functions, r5 an output ring). So the same pass again after
+    // waiting, up to kSettleAttempts times, 1 ms apart: a wrong copy differs every time, a race stops when the writer does.
+    constexpr int kSettleAttempts = 200;
+    if (outcome == Outcome::kDifferent && attempt < kAttempts + kSettleAttempts) {
+      ctx = t.in;
+      size_t off = 0;
+      for (const Region& r : t.ranges) {
+        std::memcpy(Raw(base, r.addr), t.before.data() + off, r.len);
+        off += r.len;
+      }
+      ctx.fpscr.setcsr(hw_entry);
+      if (attempt == kAttempts) REXLOG_INFO("[hot] {} differs three passes in a row, waiting for it to settle: {}", h.name, diff);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
     // It repeated.
     h.compared.fetch_add(1, std::memory_order_relaxed);
     ::me::native::g_verify_native_checks.fetch_add(1, std::memory_order_relaxed);
@@ -574,7 +592,7 @@ void Check(Hook& h, PPCContext& ctx, uint8_t* base, uint32_t& counter) {
     REXLOG_ERROR("[hot] DIFFERENCE {} ({}): {} ({} passes in a row); inputs r3={:#x} r4={:#x} r5={:#x} r6={:#x} "
                  "r7={:#x} f1={:#x} f2={:#x}; {} bytes in {} written ranges; native copy switched off for the rest of "
                  "the run",
-                 h.name, h.key, diff, kAttempts, in.r3.u64, in.r4.u64, in.r5.u64, in.r6.u64, in.r7.u64, in.f1.u64,
+                 h.name, h.key, diff, attempt, in.r3.u64, in.r4.u64, in.r5.u64, in.r6.u64, in.r7.u64, in.f1.u64,
                  in.f2.u64, t.bytes, t.ranges.size());
     if (outcome == Outcome::kPathsDiffer) h.orig(ctx, base);  // nothing has run for real yet
     return;
