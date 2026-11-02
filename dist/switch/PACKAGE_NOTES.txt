@@ -21,17 +21,22 @@ What to test, most important first
 2. Large wedge-shaped polygons in the race. Seen ONCE in the emulator: emu4, capture at lap 00:32, big flat streaked shapes each side of
    the road, over the rock wall on the first course. Not reproduced since, cause unknown. If you see them, note where, and whether
    rr6_depth_bias = false in renut.toml makes them go.
-3. The car's rear window. Ours is blotchier than the reference and the gloss across the rear panel is weaker. Known, not fixed.
-4. Car at car select: should be textured. It was black until rr6_fog_nan_zero. Both worked in the emulator; confirm on hardware.
-5. Foliage (trees beside the course). Ridge Racer 6 Recomp needed an option against flicker on NVIDIA cards, and the Switch's GPU is NVIDIA.
-   Looks right in the emulator at capture size, which says little about flicker. Watch for it.
-6. Speed. The game slows down when frames run late: at about 38 fps in the emulator the lap clock ran at 0.755 of real time. It is not a
+3. Overall brightness. banjo_renut_game_gamma is now on: the display's gamma ramp, which the reference applies and Renut did not. Menus went
+   from 3 to 12 levels off the reference to under 1. In renut_ab.toml it is target 73: the off half is visibly brighter in the darks.
+4. The car and glass. Still weaker than the reference: the rear window blotchy, the gloss on the car and the glow on bright buildings less.
+   Known, not fixed yet.
+5. Car at car select: should be textured. It was black until rr6_fog_nan_zero. Both worked in the emulator; confirm on hardware.
+6. Foliage (trees beside the course). Flicker reported on the PC build, and the Switch's GPU is NVIDIA too. Under investigation: with the car
+   braked and nothing else moving, 3 to 4 % of tree pixels still change from capture to capture. Watch for it.
+7. Speed. The game slows down when frames run late: at about 38 fps in the emulator the lap clock ran at 0.755 of real time. It is not a
    strict one tick per frame. Compare the on-screen lap clock with a stopwatch in a race. The game's timing has not been changed.
-7. Long stalls. The emulator had minutes under 1 fps around some loads and at the race's start, with no shader compiles. Unknown whether
-   this is the emulator. Note any stall on the console.
-8. Music: pick "Disc 4: Player Disc" under Change BGM, and race. Nobody has listened to this yet, on any platform. The largest pack
+8. Long stalls. The emulator had stretches under 3 fps around some loads and at the race's start, with no shader compiles: 3 to 7 windows of
+   10 s in a run with the guard off, 7 to 12 with it on. Unknown whether this is the emulator. Note any stall on the console.
+9. A dark scene with no car and the HUD bright, once in the emulator, while the car was stuck against the wall (emu11, capture 027). It looks
+   like the game's own reset of a stuck car; not confirmed. Note it if you see it while driving normally.
+10. Music: pick "Disc 4: Player Disc" under Change BGM, and race. Nobody has listened to this yet, on any platform. The largest pack
    (Silver Stream, 68.9 MB) opened and streamed on the PC.
-9. Unlock keys: hidden by default. rr6_dlc_unlock_keys = true shows them; that is your decision.
+11. Unlock keys: hidden by default. rr6_dlc_unlock_keys = true shows them; that is your decision.
 
 Console profile
 ---------------
