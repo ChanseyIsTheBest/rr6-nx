@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """pacman-nx: each key of banjo-nx's docs/enhancements-reference.md table ("Every key") against what this port ships: the
-value in dist/switch/pacman-nx/renut.toml, else in app/pacman_switch_defaults.toml, else the source's default. Prints the
+value in dist/switch/rr6-nx/renut.toml, else in app/rr6_switch_defaults.toml, else the source's default. Prints the
 keys that differ from the reference's "shipped" column, and the marked SLOWER ON THE CONSOLE ones with their value here.
   python tools/enhancement_state.py [reference.md]
 """
@@ -40,8 +40,8 @@ def source_defaults():
 
 
 def main():
-    shipped = toml_values(os.path.join(ROOT, 'dist', 'switch', 'pacman-nx', 'renut.toml'))
-    built_in = toml_values(os.path.join(ROOT, 'app', 'pacman_switch_defaults.toml'))
+    shipped = toml_values(os.path.join(ROOT, 'dist', 'switch', 'rr6-nx', 'renut.toml'))
+    built_in = toml_values(os.path.join(ROOT, 'app', 'rr6_switch_defaults.toml'))
     source = source_defaults()
     rows = []
     for line in open(REF, encoding='utf-8'):

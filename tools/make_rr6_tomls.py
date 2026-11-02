@@ -2,8 +2,8 @@
 """rr6-nx (2026-11-02, from katamari-nx's make_katamari_tomls.py): writes the package's tomls from banjo-nx's shipped renut.toml
 (its SD package of 2026-10-29 evening), with Ridge Racer 6's settings:
 
-  renut.toml       the shipped settings: Renut on deko3d, 720 lines handheld and 1080 docked (katamari-nx's choice, kept until the
-                   user decides), the game's own MSAA, every exact enhancement as banjo-nx ships it, the items measured SLOWER ON THE
+  renut.toml       the shipped settings: Renut on deko3d, 720 lines handheld and docked (pixel-identical; 1080 docked is a config
+                   for the user), the game's own MSAA, every exact enhancement as banjo-nx ships it, the items measured SLOWER ON THE
                    CONSOLE off, diagnostics as banjo-nx's renut.toml (logs on);
   renut_play.toml  renut.toml with the render-thread diagnostics off (banjo-nx's renut_play.toml difference);
   renut_ab.toml    renut.toml with an in-run A/B list, 30 s halves, target 1 (a Vulkan-only key: does nothing on the Switch)
@@ -27,11 +27,11 @@ HEADER = """# rr6-nx (Ridge Racer 6 on the Switch, Renut's renderer on deko3d): 
 SHIPPED = {
     'banjo_renderer': '"renut"',
     'renut_gpu_backend': '"deko3d"',
-    # The game's MSAA, no dynamic resolution. Handheld at the console's 720 lines; docked at 1080 lines, the user's
-    # decision (2026-10-31: "draw at 1080p in docked and 720p in handheld"; rc4 and rc5 still shipped 720 docked,
-    # fixed in rc6). configs/renut_720_docked.toml keeps the Xbox 360's 720 lines docked too.
+    # The game's MSAA, no dynamic resolution. 720 lines handheld and docked, the Xbox 360's own: pixel-identical is the
+    # default here, and Katamari's 1080 lines docked was the user's decision for that game. configs/renut_1080_docked.toml
+    # is one key away, for the user to decide on.
     'banjo_renut_render_height_handheld': '720',
-    'banjo_renut_render_height_docked': '1080',
+    'banjo_renut_render_height_docked': '720',
     'banjo_renut_dynamic_resolution': 'false',
     'disable_msaa': 'false',
     'renut_shadow_resolution': '"1x"',
@@ -84,6 +84,8 @@ CONFIGS = {
                             'profilers, no diagnostics)'),
     'renut_648_864.toml': ({'banjo_renut_render_height_handheld': '648', 'banjo_renut_render_height_docked': '864'},
                            'banjo-nx\'s internal resolution: 648 lines handheld, 864 docked (not pixel-identical)'),
+    'renut_1080_docked.toml': ({'banjo_renut_render_height_docked': '1080'},
+                               '1080 lines docked (not pixel-identical: the user\'s decision)'),
     'renut_720_docked.toml': ({'banjo_renut_render_height_docked': '720'},
                               '720 lines docked too, the Xbox 360\'s own (pixel-identical)'),
     'renut_dynamic.toml': ({'banjo_renut_dynamic_resolution': 'true'},

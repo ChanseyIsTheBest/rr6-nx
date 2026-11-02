@@ -1174,6 +1174,22 @@ bool build_vpkd3d128(BuilderContext& ctx) {
   // TODO(tomc): vectorize
   // NOTE: handling vector reversal here too
   ctx.emit_set_flush_mode(true);
+  // rr6-nx (2026-11-02, from the Pac-Man and Halo 3 ports' reports): types 3, 4 and 5 write the destination a halfword at a
+  // time while still reading the source. When they are one register those types read a scoped copy (vTemp is their scratch).
+  // This game's D3DX float16 converter sub_82266768 has `vpkd3d128 v0,v0,5,2,2`: element 0's sign was read back from the
+  // word just written, so a negative value came out positive. Output for a destination that is not the source is unchanged.
+  const bool aliased = ctx.insn.operands[0] == ctx.insn.operands[1];
+  auto source = [&]() -> std::string {
+    return aliased ? std::string("vPackSrc") : fmt::format("{}", ctx.v(ctx.insn.operands[1]));
+  };
+  auto open_source = [&] {
+    if (aliased)
+      ctx.println("\t{{ PPCVRegister vPackSrc = {};", ctx.v(ctx.insn.operands[1]));
+  };
+  auto close_source = [&] {
+    if (aliased)
+      ctx.println("\t}}");
+  };
   switch (ctx.insn.operands[2]) {
     case 0:  // D3D color
     {
@@ -1284,26 +1300,27 @@ bool build_vpkd3d128(BuilderContext& ctx) {
       // Pack 2 elements into 32 bits (1 word)
       // Guest element 0 goes to high 16 bits, element 1 to low 16 bits
       // Output u16 index = (1-i) + 2*shift for element i
+      open_source();
       for (size_t i = 0; i < 2; i++) {
         size_t srcIdx = 3 - i;  // Guest element i is at host array index 3-i
         size_t dstIdx =
             (1 - i) + (2 * ctx.insn.operands[4]);  // Output reversed: elem 0 to high, elem 1 to low
-        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
-                    srcIdx);
+        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), source(), srcIdx);
         ctx.println(
             "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
             "(({2}.u32[{3}]&0x7f800000)>>23);",
-            ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+            ctx.v_temp(), ctx.temp(), source(), srcIdx);
         ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
-                    ctx.v_temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+                    ctx.v_temp(), source(), srcIdx);
         ctx.println(
             "\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? "
             "((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : "
             "((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;",
             ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v_temp(), ctx.temp());
         ctx.println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", ctx.v(ctx.insn.operands[0]),
-                    dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
+                    dstIdx, source(), srcIdx);
       }
+      close_source();
       break;
     }
 
@@ -1312,16 +1329,17 @@ bool build_vpkd3d128(BuilderContext& ctx) {
       // Pack 4 elements into 64 bits (2 words)
       // Guest element 0 goes to highest 16-bit position, element 3 to lowest
       // Output u16 index = (3-i) + 2*shift for element i
+      open_source();
       for (size_t i = 0; i < 4; i++) {
         size_t srcIdx = 3 - i;  // Guest element i is at host array index 3-i
         size_t dstIdx = (3 - i) + (2 * ctx.insn.operands[4]);  // Output also reversed
-        ctx.println("\t{}.s32 = {}.s32[{}] - 0x40400000;", ctx.temp(), ctx.v(ctx.insn.operands[1]),
-                    srcIdx);
+        ctx.println("\t{}.s32 = {}.s32[{}] - 0x40400000;", ctx.temp(), source(), srcIdx);
         ctx.println("\t{}.s32 = {}.s32 > 32767 ? 32767 : ({}.s32 < -32767 ? -32767 : {}.s32);",
                     ctx.temp(), ctx.temp(), ctx.temp(), ctx.temp());
         ctx.println("\t{}.u16[{}] = uint16_t({}.s32);", ctx.v(ctx.insn.operands[0]), dstIdx,
                     ctx.temp());
       }
+      close_source();
       break;
     }
 
@@ -1333,25 +1351,26 @@ bool build_vpkd3d128(BuilderContext& ctx) {
       if (ctx.insn.operands[3] != 2 || ctx.insn.operands[4] > 2)
         REXCODEGEN_WARN("Unexpected float16_4 pack instruction at {:X}", ctx.base);
 
+      open_source();
       for (size_t i = 0; i < 4; i++) {
         size_t srcIdx = 3 - i;  // Guest element i is at host array index 3-i
         size_t dstIdx = (3 - i) + (2 * ctx.insn.operands[4]);  // Output also reversed
-        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), ctx.v(ctx.insn.operands[1]),
-                    srcIdx);
+        ctx.println("\t{}.u32 = ({}.u32[{}]&0x7FFFFFFF);", ctx.temp(), source(), srcIdx);
         ctx.println(
             "\t{0}.u8[0] = ({1}.f32 != {1}.f32) || ({1}.f32 > 65504.0f) ? 0xFF : "
             "(({2}.u32[{3}]&0x7f800000)>>23);",
-            ctx.v_temp(), ctx.temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+            ctx.v_temp(), ctx.temp(), source(), srcIdx);
         ctx.println("\t{}.u16 = {}.u8[0] != 0xFF ? (({}.u32[{}]&0x7FE000)>>13) : 0x0;", ctx.temp(),
-                    ctx.v_temp(), ctx.v(ctx.insn.operands[1]), srcIdx);
+                    ctx.v_temp(), source(), srcIdx);
         ctx.println(
             "\t{0}.u16[{1}] = {2}.u8[0] != 0xFF ? ({2}.u8[0] > 0x70 ? "
             "((({2}.u8[0]-0x70)<<10)+{3}.u16) : (0x71-{2}.u8[0] > 31 ? 0x0 : "
             "((0x400+{3}.u16)>>(0x71-{2}.u8[0])))) : 0x7FFF;",
             ctx.v(ctx.insn.operands[0]), dstIdx, ctx.v_temp(), ctx.temp());
         ctx.println("\t{}.u16[{}] |= (({}.u32[{}]&0x80000000)>>16);", ctx.v(ctx.insn.operands[0]),
-                    dstIdx, ctx.v(ctx.insn.operands[1]), srcIdx);
+                    dstIdx, source(), srcIdx);
       }
+      close_source();
       break;
     }
 

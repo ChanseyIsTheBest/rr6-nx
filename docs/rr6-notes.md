@@ -102,3 +102,40 @@ katamari-nx's Renut stands at XDK 2.0.5632 (`docs/from-katamari/katamari-notes-r
 - zuma-nx's split: the game's textures, surfaces and volumes stay **the game's own XDK 2135 objects** (its loaders and D3DX read them; its Create, GetSurfaceLevel, GetDesc, AddRef, Release, GetType run on them). Renut gets a **shadow** in N&B's layout: a texture's copy of the fetch constant; a surface's Renut record, made at `CreateSurface` with the game's EDRAM base. New here: surfaces (Zuma had none), the bind counts this XDK's setters keep (an object released while bound lives until unbound), index buffers.
 - Renut's own objects: vertex and index buffers, shaders, declarations, automatic surfaces.
 - States: rows 0-56 are N&B's, row 57 a state N&B lacks (kept on the host), N&B's 57-95 are rows 58-96, 96-100 are not in this XDK; N&B's order of defaults kept (Zuma's list).
+
+## Renut bugs at this XDK, found entering the race (2026-11-02)
+
+- **Record heap corrupted (`o1heapAllocate` crash, about 240 s in).** The XDK 2135 setters keep a bind count on what they hold. `Rr6Rebind` unbound the old object before the native setter ran, and the native setter fences what it replaces (`TagResourceFence`, header +8). When that unbind was the last reference, the fence landed in a freed record: the BE word 0x0000E2FC at user +8 is a free-list link read as the host pointer 0xFCE20000. Found by giving each record its own pages, read-only once freed. Fixed by unbinding after the native setter, in every setter and in both shader setters.
+- **Index buffer Unlock.** `sub_82254EB8` ran XDK 2135 header code on Renut's header: hooked.
+- **Clear over a larger colour target.** A clear with 0x3F on a 1440x800 colour with 1280x720 depth made an invalid Vulkan framebuffer. `ClearTargets` splits it when the depth is smaller.
+
+## Visual differences against the reference (emulated GPU, Direct3D 12)
+
+Reference: `out/pc_runs/emu4`. Ours: `out/pc_runs/renut*`. `tools/side_by_side.py` makes the comparison.
+
+| # | Where | Difference | Why | Status |
+|---|---|---|---|---|
+| 1 | Race | Scene cut on the right and at the bottom on Direct3D 12 (88.9 % x 90 %); device lost on Vulkan | The race draws a 1440x800 colour target over a depth surface made 1280x720. RB_SURFACE_INFO's pitch is shared, so that is legal on the console; a host framebuffer cuts to the smaller or is invalid | Fixed by `rr6_depth_covers_colour` (no in-run A/B: off loses the device on Vulkan; runs only when targets change) |
+| 2 | Car select | Car body black, logos included; interior draws | Under investigation. Not the exponent adjust (the counter never fires), not the PS constant location (0x1780 matches) | Open |
+
+## Recompiler bugs found by other ports (2026-11-02)
+
+Both are in `sdk/src/codegen/builders/vector.cpp`, both are a destination that is also a source, overwritten before it is read.
+
+- `vpkuhus` / `vpkuwus`: now built through `vTemp`. This game has neither (0 in the generated code).
+- `vpkd3d128` types 3, 4, 5: read a scoped copy when the destination is the source; other uses generate the same code as before. This game has 3 uses, 1 aliased: `vpkd3d128 v0,v0,5,2,2` in `sub_82266768`, called through `sub_82266958` from 3 sites. The sign of a negative element 0 was lost. **The reference has the same generated code, so it cannot show this difference**: the fix is checked by reading the code, not against the reference.
+
+The other piecewise builders in that file were read and are safe: `vsubsws`, `vrlw`, `vsrab`, `vsrb`, `vsraw`, `vsrw`, `vlogefp` work element by element, and `vupkd3d128` reads each source before what overlaps it is written. Other builder files were not audited.
+
+## Enhancements against banjo-nx's reference (2026-11-02, read from the sources; `tools/enhancement_gap.py`, `tools/enhancement_state.py`)
+
+260 keys in the reference, 245 defined here. Of the table's 139 rows, 136 ship the reference's value here.
+
+- **SLOWER ON THE CONSOLE, all off:** `banjo_renut_replay_lookahead`, `banjo_renut_shadow_sort`, `banjo_renut_texture_slot_skip`, `banjo_renut_inline_line_compare`.
+- **Differs:** `banjo_native_reverb` is off here (true in the reference). It is listed under game code as native code, N&B's.
+- **Absent, in the table:** `banjo_renut_check_worker`, `banjo_gpu_fetch_spec` (the reference's case is tessellated draws' fetch types). Neither has been measured on this game.
+- **Absent, outside the table:** the `banjo_cpu_native_*` natives (`constants_ps`, `constants_vs`, `flush_constants`, `flush_registers`, `memcpy`, `memset`, `xaudio_src_m03`), the `banjo_ring_prover*` keys, `banjo_pool_lock`, `banjo_renut_check_worker_core`.
+
+This is the keys' presence and values, not a measurement. Each key's in-run A/B and verify run on this game is still to do.
+
+**Package defaults changed from Katamari:** `banjo_renut_render_height_docked` is 720, not 1080: pixel-identical is the default here and 1080 was the user's decision for Katamari. `configs/renut_1080_docked.toml` has it. `RR6_BUILTIN_CONFIG` is OFF, so the NRO reads `renut.toml`, as the package needs.

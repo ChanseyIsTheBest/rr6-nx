@@ -171,7 +171,9 @@ void InstallPackages(rex::Runtime *runtime) {
         return;
 
     const uint32_t title_id = runtime->kernel_state()->title_id();
-    const fs::path list_path = folder / kInstalledList;
+    // rr6-nx: not in 'folder', which may point at the packages where they lie: nothing is written there.
+    const fs::path list_path =
+        (g_user_data_root.empty() ? rex::filesystem::GetExecutableFolder() : g_user_data_root) / kInstalledList;
     std::vector<std::string> installed = ReadInstalledList(list_path);
     bool list_changed = false;
     int newly = 0, present = 0;

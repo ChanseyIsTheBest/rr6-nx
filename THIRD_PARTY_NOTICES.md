@@ -8,6 +8,10 @@ folder it is in (see below).
 
 | Project | Used for | License |
 |---|---|---|
+| Ridge Racer 6 Recomp by Sirhalo23 | Its codegen work (the function list, setjmp and longjmp, the two tail calls through tables), its findings on this game's rendering, and the game fixes in `app/src/rr6_game_fixes.cpp` | BSD-3-Clause (`docs/licenses/RidgeRacer6-Recompilation-BSD-3-Clause.txt`) |
+| katamari-nx (Beautiful Katamari), by ChanseyIsTheBest | The tree this port was copied from | GPL-3.0 |
+| zuma-nx and the other Zuma ports, bejeweled3-nx | Renut at XDK 2.0.2135, shader containers of version 0x0E, hot functions | GPL-3.0 |
+| NetherSX2_nx, battd_nx | The four-core layout, the GPU arena | See their projects |
 | [renut-nx](https://github.com/ChanseyIsTheBest/renut-nx) (banjo-nx: Banjo-Kazooie: Nuts & Bolts) by ChanseyIsTheBest | The tree this port started from: the SDK fork, the app, the tools, the renderer's adaptation, plume's deko3d back end, the shader passes | GPL-3.0 |
 | [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx), [futari-nx](https://github.com/ChanseyIsTheBest/futari-nx), Peggle 2's and Sonic & All-Stars Racing Transformed's ports by ChanseyIsTheBest | CPU rounds, built-in settings, release shader files, fixes | GPL-3.0 |
 | [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx) by NebadasSwifty | The structure of `app/`, `app/src/me` | GPL-3.0 |

@@ -1,7 +1,8 @@
-# katamari-nx (Beautiful Katamari on the Switch, Renut's renderer on deko3d): every Renut verify mode on (emulator / test runs: slow; the log's verify lines must count 0 differences)
-# Made by tools/make_katamari_tomls.py from banjo-nx's shipped renut.toml (2026-10-29). Copy to
-# sdmc:/switch/katamari-nx/renut.toml. Credits: reNut's renderer (masterspike52, reuse permitted), banjo-nx, sa2-nx,
-# NetherSX2_nx (four-core layout), battd_nx (the GPU arena), bejeweled3-nx and the zuma ports (hot functions).
+# rr6-nx (Ridge Racer 6 on the Switch, Renut's renderer on deko3d): every Renut verify mode on (emulator / test runs: slow; the log's verify lines must count 0 differences)
+# Made by tools/make_rr6_tomls.py from banjo-nx's shipped renut.toml (2026-10-29). Copy to
+# sdmc:/switch/rr6-nx/renut.toml. Credits: reNut's renderer (masterspike52, reuse permitted), banjo-nx, sa2-nx,
+# NetherSX2_nx (four-core layout), battd_nx (the GPU arena), bejeweled3-nx and the zuma ports (hot functions),
+# katamari-nx, zuma-nx (XDK 2.0.2135), Ridge Racer 6 Recomp by Sirhalo23 (BSD 3-Clause; its codegen work and game fixes).
 # banjo-nx test config (Switch). Lines are cvars.
 
 # Renderer: the native Vulkan renderer (needs banjo_shaders.mesp and banjo_shaders.mesp.idx next to the NRO).
@@ -20,7 +21,7 @@ disable_msaa = false
 
 # Shaders the renderer cannot identify are written here once (raw microcode). Please send this folder back:
 # they get added to banjo_shaders.mesp (new areas of the game may have shaders the PC runs have not seen yet).
-banjo_shader_misses = "sdmc:/switch/katamari-nx/shader_misses"
+banjo_shader_misses = "sdmc:/switch/rr6-nx/shader_misses"
 
 # Logs go to logs/rex/ next to the NRO. Please send them back after a test.
 log_level = "info"
@@ -463,7 +464,7 @@ banjo_renut_portrait_msaa_samples = 2
 # (rounded to a multiple of 9: 648, 702, 756, 810, 864, 900, ...; read at start). configs/banjo_renut_native_720p.toml
 # is the game's own 720p.
 banjo_renut_render_height_handheld = 720
-banjo_renut_render_height_docked = 1080
+banjo_renut_render_height_docked = 720
 banjo_renut_display_height_docked = 1080
 # The upscale: 0 = bilinear (your choice, every config: one sample a pixel, the cheapest), 1 = bicubic Catmull-Rom
 # (sharper, five samples a pixel).
@@ -576,16 +577,15 @@ banjo_renut_clear_repeat = true
 banjo_deko3d_provisional_count = true
 banjo_renut_diag_terrain = true
 # Title update 3 (2026-10-29): banjo-nx is now the updated game (docs/title-update-3.md). The update's default.xexp
-# goes next to default.xex in game_root, its db_index.txt and 12 bundles in sdmc:/switch/katamari-nx/update/, and the
-# DLC package (optional) in sdmc:/switch/katamari-nx/dlc/. The native copies of game functions are called directly
+# goes next to default.xex in game_root, its db_index.txt and 12 bundles in sdmc:/switch/rr6-nx/update/, and the
+# DLC package (optional) in sdmc:/switch/rr6-nx/dlc/. The native copies of game functions are called directly
 # (no guard): the first update package's console session compared 215,000 calls of its 512 copies with the
 # game's own code under the guard and found 0 differences (2026-10-29; the user: guard off from then on).
 # renut_guard.toml is this file with the guard on (banjo_hot_guard_calls / banjo_hot_guard_period), for a check.
 renut_shadow_resolution = "1x"
 renut_ambient_occlusion = "Half"
-katamari_hand_matrix_copy = true
-katamari_hand_matrix_multiply = true
-katamari_hand_matrix_translation = true
+banjo_xma_frame_cache = false
+rr6_dlc_unlock_keys = false  # true: also load the 36 car unlock keys
 banjo_renut_fast_draw_verify = true
 banjo_renut_resource_objects_verify = true
 banjo_renut_fetch_cache_verify = true
@@ -595,10 +595,6 @@ banjo_renut_chain_reuse_verify = true
 banjo_renut_snapshot_deltas_verify = true
 banjo_renut_store_cards_verify = true
 banjo_renut_record_extents_verify = true
-katamari_hand_sphere_box = true
-banjo_xma_frame_cache = false
-katamari_dlc_unlock_packs = false  # true: also load the accessory / character / special accessory packs
-katamari_hand_transform_chain_verify = true
 
 [input_p1]
 a = ""
