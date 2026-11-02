@@ -1,0 +1,49 @@
+rr6-nx: package notes, what to test on the console
+==================================================
+
+Nothing in this package has run on real hardware. Everything below was seen on the PC or in Ryujinx, which are proxies.
+
+Install
+-------
+Copy COPY_TO_SD_switch_rr6-nx to sdmc:/switch/rr6-nx. Extract your disc into game_root (not the ISO itself).
+DLC is optional: put the packages under dlc/, in any folders. The first start then extracts about 1.9 GB next to your saves, so the
+first boot takes longer and needs the space.
+
+Which toml
+----------
+renut.toml        first run: shipped settings, logs on, CPU sampling on.
+renut_play.toml   to play, diagnostics off.
+renut_ab.toml     A/B: stay in one place for 10+ minutes, send logs/renut_001.log. Target 1 does nothing on the Switch: it is the control.
+
+What to test, most important first
+----------------------------------
+1. Boot to a race. Logos, Pac-Man loader, title, World Xplorer, car select, first race.
+2. Large wedge-shaped polygons in the race. Seen ONCE in the emulator: emu4, capture at lap 00:32, big flat streaked shapes each side of
+   the road, over the rock wall on the first course. Not reproduced since, cause unknown. If you see them, note where, and whether
+   rr6_depth_bias = false in renut.toml makes them go.
+3. The car's rear window. Ours is blotchier than the reference and the gloss across the rear panel is weaker. Known, not fixed.
+4. Car at car select: should be textured. It was black until rr6_fog_nan_zero. Both worked in the emulator; confirm on hardware.
+5. Foliage (trees beside the course). Ridge Racer 6 Recomp needed an option against flicker on NVIDIA cards, and the Switch's GPU is NVIDIA.
+   Looks right in the emulator at capture size, which says little about flicker. Watch for it.
+6. Speed. The game slows down when frames run late: at about 38 fps in the emulator the lap clock ran at 0.755 of real time. It is not a
+   strict one tick per frame. Compare the on-screen lap clock with a stopwatch in a race. The game's timing has not been changed.
+7. Long stalls. The emulator had minutes under 1 fps around some loads and at the race's start, with no shader compiles. Unknown whether
+   this is the emulator. Note any stall on the console.
+8. Music: pick "Disc 4: Player Disc" under Change BGM, and race. Nobody has listened to this yet, on any platform. The largest pack
+   (Silver Stream, 68.9 MB) opened and streamed on the PC.
+9. Unlock keys: hidden by default. rr6_dlc_unlock_keys = true shows them; that is your decision.
+
+Console profile
+---------------
+renut.toml has switch_profile_stacks = true. Play the slow scene for a few minutes and send logs/rex/rex_profile.log with rr6-nx.elf from
+this package: a profile only maps with the ELF of the same build. Sampling pauses threads 1,000 times a second, so read shares from such a
+run, not its best frame rate. Name the scene and the time.
+
+Not in this package, by your order: PGO and LTO, hand-written natives (they need a console profile first).
+
+Known problems, not fixed
+-------------------------
+- PC only: Renut on Vulkan draws the race wrongly (the car's far side shows through, large polygons over the scene). Direct3D 12 and
+  deko3d do not. Looks like a depth or stencil problem. Cause not found.
+- PC only: Direct3D 12 hung the GPU twice (device removed, 887A0006), both times with another heavy process running.
+- Direct3D 12 applies rr6_depth_bias only with the Agility SDK.
