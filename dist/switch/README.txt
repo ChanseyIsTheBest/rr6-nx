@@ -1,59 +1,50 @@
-katamari-nx: Beautiful Katamari (Xbox 360, title 4E4D07DC) on the Nintendo Switch
-==================================================================================
+rr6-nx: Ridge Racer 6 (Xbox 360, title 4E4D07D3) on the Nintendo Switch
+======================================================================
 
-A ReXGlue static recompilation, built from banjo-nx (Banjo-Kazooie: Nuts & Bolts' port): its SDK fork, its
-post-codegen CPU passes and reNut's Direct3D-level renderer on plume's deko3d back end (no NVK, no PM4 ring, no EDRAM
-model). Your own game files are needed; nothing of the game is in this package except the recompiled code.
+A ReXGlue static recompilation, started from katamari-nx: its SDK fork, its post-codegen CPU passes and reNut's
+Direct3D-level renderer on plume's deko3d back end (no NVK, no PM4 ring, no EDRAM model). Your own game files are needed;
+nothing of the game is in this package except the recompiled code.
 
-Credits: reNut's renderer by masterspike52 (its author permits its reuse in these ports), banjo-nx, sa2-nx (input,
-CPU items), NetherSX2_nx by NaGaa95 (the four-core layout, MIT), battd_nx (the GPU arena), bejeweled3-nx and the zuma
-ports (the hot-function method). GPL-3.0 where the sources are.
+Credits: Ridge Racer 6 Recomp by Sirhalo23 (BSD 3-Clause; its codegen work and its notes on this game), reNut's renderer by
+masterspike52 (its author permits its reuse in these ports), katamari-nx, banjo-nx, sa2-nx, NetherSX2_nx by NaGaa95 (the
+four-core layout, MIT), battd_nx (the GPU arena), bejeweled3-nx and the Zuma ports (Renut at this XDK, the hot-function
+method). GPL-3.0 where the sources are.
 
 SD card layout
 --------------
-sdmc:/switch/katamari-nx/katamari-nx.nro      the program
-sdmc:/switch/katamari-nx/renut.toml           settings (copy one of the tomls below over it)
-sdmc:/switch/katamari-nx/game_root/           the disc's files: default.xex, d02.dat-d05.dat, data/, alchemy.ini ...
-                                              (extract your ISO; the ISO itself is not read)
-sdmc:/switch/katamari-nx/dlc/                 the DLC packages (Xbox 360 LIVE files, content type 2), installed at the
-                                              first start into sdmc:/switch/katamari-nx/renut/ (dlc/installed.txt lists
-                                              them). The seven stage packs always load. The nine packs that only
-                                              unlock presents and cousins the game unlocks itself (Accessory Sets
-                                              A-D, Character Sets A-D, Special Accessory) are kept out of the game by
-                                              default: they stay installed, and katamari_dlc_unlock_packs = true in
-                                              renut.toml loads them too.
+sdmc:/switch/rr6-nx/rr6-nx.nro           the program
+sdmc:/switch/rr6-nx/renut.toml           settings (copy one of the tomls below over it)
+sdmc:/switch/rr6-nx/deko3d_shaders.bin   the prebuilt shader cache: without it shaders compile while you play
+sdmc:/switch/rr6-nx/game_root/           the disc's files: default.xex and the rest (extract your ISO; the ISO is not read)
+sdmc:/switch/rr6-nx/dlc/                 the DLC packages, as they come (Xbox 360 LIVE files, content type 2), in any
+                                         folders under it. Installed at the first start: their contents are extracted
+                                         next to your saves, about 1.9 GB for all 77. The 41 music packs show in the game
+                                         as "Disc 4: Player Disc". The 36 car unlock keys install but stay hidden from
+                                         the game unless rr6_dlc_unlock_keys = true in renut.toml (your decision).
 
 The tomls
 ---------
-renut.toml        the shipped settings: Renut on deko3d, 720 lines handheld and 1080 docked (your choice; the
-                  game's own MSAA, no dynamic resolution), every exact enhancement on, the items measured SLOWER ON
-                  THE CONSOLE in banjo-nx off, logs and diagnostics on. configs/renut_720_docked.toml keeps the Xbox
-                  360's own 720 lines docked too (pixel-identical to the console).
+renut.toml        the shipped settings: Renut on deko3d, 720 lines handheld and docked (the Xbox 360's own), the game's own
+                  MSAA, no dynamic resolution, every exact enhancement on, the items measured SLOWER ON THE CONSOLE in
+                  banjo-nx off, logs and diagnostics on.
 renut_play.toml   the same with the render-thread diagnostics off (for playing).
-renut_ab.toml     the same with an in-run A/B list, 30 s halves, target 1 as the do-nothing control (a Vulkan-only
-                  key). Stand still in one place for 10+ minutes; the log's "[renut A/B]" lines give each target.
-configs/          options that change the picture, one key away from renut.toml each, for you to decide on.
-
-Cores
------
-The port runs on the three cores a homebrew launch gets. Four cores are optional and off: with
-banjo_forwarder_program_id in renut.toml set to your forwarder's id, the NRO writes that forwarder's four-core NPDM
-(NetherSX2_nx's layout, CPU 0-3) to sdmc:/atmosphere/contents/<id>/exefs/main.npdm, and the next launch has CPU 0-3
-(the log's "[banjo] system core:" line says whether the fourth core was granted). Delete that main.npdm to go back to
-three cores. (Packages made with -FourCore also carry it under COPY_TO_SD_ROOT for program id 05D6EA1333487100.)
+renut_ab.toml     the same with an in-run A/B list, 30 s halves, target 1 as the do-nothing control (a Vulkan-only key). Stay
+                  in one place for 10+ minutes; the log's "[renut A/B]" lines give each target.
+configs/          options one key away from renut.toml. renut_1080_docked.toml and renut_648_864.toml change the picture,
+                  for you to decide on. renut_verify.toml turns every verify mode on and is slow.
 
 Profiling
 ---------
-The ELF (katamari-nx.elf) and the source snapshot (source/) are the ones this NRO was built from: a console profile
-(rex_profile.log, switch_profile_stacks) maps to source lines with them.
+The ELF (rr6-nx.elf) and the source snapshot (source_<commit>.tgz) are the ones this NRO was built from: a console profile
+maps to source lines with them. switch_profile_stacks = true (on in renut.toml) samples every thread; the log is
+logs/rex_profile.log next to the NRO. Play the scene you care about for a few minutes and send that log with this ELF.
 
-The CPU enhancements of this port (each with its key in renut.toml; all exact, all on)
---------------------------------------------------------------------------------------
-katamari_hand_matrix_copy         hand-written native of the game's 4x4 matrix copy (the hottest guest function)
-katamari_hand_matrix_multiply     hand-written native of its two 4x4 matrix multiplies (in place, three operands)
-katamari_hand_matrix_translation  hand-written native of its translation-matrix builder
-banjo_hand_memset                 the C runtime memset (banjo-nx's native: the same routine)
-banjo_cpu_native_sub_*            the localized copies of the 100 hottest other functions (PC profile)
-In-run A/B: target 69 = the hand-written matrix natives, 70 = the localized copies (renut_ab.toml lists both).
-A guard compares a native with the generated original now and then (banjo_hot_guard_calls / _period); a difference
-switches that one native off and logs "[hot] DIFFERENCE".
+This port's own keys
+--------------------
+rr6_depth_covers_colour  a depth target smaller than its colour target grows to fit (the race needs it). No A/B: off is broken.
+rr6_fog_nan_zero         NaN fog constants read as 0, as the console's multiply treats them (A/B 71).
+rr6_depth_bias           the game's depth bias reaches the GPU, as dynamic state (A/B 72).
+rr6_dlc_unlock_keys      false: the 36 car unlock keys stay hidden.
+
+Machine copies of hot functions: banjo_cpu_native_bulk, A/B 70. A guard compares a copy with the generated original now and
+then (banjo_hot_guard_calls / _period); a difference switches that copy off and logs "[hot] DIFFERENCE".

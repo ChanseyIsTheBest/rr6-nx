@@ -1047,8 +1047,23 @@ void ProfilerMain(void*) {
 
   size_t rr = 0;
   size_t mode_index = 0;
+  size_t config_checks = 0;
   while (true) {
     __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
+
+    // rr6-nx (2026-11-03): the config may load after the warm-up above (in Ryujinx it does, and the report then said "disabled" for
+    // a whole run with the key on). While sampling is off, the key is read again once a second.
+    if (!sample_stacks && ++config_checks == 10) {
+      config_checks = 0;
+      const std::string value = rex::cvar::GetFlagByName("switch_profile_stacks");
+      if (value == "true" || value == "1") {
+        sample_stacks = true;
+        if (FILE* f = std::fopen(ReportPath().c_str(), "a")) {
+          std::fprintf(f, "Stack sampling: active (1 ms), from the config\n");
+          std::fclose(f);
+        }
+      }
+    }
 
     for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
       const size_t idx = rr;
