@@ -261,6 +261,11 @@ namespace plume {
     }
 
     void Deko3DCommandList::emitBarrier(DkBarrier mode, uint32_t invalidate) {
+        // rr6-nx (2026-11-03, Deko3DOptions::fullBarriers): a console test.
+        if (Deko3DGetOptions().fullBarriers) {
+            mode = DkBarrier_Full;
+            invalidate |= DkInvalidateFlags_Image | DkInvalidateFlags_Shader | DkInvalidateFlags_Descriptors | DkInvalidateFlags_L2Cache;
+        }
         {
             // banjo-nx (2026-10-19): counted for the renderer's report (a load and a store: diagnostics).
             Deko3DStats &st = GetDeko3DStats();

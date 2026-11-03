@@ -914,6 +914,10 @@ namespace plume {
         bool readWait = false;
         bool writeWait = false;
         bool clearWait = false;
+        // rr6-nx (2026-11-03, a console test): every barrier the heaviest there is, a wait for the whole GPU (the copy
+        // engine included) with the image, shader, descriptor and L2 caches dropped. Slow; if a fault survives this,
+        // GPU ordering is not its cause.
+        bool fullBarriers = false;
         // banjo-nx (2026-10-21, after a console freeze in a run-time compile that never ended): a variant missing from
         // the cache is compiled on the uam thread in the background; until it is done the pipeline draws with the
         // shader's generic variant (without the specializations that only fold what the shader reads at run time:

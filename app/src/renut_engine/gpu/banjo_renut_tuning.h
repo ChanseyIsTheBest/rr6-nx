@@ -240,6 +240,7 @@ bool Deko3DStripRestartOn();
 bool Deko3DReadWaitOn();
 bool Deko3DWriteWaitOn();
 bool Deko3DClearWaitOn();
+bool Deko3DFullBarriersOn();  // banjo_deko3d_full_barriers (a console test)
 bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
 bool Deko3DBarrierMergeOn();

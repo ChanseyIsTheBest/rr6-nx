@@ -30,6 +30,8 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    (banjo_deko3d_read_wait, _write_wait, _clear_wait). Slower; if the car goes right, one of the three is it
   test7_gpu_all_safe.toml          the waits plus Zcull, depth compression, barrier merging, lean barriers and the cached upload ring off,
                                    and rr6_frames_ahead 0: everything the console's GPU does and Ryujinx does not emulate
+  test8_full_barriers.toml         the heaviest hammer: every barrier waits for the whole GPU, copy engine included, and drops every
+                                   cache. Very slow. If the car is still chrome here, GPU ordering is ruled out for good
   test1_all_suspects_off.toml      the earlier set: tests 2-5 at once
   test2_clip_plane_off.toml        the reflection fix, rr6_user_clip_plane. The car should go matte
   test3_copies_off.toml            the machine copies, banjo_cpu_native_bulk

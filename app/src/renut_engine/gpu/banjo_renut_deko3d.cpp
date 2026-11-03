@@ -452,6 +452,7 @@ void InstallShaderCache() {
   options.readWait = Deko3DReadWaitOn();  // rr6-nx (2026-11-03, from sasrt-nx): console tests
   options.writeWait = Deko3DWriteWaitOn();
   options.clearWait = Deko3DClearWaitOn();
+  options.fullBarriers = Deko3DFullBarriersOn();
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
   options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)
