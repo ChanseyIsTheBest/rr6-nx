@@ -44,7 +44,15 @@ This port's own keys
 rr6_depth_covers_colour  a depth target smaller than its colour target grows to fit (the race needs it). No A/B: off is broken.
 rr6_fog_nan_zero         NaN fog constants read as 0, as the console's multiply treats them (A/B 71).
 rr6_depth_bias           the game's depth bias reaches the GPU, as dynamic state (A/B 72).
+rr6_alpha_near_one       the foliage's alpha test of >= 1 with an epsilon: the tree flicker (A/B 74).
+rr6_fetch_over_pointer   a draw after SetTexture(NULL) samples what the fetch constant holds: the bloom (A/B 75).
+rr6_user_clip_plane      the game's clip plane reaches the reflection-map shaders: the car's reflections (A/B 76).
+rr6_strip_markers        a strip's 0xFFFF restart markers kept out of the vertex range: the wedges and torn meshes (A/B 77).
+rr6_frames_ahead         1: the game runs a frame ahead of the render thread (0: it waits each frame; console test 5).
+rr6_diag_render_delay_ms, rr6_diag_camera, rr6_diag_geometry_frames, rr6_diag_paint_frames: diagnostics (PACKAGE_NOTES.txt).
 rr6_dlc_unlock_keys      false: the 36 car unlock keys stay hidden.
+banjo_renut_game_gamma   the display's gamma ramp, as the reference applies it (A/B 73): on; off is brighter in the darks.
+banjo_deko3d_read_wait, _write_wait, _clear_wait, _full_barriers: console tests 6-8 for the chrome car (off by default).
 
 Machine copies of hot functions: banjo_cpu_native_bulk, A/B 70. A guard compares a copy with the generated original now and
 then (banjo_hot_guard_calls / _period); a difference switches that copy off and logs "[hot] DIFFERENCE".
