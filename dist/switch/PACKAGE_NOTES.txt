@@ -46,6 +46,10 @@ renut.toml, so copy a test over it, then race the first course and look at the c
   test10_no_color_compression.toml colour render targets without the GPU's hardware compression (banjo_deko3d_color_compression).
                                    Ryujinx ignores compression, so a compressed target sampled, copied or uploaded into wrongly
                                    is a console-only fault by nature. A little more GPU bandwidth; otherwise the same picture
+  test11_no_shader_opts.toml       every shader optimisation off: the vertex-shader output pruning (an input the pixel shader reads
+                                   that the pruned vertex shader no longer writes is garbage on the hardware and zero in Ryujinx:
+                                   noise, black, blown-out patches are what that looks like) and uam's four passes. The shaders
+                                   recompile on the console, so the first race is slow; the picture after that is the test
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
