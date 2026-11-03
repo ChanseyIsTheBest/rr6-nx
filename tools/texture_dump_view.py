@@ -32,7 +32,7 @@ NAME = re.compile(r'w(\d+)_f(\d+)_(\d+)_s(\d+)_([0-9A-F]{8})_(\d+)x(\d+)_fmt(\d+
 # plume RenderFormat value -> (bytes per texel or per 4x4 block, block, decoder name)
 FORMATS = {
     20: (4, 1, 'rgba8'), 24: (4, 1, 'bgra8'), 10: (8, 1, 'rgba16f'), 38: (2, 1, 'rg8'), 50: (1, 1, 'r8'),
-    34: (4, 1, 'r32f'), 27: (4, 1, 'rg16'),
+    34: (4, 1, 'r32f'), 27: (4, 1, 'rg16'), 11: (8, 1, 'rgba16'), 45: (2, 1, 'r16'),
     55: (8, 4, 'bc1'), 56: (8, 4, 'bc1'), 58: (16, 4, 'bc2'), 59: (16, 4, 'bc2'), 61: (16, 4, 'bc3'),
     62: (16, 4, 'bc3'), 64: (8, 4, 'bc4'), 67: (16, 4, 'bc5'),
 }
@@ -108,6 +108,10 @@ def load(path, w, h, fmt):
             return raw.view('<f4').reshape(h, w, 1)
         if kind == 'rg16':
             return (raw.view('<u2').reshape(h, w, 2) >> 8).astype(np.uint8)
+        if kind == 'rgba16':  # the race's reflection cube (a render target in the surface's format)
+            return (raw.view('<u2').reshape(h, w, 4) >> 8).astype(np.uint8)
+        if kind == 'r16':
+            return (raw.view('<u2').reshape(h, w, 1) >> 8).astype(np.uint8)
         return None
     bw, bh = (w + 3) // 4, (h + 3) // 4
     if raw.size != bw * bh * size:

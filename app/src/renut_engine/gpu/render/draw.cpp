@@ -2398,7 +2398,12 @@ TextureDumpWriter &TextureDumpWriterGet() {
 void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index, u32 guest_va, int window) {
   if (!t || !t->texture || !t->alloc_width || !t->alloc_height)
     return;
-  const u32 bs = std::max(1u, t->info.block_size), hbb = std::max(1u, t->info.host_block_bytes);
+  // The texture's own host format, not the guest format's usual host one: a resolve destination (the race's reflection
+  // cube, a render target) is made in the surface's format, and a footprint of another format removed the D3D12 device
+  // (pcdump5 named it: slot 3, 256x256x6, render target).
+  const plume::RenderFormat host =
+      t->host_format != plume::RenderFormat::UNKNOWN ? t->host_format : t->info.host;
+  const u32 bs = std::max(1u, plume::RenderFormatBlockWidth(host)), hbb = std::max(1u, plume::RenderFormatSize(host));
   // A volume (a host 3D image: its depth is slices in one subresource, not layers) is not dumped: the car's paint
   // samples none, and a copy of layer 1 of a 3D image removes the D3D12 device.
   if (t->dimension == TextureDimension::Tex3D && !t->stacked) {
@@ -2408,6 +2413,12 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
   }
   const u32 layers = std::max(1u, t->depth);
   const u32 levels = std::max(1u, t->mip_levels);
+  // Named before its copies: the last such line before a device removal (pcdump2 and pcdump4 died at the race's first
+  // window, after the car select's textures had dumped three times) is the texture whose copy D3D12 refused.
+  RGPU_INFO("[rr6] texture dump: slot {} {:08X} {}x{} depth {} levels {} (extra {}) fmt {} (guest's host {}) dim {} "
+            "stacked {} layout {} render target {} mips pending {}",
+            slot_index, guest_va, t->alloc_width, t->alloc_height, t->depth, t->mip_levels, t->extra_levels, int(host),
+            int(t->info.host), int(t->dimension), t->stacked, int(t->layout), t->render_target, t->mips_pending);
   static uint32_t serial = 0;
   for (u32 level = 0; level < levels && level < 16; ++level) {
     const u32 w = std::max(1u, t->alloc_width >> level), h = std::max(1u, t->alloc_height >> level);
@@ -2429,7 +2440,7 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
       const bool vulkan_like = UsesVulkanBindings();
       const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
       s.command_list->copyTextureRegion(
-          plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host,
+          plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), host,
                                                             vulkan_like ? copy_w : blocks_w * bs,
                                                             vulkan_like ? copy_h : blocks_h * bs, 1, row_texels, 0),
           plume::RenderTextureCopyLocation::Subresource(t->texture.get(), level, layer), 0, 0, 0,
@@ -2439,7 +2450,7 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
       g_texture_dumps[s.frame].push_back(
           {buffer.release(),
            fmt::format("w{}_f{}_{:04}_s{}_{:08X}_{}x{}_fmt{}_m{}_l{}", window, g_stream_cache_frame, serial++,
-                       slot_index, guest_va, w, h, u32(t->info.host), level, layer),
+                       slot_index, guest_va, w, h, u32(host), level, layer),
            blocks_h, row_bytes, row_pitch, window});
     }
   }
