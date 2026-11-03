@@ -114,6 +114,8 @@ def main():
     run(tool('flush_mode_flow.py'), '--redo', '--gen', gen, '--image', IMAGE, '--tomls', *HOOK_TOMLS)
     run(tool('vec_byteswap.py'), '--gen', gen)
     run(tool('pch_neon_shuffles.py'), pch)
+    # rr6-nx: on only for a coverage build; every other run takes it out of the pch again.
+    run(tool('pch_coverage.py'), pch, *(['--on'] if os.environ.get('RR6_COVERAGE') else []))
     # --xex: loads of the XEX's import records (kernel variable addresses the loader writes) stay loads (from
     # peggle2-nx, 2026-10-15; found by futari-nx: 77 such loads were folded here).
     xex = os.path.join(ROOT, 'app', 'assets', 'default.xex')

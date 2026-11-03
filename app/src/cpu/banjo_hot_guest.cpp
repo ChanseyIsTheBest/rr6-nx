@@ -50,13 +50,16 @@ extern "C" const bool g_banjo_store_cards = false;
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 #include <fmt/format.h>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 
 #include "cpu/banjo_enhancements.h"
@@ -673,6 +676,24 @@ void Report() {
     REXLOG_INFO("[hot] {} {}: about {} calls so far, {} compared with the original, {} not comparable (they reach a "
                 "call outside the copy), {} differences, {} more that did not repeat (inputs changed by another thread)",
                 h->name, state == kOn ? "ON" : "off", h->uses.load(std::memory_order_relaxed), c, n, d, r);
+  }
+  // rr6-nx (2026-11-03): with banjo_cpu_verify, every copy's counts, for tools/verified_copies.py: the summary's totals
+  // cannot say which copies were compared. Written whole and renamed, so a run that ends here leaves the last full one.
+  if (REXCVAR_GET(banjo_cpu_verify)) {
+    const auto logs = rex::filesystem::GetExecutableFolder() / "logs";
+    const auto path = logs / "rr6_hot_counts.txt", temp = logs / "rr6_hot_counts.tmp";
+    if (FILE* f = std::fopen(temp.string().c_str(), "w")) {
+      for (Hook* h = g_hooks; h; h = h->next) {
+        std::fprintf(f, "%s %d %d %llu %llu %llu %llu\n", h->name, int(h->bulk), int(h->state.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(h->compared.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(h->not_comparable.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(h->not_repeated.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long long>(h->differences.load(std::memory_order_relaxed)));
+      }
+      std::fclose(f);
+      std::error_code ec;
+      std::filesystem::rename(temp, path, ec);
+    }
   }
   REXLOG_INFO("[hot] native copies: {} reached, {} on ({} direct, no guard); bulk copies (banjo_cpu_native_bulk {}): {} "
               "of {} reached, {} on; {} calls compared so far, {} not comparable, {} differed once and not when "

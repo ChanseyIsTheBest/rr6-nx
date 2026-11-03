@@ -27,6 +27,7 @@ def main():
     ap.add_argument('--max-instructions', type=int, default=0, help='leave out larger functions (0: no limit)')
     ap.add_argument('--bulk', default=ln.BULK)
     ap.add_argument('--near', action='store_true', help='only what direct calls reach from sampled functions, nearest first')
+    ap.add_argument('--only', default='', help='only the functions named in this file (out/rr6_coverage.txt, tools/pch_coverage.py)')
     a = ap.parse_args()
     index = ln.Index(ln.GEN)
     listed = [e[0] for e in ln.list_entries(ln.LIST)]
@@ -71,6 +72,10 @@ def main():
         print(f'{v:7d} {k}')
     eligible.sort()
     print(f'eligible instructions: {sum(e[0] for e in eligible)} ({len(eligible)} functions); largest {eligible[-1][:2] if eligible else None}')
+    if a.only:
+        ran = set(open(a.only, encoding='utf-8').read().split())
+        eligible = [e for e in eligible if e[1] in ran]
+        print(f'{len(ran)} functions in {a.only}; eligible among them: {sum(e[0] for e in eligible)} instructions ({len(eligible)} functions)')
     if a.near:
         # pacman-nx (2026-11-02): code that runs first: by direct calls from the functions a profile sampled, nearest first.
         seeds = {'sub_' + m.upper() for m in re.findall(r'^\s*([0-9A-Fa-f]{8})\b[^\n]*samples', bulk_text, re.M)}
