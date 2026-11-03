@@ -25,6 +25,10 @@ namespace renut::gpu {
 // banjo-nx (2026-10-18): 256 registers and a zero register after them (tools/deko3d_glsl_opt.py, pass bonerow: a
 // relative read clamped to 256 reads zeros instead of selecting them).
 constexpr uint32_t kFloatConstantsUboBytes = 256 * 16 + 16;
+// rr6-nx (2026-11-04, the debug deko3d's one complaint): the size deko3d is told for a push or a bind of the pushed
+// buffer's float constants, a multiple of 256 (DK_UNIFORM_BUF_ALIGNMENT; the release library rounds it itself, the
+// pushed buffer's stride already is this).
+constexpr uint32_t kFloatConstantsUboBytesAligned = (kFloatConstantsUboBytes + 255u) & ~255u;
 constexpr uint32_t kSharedConstantsUboBytes = 1360;  // sizeof(SharedConstants), render/draw.cpp (2026-10-19: + pixel origin)
 
 struct UploadAllocation {

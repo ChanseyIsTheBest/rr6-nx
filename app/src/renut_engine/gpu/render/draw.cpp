@@ -3082,7 +3082,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
       }
       remaining &= ~(uint64_t(1) << (63 - group));
     }
-    plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, lanes,
+    plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, first * kConstantGroupBytes, lanes,
                              count * kConstantGroupBytes);
     pushed_bytes += count * kConstantGroupBytes;
   }
@@ -3099,7 +3099,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     // would push them, and its registers' mask words.
     if (const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs)) {
       for (const LiteralRuns::Run &run : lr->runs()) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run.first * 16, lr->values() + run.value_word,
+        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run.first * 16, lr->values() + run.value_word,
                                  run.count * 16);
         pushed_bytes += run.count * 16;
         for (u32 k = 0; k < run.count && run.first + k < 256; ++k)
@@ -3123,7 +3123,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     u32 run_first = 0, run_count = 0;
     auto flush_run = [&] {
       if (run_count) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytes, run_first * 16, run_values, run_count * 16);
+        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run_first * 16, run_values, run_count * 16);
         pushed_bytes += run_count * 16;
         run_count = 0;
       }
@@ -9711,8 +9711,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // banjo-nx (2026-10-27, render thread night): once while they stay (plume found them bound at every draw after the
   // first: three calls a draw).
   if (!g_bound.pushed_ubos) {
-    plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
-    plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
+    plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
+    plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
     plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
                              (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
     std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);
@@ -11364,8 +11364,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 #if defined(PLUME_DEKO3D)
       // banjo-nx (2026-10-19, banjo_deko3d_push_constants): the three fixed buffers (bindings 0, 1, 2), and bound
       // textures read from the renderer's copy of the shared constants.
-      plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
-      plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
+      plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
+      plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
       plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
                              (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
       std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);  // rebind after
