@@ -587,6 +587,7 @@ rr6_alpha_near_one = true  # false: the test of >= 1 exact, flickering trees on 
 rr6_user_clip_plane = true  # false: the car reflects the wrong scene and no sky, A/B 76
 rr6_strip_markers = true  # false: torn meshes and wedges on the Switch (a strip restart marker drawn as a vertex), A/B 77
 rr6_fetch_over_pointer = true  # false: no bloom, lit surfaces a quarter too dark, A/B 75
+rr6_diag_paint_frames = 60  # [paint] lines in the log, one a second per paint shader; 0 in renut_play.toml
 
 [input_p1]
 a = ""

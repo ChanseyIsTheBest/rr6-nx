@@ -125,6 +125,12 @@ REXCVAR_DEFINE_BOOL(rr6_diag_camera, false, "Banjo/Diagnostics",
                     "Diagnostic: a log line a frame with the first main-target draw's world-view-projection (c50-c53) "
                     "and how many of the frame's main-target draws had a NaN or a value over 1e7 in it")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(rr6_diag_paint_frames, 0, "Banjo/Diagnostics",
+                     "Diagnostic (DiagPaintNote): every this many frames, a log line per pixel shader that samples a cube "
+                     "(the car paint and glass) with its first draw's pixel constants c30-c34: on the console, whether the "
+                     "reflection strengths the CPU sets match the emulator's. 0: off")
+    .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(rr6_diag_geometry_frames, 0, "Banjo/Diagnostics",
                      "Diagnostic (DiagGeometryNote): every this many frames, a log line for each indexed draw with hashes "
                      "of its indices and converted vertices. 0: off")
@@ -2185,6 +2191,47 @@ void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t v
             m[11], m[12], m[13], m[14], m[15]);
   frame = g_stream_cache_frame;
   draws = broken = 0;
+}
+
+// rr6-nx (2026-11-03, rr6_diag_paint_frames): the console's car paint looks like chrome (hard white and black patches) where
+// Ryujinx and the PC draw it matte. The paint shaders sample a cube (the reflection faces) and scale it by constants the
+// CPU sets (c31.y/.z the fresnel range, c32.x the scale in PS 22A0920B4D109C62). A line per cube-sampling pixel shader every
+// N frames with c30-c34 of its first main-target draw: the same values on the console as in the emulator put the fault on
+// the GPU side (the faces' contents, the normal map, the blend); different ones put it on the CPU (the machine copies).
+void DiagPaintNote(const FloatConstants &ps_constants, uint64_t vs_hash, uint64_t ps_hash, const Targets &targets) {
+  static const int32_t every = REXCVAR_GET(rr6_diag_paint_frames);
+  if (!every || targets.width < 1000 || !targets.depth || g_stream_cache_frame % uint64_t(every))
+    return;
+  static constexpr uint64_t kCubeShaders[] = {0x03232386464D9DB7ull, 0x08C9D7D372A22B5Eull, 0x1665925ABA65650Dull,
+                                             0x22A0920B4D109C62ull, 0x34D14F18E9D49E45ull, 0x501A2B6A5237BC99ull,
+                                             0x51E8275A885F7995ull, 0x80391EE201BC4392ull, 0x81B184F7D71B86A1ull,
+                                             0x9445DA8C3B064B31ull, 0xA17B08137F6A4732ull, 0xC1136A7A769975C5ull,
+                                             0xC657E51C7D437604ull};
+  u32 which = UINT32_MAX;
+  for (u32 i = 0; i < std::size(kCubeShaders); ++i)
+    if (kCubeShaders[i] == ps_hash)
+      which = i;
+  if (which == UINT32_MAX)
+    return;
+  static uint64_t frame = UINT64_MAX;
+  static u32 seen = 0;  // bit i: shader i logged this frame
+  if (frame != g_stream_cache_frame) {
+    frame = g_stream_cache_frame;
+    seen = 0;
+  }
+  if ((seen >> which) & 1)
+    return;
+  seen |= 1u << which;
+  float c[20];
+  for (u32 i = 0; i < 20; ++i) {
+    u32 word;
+    std::memcpy(&word, ps_constants.Register(30 + i / 4) + (i % 4) * 4, 4);
+    word = __builtin_bswap32(word);
+    std::memcpy(&c[i], &word, 4);
+  }
+  RGPU_INFO("[paint] f{} vs {:016X} ps {:016X} c30 {} {} {} {} | c31 {} {} {} {} | c32 {} {} {} {} | c33 {} {} {} {} | c34 {} {} {} {}",
+            g_stream_cache_frame, vs_hash, ps_hash, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11],
+            c[12], c[13], c[14], c[15], c[16], c[17], c[18], c[19]);
 }
 
 // Float constants go by groups of four registers (64 bytes): the unit m_Pending
@@ -9143,6 +9190,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const FloatConstants vs_constants = DrawFloatConstants(device_state, replay, false);
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
+  if (ps)
+    DiagPaintNote(ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
 #if defined(PLUME_DEKO3D)
   g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
   PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
@@ -10674,6 +10723,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
+  if (ps)
+    DiagPaintNote(ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
 #if defined(PLUME_DEKO3D)

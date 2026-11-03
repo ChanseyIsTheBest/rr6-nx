@@ -63,9 +63,12 @@ SHIPPED = {
     'rr6_user_clip_plane': 'true  # false: the car reflects the wrong scene and no sky, A/B 76',
     'rr6_strip_markers': 'true  # false: torn meshes and wedges on the Switch (a strip restart marker drawn as a vertex), A/B 77',
     'rr6_fetch_over_pointer': 'true  # false: no bloom, lit surfaces a quarter too dark, A/B 75',
+    # 2026-11-03 evening, for the console's chrome car: a log line a second per cube-sampling pixel shader with its
+    # reflection constants, to tell a CPU-side value from a GPU-side fault against the emulator's lines. Diagnostics only.
+    'rr6_diag_paint_frames': '60  # [paint] lines in the log, one a second per paint shader; 0 in renut_play.toml',
 }
 PLAY = {'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false',
-        'banjo_renut_diag_terrain': 'false'}
+        'banjo_renut_diag_terrain': 'false', 'rr6_diag_paint_frames': '0'}
 # The targets that act on Ridge Racer 6's draws (direct calls, no command-buffer recordings: the census in docs/rr6-notes.md): the
 # fast draw (25), pipelines by content (28), whole-buffer copies (22), the setters' touch compare (26), merged draws (33), mesh
 # objects (42); 70 the localized copies of the hot functions; 1 (a Vulkan-only key) is the do-nothing control on the Switch.
@@ -85,7 +88,8 @@ VERIFY.update({'banjo_hot_guard_calls': '4000', 'banjo_hot_guard_period': '64'})
 PGO = {'log_level': '"off"', 'switch_profile_stacks': 'false', 'banjo_cpu_profiler': 'false',
        'banjo_show_profiler': 'false', 'banjo_show_fps': 'false', 'banjo_stall_watch_seconds': '0',
        'renut_gpu_profile': '0.0', 'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false',
-       'banjo_renut_diag_terrain': 'false', 'banjo_hot_guard_calls': '0', 'banjo_hot_guard_period': '0'}
+       'banjo_renut_diag_terrain': 'false', 'banjo_hot_guard_calls': '0', 'banjo_hot_guard_period': '0',
+       'rr6_diag_paint_frames': '0'}
 CONFIGS = {
     'renut_verify.toml': (VERIFY, 'every Renut verify mode on (emulator / test runs: slow; the log\'s verify lines '
                                   'must count 0 differences)'),

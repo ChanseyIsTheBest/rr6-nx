@@ -37,6 +37,9 @@ renut.toml, so copy a test over it, then race the first course and look at the c
   test5_frames_ahead_0.toml        the game waits for the render thread each frame, rr6_frames_ahead
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
+Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
+game's code set for it (rr6_diag_paint_frames). Against the emulator's lines they tell CPU from GPU: the same values on the console
+mean the GPU side (the reflection faces, the normal map, the blend); different values mean the game's code, and then test 3 is the one.
 
 Which toml
 ----------
