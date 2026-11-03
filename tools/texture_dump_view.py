@@ -217,6 +217,15 @@ def main():
         theirs_loose = defaultdict(list)
         for key, names in theirs_by.items():
             theirs_loose[loose(key)].append(key)
+        # A whole-frame dump (rr6_diag_texture_dump_all) binds the same texture in whatever slot its first draw used, so
+        # a key with no match by address or by slot is matched by size, format, level and layer against every such
+        # file of the other folder: equal bytes anywhere is EQUAL (matched by content), else the nearest is reported.
+        def shape(key):
+            return key[2:]
+        theirs_shape = defaultdict(list)
+        for key, names in theirs_by.items():
+            theirs_shape[shape(key)].append(key)
+        matched_other = set()
         for key in sorted(set(mine_by) | set(theirs_by)):
             slot, va, w, h, fmt, mip, layer = key
             other_key = key
@@ -226,9 +235,31 @@ def main():
                     other_key = candidates[0]
                     report.write('s%d %s %dx%d fmt%d m%d l%d: matched by slot, size, format, level and layer to the '
                                  'other folder\'s %s\n' % (slot, va, w, h, fmt, mip, layer, other_key[1]))
+                else:
+                    a = load(os.path.join(src, mine_by[key][0]), w, h, fmt)
+                    best, best_d = None, None
+                    for k in theirs_shape.get(shape(key), []):
+                        b = load(os.path.join(other, theirs_by[k][0]), w, h, fmt)
+                        if a is None or b is None:
+                            continue
+                        if np.array_equal(a, b):
+                            best, best_d = k, 0.0
+                            break
+                        d = float(np.abs(a.astype(np.float64) - b.astype(np.float64)).mean())
+                        if best_d is None or d < best_d:
+                            best, best_d = k, d
+                    if best is not None:
+                        matched_other.add(best)
+                        if best_d == 0.0:
+                            report.write('%s: EQUAL by content to the other folder\'s %s (s%d %s)\n'
+                                         % (mine_by[key][0], theirs_by[best][0], best[0], best[1]))
+                        else:
+                            report.write('%s: nearest in the other folder is %s (s%d %s), mean |diff| %.4g; no equal\n'
+                                         % (mine_by[key][0], theirs_by[best][0], best[0], best[1], best_d))
+                        continue
             if key not in mine_by:
-                if loose(key) in {loose(k) for k in mine_by}:
-                    continue  # matched loosely from this folder's side
+                if loose(key) in {loose(k) for k in mine_by} or key in matched_other:
+                    continue  # matched from this folder's side
                 report.write('s%d %s %dx%d fmt%d m%d l%d: only in the other\n' % (slot, va, w, h, fmt, mip, layer))
                 continue
             if other_key not in theirs_by:
