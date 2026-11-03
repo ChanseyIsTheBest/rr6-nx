@@ -139,6 +139,11 @@ REXCVAR_DEFINE_STRING(rr6_diag_texture_dump, "", "Banjo/Diagnostics",
                       "frames (e.g. \"240,30,3,2\") in which every texture the car-paint draw samples (level 0, every "
                       "layer) is copied out of the GPU and written to texture_dump/ next to the executable as raw texels "
                       "(tools/texture_dump_view.py). Empty: off");
+REXCVAR_DEFINE_INT32(rr6_diag_texture_dump_all, 0, "Banjo/Diagnostics",
+                     "Diagnostic, with rr6_diag_texture_dump: 0 dumps the car-paint draws' textures only; N dumps every "
+                     "distinct texture any draw of a window's frames samples (the scenery, the sky, the cables, the "
+                     "tower's video), at most N a window (a render target once a frame), textures over 2048x1024 "
+                     "skipped. 150 and one frame a window is about 40 MB a window");
 REXCVAR_DEFINE_INT32(rr6_diag_geometry_frames, 0, "Banjo/Diagnostics",
                      "Diagnostic (DiagGeometryNote): every this many frames, a log line for each indexed draw with hashes "
                      "of its indices and converted vertices. 0: off")
@@ -2457,32 +2462,56 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
 }
 
 // At the frame's first draw of a cube-sampling paint shader (any of the 13: the race, the garage and the car select all
-// draw the car), in a window: every pixel slot holding a texture.
+// draw the car), in a window: every pixel slot holding a texture. With rr6_diag_texture_dump_all, at every draw of a
+// window's frames: each texture not yet dumped in the window (a render target once a frame), up to the cap.
 void DiagTextureDumpLocked(const GuestDevice &device, uint64_t ps_hash) {
   if (TextureDumpSpecGet().windows <= 0)
     return;
-  if (std::find(std::begin(kCubeShaders), std::end(kCubeShaders), ps_hash) == std::end(kCubeShaders))
+  static const int all = REXCVAR_GET(rr6_diag_texture_dump_all);
+  const bool paint = std::find(std::begin(kCubeShaders), std::end(kCubeShaders), ps_hash) != std::end(kCubeShaders);
+  if (!all && !paint)
     return;
   VideoState &s = State();
   static uint64_t frame = UINT64_MAX;
-  if (frame == g_stream_cache_frame)
-    return;  // the first paint draw of the frame only
-  frame = g_stream_cache_frame;
-  const int window = TextureDumpWindow(g_stream_cache_frame);
+  static int window = -1, seen_window = -1;
+  static bool paint_done = false;
+  static std::unordered_set<uint64_t> seen;  // the window's textures: address, or address and frame for a target
+  if (frame != g_stream_cache_frame) {
+    frame = g_stream_cache_frame;
+    window = TextureDumpWindow(frame);
+    paint_done = false;
+    if (window != seen_window) {
+      seen.clear();
+      seen_window = window;
+    }
+  }
   if (window < 0)
     return;
+  if (!all && paint_done)
+    return;  // the first paint draw of the frame only
   u32 dumped = 0;
   for (u32 r = 0; r < 16; ++r) {
     const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
     if (!va)
       continue;
-    if (HostTexture *t = FindHostTextureLocked(va)) {
-      DiagTextureDumpTextureLocked(s, t, r, va, window);
-      ++dumped;
+    HostTexture *t = FindHostTextureLocked(va);
+    if (!t)
+      continue;
+    if (all) {
+      if (seen.size() >= size_t(all) || uint64_t(t->alloc_width) * t->alloc_height > 2048u * 1024u)
+        continue;
+      const uint64_t key = t->render_target ? (uint64_t(va) | (frame << 32)) : uint64_t(va);
+      if (!seen.insert(key).second)
+        continue;
     }
+    DiagTextureDumpTextureLocked(s, t, r, va, window);
+    ++dumped;
   }
-  RGPU_INFO("[rr6] texture dump: frame {} window {} ps {:016X}: {} textures queued", g_stream_cache_frame, window,
-            ps_hash, dumped);
+  if (paint)
+    paint_done = true;
+  if (dumped)
+    RGPU_INFO("[rr6] texture dump: frame {} window {} ps {:016X}: {} textures queued{}", frame, window, ps_hash, dumped,
+              all ? fmt::format(" ({} of {} in the window)", seen.size(), all) : std::string());
 }
 
 // The slot's fence has been waited: its readbacks to memory and to the writer.
