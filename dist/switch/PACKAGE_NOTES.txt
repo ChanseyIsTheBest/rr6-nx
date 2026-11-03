@@ -37,11 +37,15 @@ renut.toml, so copy a test over it, then race the first course and look at the c
   test3_copies_off.toml            the machine copies, banjo_cpu_native_bulk
   test4_uniform_branches_off.toml  a shader compiler optimisation. Its shaders compile on the console, so expect a slower first race
   test5_frames_ahead_0.toml        the game waits for the render thread each frame, rr6_frames_ahead
-  test9_texture_dump.toml          not a fix test: a recording. In four windows (150 s after launch, then every 30 s; two frames each)
-                                   the textures the car-paint draw samples (the normal map, the six reflection faces...) are copied out
-                                   of the GPU as the car's draw sees them and written to texture_dump/ next to the NRO (a few MB per
-                                   frame; a short stall at each window). Be in a race from about 2.5 minutes after launch. Send the
-                                   folder with the logs: tools/texture_dump_view.py pictures them against the emulator's
+  test9_texture_dump.toml          not a fix test: a recording. In six windows (120 s after launch, then every 40 s; two frames each)
+                                   the textures the car's paint draw samples (the normal map, the six reflection faces, every mip
+                                   level) are copied out of the GPU as the draw sees them and written to texture_dump/ next to the
+                                   NRO (a few MB per frame; a short stall at each window). The garage, the car select and the race all
+                                   count, so go straight to a race and be in it by about 3 minutes after launch. Send the folder
+                                   with the logs: tools/texture_dump_view.py pictures them against the emulator's
+  test10_no_color_compression.toml colour render targets without the GPU's hardware compression (banjo_deko3d_color_compression).
+                                   Ryujinx ignores compression, so a compressed target sampled, copied or uploaded into wrongly
+                                   is a console-only fault by nature. A little more GPU bandwidth; otherwise the same picture
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the

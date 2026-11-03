@@ -4,18 +4,19 @@ sasrt-nx's shadow dump, tools/shadow_dump_view.py there).
 
     python -I tools/texture_dump_view.py <texture_dump folder> [out folder] [--compare <other texture_dump folder>]
 
-Each file is w<window>_f<render frame>_<serial>_s<pixel slot>_<guest address>_<w>x<h>_fmt<plume format>_l<layer>.bin:
-level 0 of one layer of a texture the car-paint draw sampled, as the GPU held it, raw texels row by row (the row
-pitch stripped): fmt20 R8G8B8A8_UNORM, fmt24 B8G8R8A8_UNORM, fmt10 R16G16B16A16_FLOAT, fmt38 R8G8_UNORM, fmt50
+Each file is w<window>_f<render frame>_<serial>_s<pixel slot>_<guest address>_<w>x<h>_fmt<plume format>_m<mip>_l<layer>.bin:
+one mip level of one layer of a texture the car-paint draw sampled, as the GPU held it, raw texels row by row (the
+row pitch stripped): fmt20 R8G8B8A8_UNORM, fmt24 B8G8R8A8_UNORM, fmt10 R16G16B16A16_FLOAT, fmt38 R8G8_UNORM, fmt50
 R8_UNORM, fmt34 R32_FLOAT, and the block formats fmt55/56 BC1, fmt58/59 BC2, fmt61/62 BC3, fmt64 BC4, fmt67 BC5
 (decoded here; BC5 shown as a normal map with its blue rebuilt).
 
-Writes, per window and texture (slot, address, size, format), one sheet: a row per frame, the layers side by side (a
-cube's six faces), and stats.txt: per file the mean of each channel, the share of texels that are all zero, the share
-equal to the first texel, and a hash of the bytes. With --compare, a texture in both folders by (slot, address, size,
-format, layer) is compared file for file in order: equal bytes, or the mean absolute difference per channel. The
-emulator's dump of the same scene is the reference: a static texture (the normal map) must be equal; a render
-target (the reflection cube) differs by the frame, but black or noise in the console's shows up in its means.
+Writes, per window and texture level (slot, address, size, format, mip), one sheet: a row per frame, the layers side
+by side (a cube's six faces), and stats.txt: per file the mean of each channel, the share of texels that are all
+zero, the share equal to the first texel, and a hash of the bytes. With --compare, a texture level in both folders by
+(slot, address, size, format, mip, layer) is compared file for file in order: equal bytes, or the mean absolute
+difference per channel. The emulator's dump of the same scene is the reference: a static texture (the normal map)
+must be equal at every level; a render target (the reflection cube) differs by the frame, but black or noise in the
+console's shows up in its means, and a level that is right in the emulator and wrong on the console is the fault.
 """
 import hashlib
 import os
@@ -26,7 +27,7 @@ from collections import defaultdict
 import numpy as np
 from PIL import Image
 
-NAME = re.compile(r'w(\d+)_f(\d+)_(\d+)_s(\d+)_([0-9A-F]{8})_(\d+)x(\d+)_fmt(\d+)_l(\d+)\.bin$')
+NAME = re.compile(r'w(\d+)_f(\d+)_(\d+)_s(\d+)_([0-9A-F]{8})_(\d+)x(\d+)_fmt(\d+)_m(\d+)_l(\d+)\.bin$')
 
 # plume RenderFormat value -> (bytes per texel or per 4x4 block, block, decoder name)
 FORMATS = {
@@ -155,14 +156,15 @@ def stats(a):
 
 
 def scan(folder):
-    """(window, slot, va, w, h, fmt) -> [(frame, serial, layer, name)]."""
+    """(window, slot, va, w, h, fmt, mip) -> [(frame, serial, layer, name)]."""
     groups = defaultdict(list)
     for name in sorted(os.listdir(folder)):
         m = NAME.match(name)
         if not m:
             continue
-        window, frame, serial, slot, va, w, h, fmt, layer = m.groups()
-        groups[(int(window), int(slot), va, int(w), int(h), int(fmt))].append((int(frame), int(serial), int(layer), name))
+        window, frame, serial, slot, va, w, h, fmt, mip, layer = m.groups()
+        groups[(int(window), int(slot), va, int(w), int(h), int(fmt), int(mip))].append(
+            (int(frame), int(serial), int(layer), name))
     return groups
 
 
@@ -175,7 +177,7 @@ def main():
     groups = scan(src)
     report = open(os.path.join(out, 'stats.txt'), 'w')
     for key, files in sorted(groups.items()):
-        window, slot, va, w, h, fmt = key
+        window, slot, va, w, h, fmt, mip = key
         frames = sorted({f for f, _, _, _ in files})
         layers = max(l for _, _, l, _ in files) + 1
         scale = min(1.0, 256 / max(w, h))
@@ -191,23 +193,24 @@ def main():
                 means, zero, flat = stats(a)
                 digest = hashlib.sha1(np.ascontiguousarray(a).tobytes()).hexdigest()[:12]
                 report.write('%s: mean %s, all-zero %.4f, flat %.4f, hash %s\n' % (name, means, zero, flat, digest))
-        sheet.save(os.path.join(out, 'w%d_s%d_%s_%dx%d_fmt%d.png' % (window, slot, va, w, h, fmt)))
+        sheet.save(os.path.join(out, 'w%d_s%d_%s_%dx%d_fmt%d_m%d.png' % (window, slot, va, w, h, fmt, mip)))
     if other:
-        report.write('\n== compared with %s (by slot, address, size, format, layer; file for file in order)\n' % other)
+        report.write('\n== compared with %s (by slot, address, size, format, mip, layer; file for file in order)\n'
+                     % other)
         theirs = scan(other)
         mine_by = defaultdict(list)
-        for (window, slot, va, w, h, fmt), files in groups.items():
+        for (window, slot, va, w, h, fmt, mip), files in groups.items():
             for frame, serial, layer, name in sorted(files):
-                mine_by[(slot, va, w, h, fmt, layer)].append(name)
+                mine_by[(slot, va, w, h, fmt, mip, layer)].append(name)
         theirs_by = defaultdict(list)
-        for (window, slot, va, w, h, fmt), files in theirs.items():
+        for (window, slot, va, w, h, fmt, mip), files in theirs.items():
             for frame, serial, layer, name in sorted(files):
-                theirs_by[(slot, va, w, h, fmt, layer)].append(name)
+                theirs_by[(slot, va, w, h, fmt, mip, layer)].append(name)
         for key in sorted(set(mine_by) | set(theirs_by)):
-            slot, va, w, h, fmt, layer = key
+            slot, va, w, h, fmt, mip, layer = key
             if key not in mine_by or key not in theirs_by:
-                report.write('s%d %s %dx%d fmt%d l%d: only in %s\n'
-                             % (slot, va, w, h, fmt, layer, 'this folder' if key in mine_by else 'the other'))
+                report.write('s%d %s %dx%d fmt%d m%d l%d: only in %s\n'
+                             % (slot, va, w, h, fmt, mip, layer, 'this folder' if key in mine_by else 'the other'))
                 continue
             for a_name, b_name in zip(mine_by[key], theirs_by[key]):
                 a = load(os.path.join(src, a_name), w, h, fmt)

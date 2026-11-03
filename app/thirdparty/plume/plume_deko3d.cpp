@@ -608,7 +608,7 @@ namespace plume {
             flags |= DkImageFlags_UsageRender;
             // Colour targets compressed; depth too with Deko3DOptions::depthCompression (SwitchWakerHD's defaults left it
             // off as not verified).
-            if (!depth || g_deko3dOptions.depthCompression)
+            if (depth ? g_deko3dOptions.depthCompression : g_deko3dOptions.colorCompression)
                 flags |= DkImageFlags_HwCompression;
         }
         if (desc.flags & (RenderTextureFlag::UNORDERED_ACCESS | RenderTextureFlag::STORAGE))

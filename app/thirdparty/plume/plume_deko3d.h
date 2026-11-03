@@ -862,6 +862,9 @@ namespace plume {
     // 4x8 tiles with it).
     struct Deko3DOptions {
         bool depthCompression = false;
+        // rr6-nx (2026-11-04, console test 10): colour targets without hardware compression (Ryujinx ignores it, so
+        // only the console can show a compressed target sampled, copied or uploaded into wrongly).
+        bool colorCompression = true;
         bool zcull = false;
         // A pipeline's vertex shader gets specialization constant 905 (when it declares it), the locations its pixel
         // shader reads of the ones it writes (none without a pixel shader; not with a geometry shader): banjo-nx's

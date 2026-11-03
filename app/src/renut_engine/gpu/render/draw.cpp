@@ -138,8 +138,7 @@ REXCVAR_DEFINE_STRING(rr6_diag_texture_dump, "", "Banjo/Diagnostics",
                       "from <first> seconds after start, every <every> seconds, <windows> windows of <frames> consecutive "
                       "frames (e.g. \"240,30,3,2\") in which every texture the car-paint draw samples (level 0, every "
                       "layer) is copied out of the GPU and written to texture_dump/ next to the executable as raw texels "
-                      "(tools/texture_dump_view.py). Empty: off")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                      "(tools/texture_dump_view.py). Empty: off");
 REXCVAR_DEFINE_INT32(rr6_diag_geometry_frames, 0, "Banjo/Diagnostics",
                      "Diagnostic (DiagGeometryNote): every this many frames, a log line for each indexed draw with hashes "
                      "of its indices and converted vertices. 0: off")
@@ -2208,16 +2207,19 @@ void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t v
 // N frames with c30-c34 of its first main-target draw: the same values on the console as in the emulator put the fault on
 // the GPU side (the faces' contents, the normal map, the blend); different ones put it on the CPU (the machine copies).
 TextureFetch DeviceTextureFetch(const d3d::Device &dev, u32 r);
+// The 13 pixel shaders that sample a cube (the car paint in the race, the garage and the car select; 22A0920B4D109C62
+// is the race's main one), for the [paint] lines and the texture dump.
+static constexpr uint64_t kCubeShaders[] = {0x03232386464D9DB7ull, 0x08C9D7D372A22B5Eull, 0x1665925ABA65650Dull,
+                                           0x22A0920B4D109C62ull, 0x34D14F18E9D49E45ull, 0x501A2B6A5237BC99ull,
+                                           0x51E8275A885F7995ull, 0x80391EE201BC4392ull, 0x81B184F7D71B86A1ull,
+                                           0x9445DA8C3B064B31ull, 0xA17B08137F6A4732ull, 0xC1136A7A769975C5ull,
+                                           0xC657E51C7D437604ull};
+
 void DiagPaintNote(const d3d::Device &dev, const FloatConstants &ps_constants, uint64_t vs_hash, uint64_t ps_hash,
                    const Targets &targets) {
   static const int32_t every = REXCVAR_GET(rr6_diag_paint_frames);
   if (!every || targets.width < 1000 || !targets.depth || g_stream_cache_frame % uint64_t(every))
     return;
-  static constexpr uint64_t kCubeShaders[] = {0x03232386464D9DB7ull, 0x08C9D7D372A22B5Eull, 0x1665925ABA65650Dull,
-                                             0x22A0920B4D109C62ull, 0x34D14F18E9D49E45ull, 0x501A2B6A5237BC99ull,
-                                             0x51E8275A885F7995ull, 0x80391EE201BC4392ull, 0x81B184F7D71B86A1ull,
-                                             0x9445DA8C3B064B31ull, 0xA17B08137F6A4732ull, 0xC1136A7A769975C5ull,
-                                             0xC657E51C7D437604ull};
   u32 which = UINT32_MAX;
   for (u32 i = 0; i < std::size(kCubeShaders); ++i)
     if (kCubeShaders[i] == ps_hash)
@@ -2305,6 +2307,10 @@ const TextureDumpSpec &TextureDumpSpecGet() {
   return spec;
 }
 
+// The time marks count from the process start (a static initialised when the executable loads), not from the first
+// paint draw: emu47 waited <first> seconds past the race's first draw and its windows never came.
+static const std::chrono::steady_clock::time_point g_texture_dump_start = std::chrono::steady_clock::now();
+
 // Called once per frame that has a paint draw: the window that frame is in (-1: none). A window opens at the first
 // such frame past its time mark (<first> seconds after start, then <every> seconds after the previous window opened:
 // a race that begins late gets its windows spaced all the same) and holds <frames> such frames.
@@ -2312,7 +2318,7 @@ int TextureDumpWindow(uint64_t frame) {
   const TextureDumpSpec &spec = TextureDumpSpecGet();
   if (spec.windows <= 0)
     return -1;
-  static const auto start = std::chrono::steady_clock::now();
+  const auto start = g_texture_dump_start;
   static int window = -1, frames_in = 0, next = 0;
   static double next_open = double(spec.first);
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -2387,43 +2393,51 @@ TextureDumpWriter &TextureDumpWriterGet() {
   return *writer;
 }
 
-// Level 0 of 't', every layer, into readback buffers of this frame slot.
+// Every mip level of every layer of 't' into readback buffers of this frame slot (the cables, the foliage and the
+// car's blurred reflections sample the smaller levels, which a wrong level layout would spoil and level 0 not show).
 void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index, u32 guest_va, int window) {
   if (!t || !t->texture || !t->alloc_width || !t->alloc_height)
     return;
   const u32 bs = std::max(1u, t->info.block_size), hbb = std::max(1u, t->info.host_block_bytes);
-  const u32 w = t->alloc_width, h = t->alloc_height;
-  const u32 blocks_w = (w + bs - 1) / bs, blocks_h = (h + bs - 1) / bs;
-  const u32 row_bytes = blocks_w * hbb;
-  const u32 row_align = t->info.decoded_blocks ? 256u * bs : 256u;
-  const u32 row_pitch = (row_bytes + row_align - 1) / row_align * row_align;
-  const u32 copy_w = std::min(blocks_w * bs, w), copy_h = std::min(blocks_h * bs, h);
-  const u32 row_texels = row_pitch / hbb * bs;
   const u32 layers = std::max(1u, t->depth);
+  const u32 levels = std::max(1u, t->mip_levels);
   static uint32_t serial = 0;
-  for (u32 layer = 0; layer < layers && layer < 16; ++layer) {
-    std::unique_ptr<plume::RenderBuffer> buffer =
-        s.device->createBuffer(plume::RenderBufferDesc::ReadbackBuffer(uint64_t(row_pitch) * blocks_h));
-    if (!buffer)
-      return;
-    TransitionTextureLocked(t, plume::RenderTextureLayout::COPY_SOURCE);
-    const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
-    s.command_list->copyTextureRegion(
-        plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host, copy_w, copy_h, 1, row_texels, 0),
-        plume::RenderTextureCopyLocation::Subresource(t->texture.get(), 0, layer), 0, 0, 0, &box);
-    TransitionTextureLocked(t, plume::RenderTextureLayout::SHADER_READ);
-    g_bound.framebuffer = nullptr;
-    g_texture_dumps[s.frame].push_back(
-        {buffer.release(),
-         fmt::format("w{}_f{}_{:04}_s{}_{:08X}_{}x{}_fmt{}_l{}", window, g_stream_cache_frame, serial++, slot_index,
-                     guest_va, w, h, u32(t->info.host), layer),
-         blocks_h, row_bytes, row_pitch, window});
+  for (u32 level = 0; level < levels && level < 16; ++level) {
+    const u32 w = std::max(1u, t->alloc_width >> level), h = std::max(1u, t->alloc_height >> level);
+    const u32 blocks_w = (w + bs - 1) / bs, blocks_h = (h + bs - 1) / bs;
+    const u32 row_bytes = blocks_w * hbb;
+    const u32 row_align = t->info.decoded_blocks ? 256u * bs : 256u;
+    const u32 row_pitch = (row_bytes + row_align - 1) / row_align * row_align;
+    const u32 copy_w = std::min(blocks_w * bs, w), copy_h = std::min(blocks_h * bs, h);
+    const u32 row_texels = row_pitch / hbb * bs;
+    for (u32 layer = 0; layer < layers && layer < 16; ++layer) {
+      std::unique_ptr<plume::RenderBuffer> buffer =
+          s.device->createBuffer(plume::RenderBufferDesc::ReadbackBuffer(uint64_t(row_pitch) * blocks_h));
+      if (!buffer)
+        return;
+      TransitionTextureLocked(t, plume::RenderTextureLayout::COPY_SOURCE);
+      const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
+      s.command_list->copyTextureRegion(
+          plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host, copy_w, copy_h, 1, row_texels,
+                                                            0),
+          plume::RenderTextureCopyLocation::Subresource(t->texture.get(), level, layer), 0, 0, 0, &box);
+      TransitionTextureLocked(t, plume::RenderTextureLayout::SHADER_READ);
+      g_bound.framebuffer = nullptr;
+      g_texture_dumps[s.frame].push_back(
+          {buffer.release(),
+           fmt::format("w{}_f{}_{:04}_s{}_{:08X}_{}x{}_fmt{}_m{}_l{}", window, g_stream_cache_frame, serial++,
+                       slot_index, guest_va, w, h, u32(t->info.host), level, layer),
+           blocks_h, row_bytes, row_pitch, window});
+    }
   }
 }
 
-// At the car-paint draw (DiagPaintNote's shader), in a window: every pixel slot holding a texture.
+// At the frame's first draw of a cube-sampling paint shader (any of the 13: the race, the garage and the car select all
+// draw the car), in a window: every pixel slot holding a texture.
 void DiagTextureDumpLocked(const GuestDevice &device, uint64_t ps_hash) {
-  if (ps_hash != 0x22A0920B4D109C62ull || TextureDumpSpecGet().windows <= 0)
+  if (TextureDumpSpecGet().windows <= 0)
+    return;
+  if (std::find(std::begin(kCubeShaders), std::end(kCubeShaders), ps_hash) == std::end(kCubeShaders))
     return;
   VideoState &s = State();
   static uint64_t frame = UINT64_MAX;
@@ -2443,7 +2457,8 @@ void DiagTextureDumpLocked(const GuestDevice &device, uint64_t ps_hash) {
       ++dumped;
     }
   }
-  RGPU_INFO("[rr6] texture dump: frame {} window {}: {} textures queued", g_stream_cache_frame, window, dumped);
+  RGPU_INFO("[rr6] texture dump: frame {} window {} ps {:016X}: {} textures queued", g_stream_cache_frame, window,
+            ps_hash, dumped);
 }
 
 // The slot's fence has been waited: its readbacks to memory and to the writer.

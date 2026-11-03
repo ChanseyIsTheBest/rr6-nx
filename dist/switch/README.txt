@@ -54,6 +54,7 @@ rr6_diag_render_delay_ms, rr6_diag_camera, rr6_diag_geometry_frames, rr6_diag_pa
 rr6_dlc_unlock_keys      false: the 36 car unlock keys stay hidden.
 banjo_renut_game_gamma   the display's gamma ramp, as the reference applies it (A/B 73): on; off is brighter in the darks.
 banjo_deko3d_read_wait, _write_wait, _clear_wait, _full_barriers: console tests 6-8 for the chrome car (off by default).
+banjo_deko3d_color_compression  colour targets' hardware compression (on); off is console test 10.
 
 Machine copies of hot functions: banjo_cpu_native_bulk, A/B 70. A guard compares a copy with the generated original now and
 then (banjo_hot_guard_calls / _period); a difference switches that copy off and logs "[hot] DIFFERENCE".
