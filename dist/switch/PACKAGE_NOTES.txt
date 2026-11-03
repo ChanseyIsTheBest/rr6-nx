@@ -19,6 +19,14 @@ camera cut. Ryujinx with the shipped settings now shows 0 bad frames in 364 burs
 on the console: the intro's three shots (tower, bridge, palms) and the race's first lap. It should also be faster: those draws converted
 65536 vertices each before. In renut_ab.toml it is target 77: the off half brings the wedges back.
 
+Point sprites fixed (2026-11-04 04:45)
+--------------------------------------
+The host geometry shaders that draw the game's point sprites had their vertex layout one slot off from the recompiled
+shaders (a fog interpolator was added to those and not to these). On the PC every point-sprite pipeline failed to
+link and the draws were skipped; on the console they linked silently with the sprite's size and texture coordinate
+read from the wrong slots: a flat-coloured quad of a wrong size. If the hard rectangles in the sky were point sprites,
+they are gone now; anything the game draws as points (glows, sparks, sun, lens flares) may appear for the first time.
+
 Console tests: the chrome car and the black video screen
 --------------------------------------------------------
 Still console-only: the chrome car paint (hard white and black patches, plates blown out, opponents too) and the black video screen on

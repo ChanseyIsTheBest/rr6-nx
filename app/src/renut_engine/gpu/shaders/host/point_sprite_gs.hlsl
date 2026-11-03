@@ -17,6 +17,11 @@ struct Vertex
     float4 normal[3] : NORMAL0;
     float4 tangent : TANGENT0;
     float4 binormal : BINORMAL0;
+    // rr6-nx (2026-11-04, from vivapinata-nx 952a38c2): katamari-nx added the fog interpolator to XenosRecomp's vertex
+    // and pixel shaders (location 23); without it here the two below sat one location off: D3D12 refused to link the
+    // point-sprite pipelines ("Pipeline creation failed ... topology 1"), deko3d linked them silently with the size read
+    // from the wrong slot and the pixel shader's coordinate from the size.
+    float4 fog : FOG0;
     float2 pointCoord : POINTCOORD;
     float pointSize : POINTSIZE;
 };

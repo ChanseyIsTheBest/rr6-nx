@@ -22,6 +22,7 @@ struct Vertex
     float4 normal[3] : NORMAL0;
     float4 tangent : TANGENT0;
     float4 binormal : BINORMAL0;
+    float4 fog : FOG0;  // rr6-nx (2026-11-04): see point_sprite_gs.hlsl
     float2 pointCoord : POINTCOORD;
     float pointSize : POINTSIZE;
 };
@@ -39,6 +40,7 @@ Vertex Opposite(Vertex a, Vertex b, Vertex c)
         d.normal[k] = a.normal[k] + b.normal[k] - c.normal[k];
     d.tangent = a.tangent + b.tangent - c.tangent;
     d.binormal = a.binormal + b.binormal - c.binormal;
+    d.fog = a.fog + b.fog - c.fog;
     d.pointCoord = a.pointCoord + b.pointCoord - c.pointCoord;
     d.pointSize = a.pointSize + b.pointSize - c.pointSize;
     return d;
