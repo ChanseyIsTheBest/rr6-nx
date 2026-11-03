@@ -220,6 +220,10 @@ int main(int argc, char** argv)
 
                 thread_local ShaderRecompiler recompiler;
                 recompiler = {};
+                // rr6-nx (2026-11-03, rr6_user_clip_plane): the vertex shaders drawn with a user clip plane on. Ridge
+                // Racer 6's reflection map: 979A583A3A5665B8, 087881A1C449B0D6 (the renderer logs every one it draws
+                // with a plane on, "user clip plane"; one not listed here is not clipped).
+                recompiler.userClipPlane = hash == 0x979A583A3A5665B8ull || hash == 0x087881A1C449B0D6ull;
                 recompiler.recompile(shader.data, include);
 
                 shader.specConstantsMask = recompiler.specConstantsMask;

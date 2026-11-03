@@ -361,6 +361,11 @@ REXCVAR_DEFINE_BOOL(rr6_depth_bias, true, "Banjo/Enhancements",
                     "changes; no value of it makes a pipeline. Off: as Renut had it, no bias at all. Needs a back end "
                     "with dynamic depth bias: Vulkan and deko3d have it; Direct3D 12 only with the Agility SDK. In-run "
                     "A/B target 72 (the off half draws with no bias)");
+REXCVAR_DEFINE_BOOL(rr6_user_clip_plane, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-03): the game's user clip plane (SetClipPlane, plane 0) reaches the shaders that "
+                    "need it, as the GPU and the emulated GPU clip with it; Renut stored it and never applied it. Off: "
+                    "each half of the reflection map holds only the last of its two views, so the car reflects the "
+                    "wrong scene and no sky. Costs one plane write per draw that has one on. In-run A/B target 76");
 REXCVAR_DEFINE_BOOL(rr6_fetch_over_pointer, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): a draw after SetTexture(NULL) samples the texture its fetch constant still holds, "
                     "as the GPU and the emulated GPU do; Renut bound the null texture. Off: the game's bloom is lost, its "
@@ -940,6 +945,7 @@ const char *AbName(int target) {
   case 72: return "rr6_depth_bias (off half: no depth bias)";  // rr6-nx (2026-11-03)
   case 73: return "banjo_renut_game_gamma (off half: the output without the display's ramp)";  // rr6-nx (2026-11-03)
   case 74: return "rr6_alpha_near_one (off half: the alpha test of >= 1 exact)";  // rr6-nx (2026-11-03)
+  case 76: return "rr6_user_clip_plane (off half: no user clip plane, the reflection map holds the wrong views)";
   case 75: return "rr6_fetch_over_pointer (off half: a null texture pointer binds the null texture)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
@@ -1594,6 +1600,11 @@ float AlphaNearOne(uint32_t func, float threshold) {
 bool FetchOverPointerOn() {
   static const bool on = REXCVAR_GET(rr6_fetch_over_pointer);
   return on && g_ab_off.load(std::memory_order_relaxed) != 75;
+}
+
+bool UserClipPlaneOn() {
+  static const bool on = REXCVAR_GET(rr6_user_clip_plane);
+  return on && g_ab_off.load(std::memory_order_relaxed) != 76;
 }
 
 bool GameGammaAbOff() {

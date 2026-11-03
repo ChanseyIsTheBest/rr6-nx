@@ -60,14 +60,14 @@ SHIPPED = {
     # 2026-11-03: the foliage's alpha test of >= 1, which flickered on NVIDIA in ours and in the reference.
     'rr6_alpha_near_one': 'true  # false: the test of >= 1 exact, flickering trees on NVIDIA, A/B 74',
     # 2026-11-03: a draw after SetTexture(NULL) samples what the fetch constant holds, as the GPU does: the game's bloom.
-    'rr6_fetch_over_pointer': 'true  # false: no bloom, lit surfaces a quarter too dark, A/B 75',
+    'rr6_user_clip_plane', 'rr6_fetch_over_pointer': 'true  # false: no bloom, lit surfaces a quarter too dark, A/B 75',
 }
 PLAY = {'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false',
         'banjo_renut_diag_terrain': 'false'}
 # The targets that act on Ridge Racer 6's draws (direct calls, no command-buffer recordings: the census in docs/rr6-notes.md): the
 # fast draw (25), pipelines by content (28), whole-buffer copies (22), the setters' touch compare (26), merged draws (33), mesh
 # objects (42); 70 the localized copies of the hot functions; 1 (a Vulkan-only key) is the do-nothing control on the Switch.
-AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,71,72,73,74,75,1"', 'banjo_renut_ab_s': '30',
+AB = {'banjo_renut_ab_targets': '"25,28,22,26,33,42,70,71,72,73,74,75,76,1"', 'banjo_renut_ab_s': '30',
       'banjo_renut_dynamic_resolution': 'false'}
 VERIFY = {k: 'true' for k in (
     'banjo_renut_fast_draw_verify', 'banjo_renut_resource_objects_verify', 'banjo_renut_fetch_cache_verify',

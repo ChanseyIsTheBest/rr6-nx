@@ -120,6 +120,8 @@ struct RenutUboShared { uint4 v[RENUT_SHARED_VECTORS]; };
 #define g_ScreenScale              RENUT_SHARED_FLOAT2(568)
 #define g_ScreenSpace              RENUT_SHARED_UINT(968)
 #define g_ViewportSize             RENUT_SHARED_FLOAT2(1328)
+// 1312 (rr6-nx, rr6_user_clip_plane): the draw's user clip plane, where a draw of points has its sprite state.
+#define g_UserClipPlane            float4(RENUT_SHARED_FLOAT(1312), RENUT_SHARED_FLOAT(1316), RENUT_SHARED_FLOAT(1320), RENUT_SHARED_FLOAT(1324))
 // 1336: host pixels per guest pixel on each axis (the render targets are that multiple of their
 // guest size; g_ViewportSize and the screen-space values are in guest pixels).
 #define g_ResolutionScale          RENUT_SHARED_FLOAT(1336)
@@ -190,6 +192,7 @@ struct RenutUboShared { uint4 v[RENUT_SHARED_VECTORS]; };
     uint4 g_MemExportStreamsArr[4] : packoffset(c61); \
     uint4 g_Tessellation : packoffset(c65); \
     uint4 g_BoundFetchArr[16] : packoffset(c66); \
+    float4 g_UserClipPlane : packoffset(c82); \
     float2 g_ViewportSize : packoffset(c83.x); \
     float g_ResolutionScale : packoffset(c83.z); \
     float2 g_PixelOrigin : packoffset(c84.x);

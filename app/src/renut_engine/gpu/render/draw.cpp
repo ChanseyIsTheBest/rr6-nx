@@ -2086,6 +2086,26 @@ ViewportState ComputeViewportSlow(const GuestDevice &device, const Targets &t) {
 // ---------------------------------------------------------------------------
 
 // Where a draw's float constant registers are (ReplayConstants).
+// rr6-nx (2026-11-03, rr6_user_clip_plane): this draw's user clip plane in the shared constants' point_state, which a
+// draw of anything but points leaves free (no shader but the point sprite one reads it, and those that clip read it
+// here; all zero clips nothing). Plane 0 only, all this game uses; the log says if a draw wants more, or if a shader
+// that does not clip (XenosRecomp main.cpp, userClipPlane) is drawn with one on.
+inline bool UserClipPlane(const d3d::Device &dev, uint64_t vs_hash, float plane[4]) {
+  const u32 bits = u32(dev.m_ControlPacket.ClipControl) & 0x3Fu;
+  if (!bits || !banjo::renut_gpu::UserClipPlaneOn())
+    return false;
+  for (u32 i = 0; i < 4; ++i)
+    plane[i] = float(dev.m_ClipPlanes[0][i]);
+  static uint64_t said[16];
+  static u32 said_count = 0;
+  if (said_count < 16 && std::find(said, said + said_count, vs_hash ^ bits) == said + said_count) {
+    said[said_count++] = vs_hash ^ bits;
+    RGPU_INFO("[renut] user clip plane: VS {:016X} planes {:02X}, plane 0 ({:.3f},{:.3f},{:.3f},{:.3f})", vs_hash, bits, plane[0],
+              plane[1], plane[2], plane[3]);
+  }
+  return true;
+}
+
 struct FloatConstants {
   const u8 *state = nullptr;
   const u8 *running = nullptr;  // null: all in 'state'
@@ -8660,6 +8680,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     SetShared(sc, sc.point_state, kZero4);
     g_draw_sc_track.point = false;
   }
+  if (float clip_plane[4]; UserClipPlane(device.dev(), vs->hash, clip_plane)) {  // rr6-nx: see UserClipPlane
+    SetShared(sc, sc.point_state, clip_plane);
+    g_draw_sc_track.point = true;
+  }
   if (g_draw_sc_track.memexport) {
     std::memset(sc.memexport_streams, 0, sizeof(sc.memexport_streams));
     MarkShared(sc, sc.memexport_streams, sizeof(sc.memexport_streams));
@@ -10349,6 +10373,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   SetShared(sc, sc.resolution_scale, targets.scale.Factor());
   SetShared(sc, sc.pad_1352[1], std::bit_cast<float>(InternalHeightsWord()));  // banjo-nx (2026-10-21): the shaders' codes 4 and 6
   SetShared(sc, sc.pixel_origin, viewport.pixel_origin);  // Renut upstream 574b488
+  float clip_plane[4];  // rr6-nx: UserClipPlane
+  bool has_clip_plane = false;
   if (call.primitive == kPointList) {
     // PA_SU_POINT_SIZE: height 0-15, width 16-31, half the size in 12.4 fixed
     // point (SetRenderState_PointSize 0x82635CC0 stores the size * 8);
@@ -10366,12 +10392,15 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     point_state[2] = float(point_min_max & 0xFFFF) / minmax_scale;
     point_state[3] = float(point_min_max >> 16) / minmax_scale;
     SetShared(sc, sc.point_state, point_state);
+  } else if (UserClipPlane(dev, vs ? vs->hash : 0, clip_plane)) {
+    has_clip_plane = true;
+    SetShared(sc, sc.point_state, clip_plane);
   } else if (persistent_sc && g_draw_sc_track.point) {
     static constexpr float kZero4[4] = {};
     SetShared(sc, sc.point_state, kZero4);  // banjo-nx (2026-10-26): the last draw's
   }
   if (persistent_sc)
-    g_draw_sc_track.point = call.primitive == kPointList;
+    g_draw_sc_track.point = call.primitive == kPointList || has_clip_plane;
 
   Geometry geometry;
   // banjo-nx (2026-10-26): as a new block's, then the tessellated draw's words (into a copy, set below).
