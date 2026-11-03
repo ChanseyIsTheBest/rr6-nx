@@ -206,13 +206,31 @@ def main():
         for (window, slot, va, w, h, fmt, mip), files in theirs.items():
             for frame, serial, layer, name in sorted(files):
                 theirs_by[(slot, va, w, h, fmt, mip, layer)].append(name)
+        # The same texture may sit at another guest address on the other platform (or in another run): a key with no
+        # match by address is matched by slot, size, format, level and layer alone, and the report says so.
+        def loose(key):
+            return key[:1] + key[2:]
+        theirs_loose = defaultdict(list)
+        for key, names in theirs_by.items():
+            theirs_loose[loose(key)].append(key)
         for key in sorted(set(mine_by) | set(theirs_by)):
             slot, va, w, h, fmt, mip, layer = key
-            if key not in mine_by or key not in theirs_by:
-                report.write('s%d %s %dx%d fmt%d m%d l%d: only in %s\n'
-                             % (slot, va, w, h, fmt, mip, layer, 'this folder' if key in mine_by else 'the other'))
+            other_key = key
+            if key in mine_by and key not in theirs_by:
+                candidates = [k for k in theirs_loose.get(loose(key), []) if k not in mine_by]
+                if len(candidates) == 1:
+                    other_key = candidates[0]
+                    report.write('s%d %s %dx%d fmt%d m%d l%d: matched by slot, size, format, level and layer to the '
+                                 'other folder\'s %s\n' % (slot, va, w, h, fmt, mip, layer, other_key[1]))
+            if key not in mine_by:
+                if loose(key) in {loose(k) for k in mine_by}:
+                    continue  # matched loosely from this folder's side
+                report.write('s%d %s %dx%d fmt%d m%d l%d: only in the other\n' % (slot, va, w, h, fmt, mip, layer))
                 continue
-            for a_name, b_name in zip(mine_by[key], theirs_by[key]):
+            if other_key not in theirs_by:
+                report.write('s%d %s %dx%d fmt%d m%d l%d: only in this folder\n' % (slot, va, w, h, fmt, mip, layer))
+                continue
+            for a_name, b_name in zip(mine_by[key], theirs_by[other_key]):
                 a = load(os.path.join(src, a_name), w, h, fmt)
                 b = load(os.path.join(other, b_name), w, h, fmt)
                 if a is None or b is None:
