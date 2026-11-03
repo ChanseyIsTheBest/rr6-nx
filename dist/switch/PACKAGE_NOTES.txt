@@ -23,20 +23,35 @@ What to test, most important first
    rr6_depth_bias = false in renut.toml makes them go.
 3. Overall brightness. banjo_renut_game_gamma is now on: the display's gamma ramp, which the reference applies and Renut did not. Menus went
    from 3 to 12 levels off the reference to under 1. In renut_ab.toml it is target 73: the off half is visibly brighter in the darks.
-4. The car and glass. Still weaker than the reference: the rear window blotchy, the gloss on the car and the glow on bright buildings less.
-   Known, not fixed yet.
-5. Car at car select: should be textured. It was black until rr6_fog_nan_zero. Both worked in the emulator; confirm on hardware.
-6. Foliage (trees beside the course). Flicker reported on the PC build, and the Switch's GPU is NVIDIA too. Under investigation: with the car
-   braked and nothing else moving, 3 to 4 % of tree pixels still change from capture to capture. Watch for it.
-7. Speed. The game slows down when frames run late: at about 38 fps in the emulator the lap clock ran at 0.755 of real time. It is not a
+4. Car reflections: the main thing to confirm. Fixed by rr6_user_clip_plane: the game's reflection map needs a clip plane Renut never applied.
+   The car should look polished, with sky and scenery on the roof, spoiler, decals and glass, not matte. Matches the reference on the PC and in
+   Ryujinx, but it relies on clip distances working on real deko3d, and only the console can prove that. In renut_ab.toml it is target 76:
+   the off half turns the car matte, so a car that looks the same in both halves means the fix is not working on hardware. Tell me if so.
+5. Glow on bright buildings. Fixed by rr6_fetch_over_pointer (target 75): the off half is about a quarter darker on lit surfaces.
+6. Car at car select: should be textured. It was black until rr6_fog_nan_zero. Both worked in the emulator; confirm on hardware.
+7. Tree flicker. Fixed by rr6_alpha_near_one (target 74). You confirmed it on the PC; the emulator's video could not show it on deko3d, so this
+   is the first real look. Against it: older Xenia reports put side effects on a similar fix, so also check the checkpoint times' Pac-Man
+   graphic and trees overlapping on corners.
+8. Speed. The game slows down when frames run late: at about 38 fps in the emulator the lap clock ran at 0.755 of real time. It is not a
    strict one tick per frame. Compare the on-screen lap clock with a stopwatch in a race. The game's timing has not been changed.
-8. Long stalls. The emulator had stretches under 3 fps around some loads and at the race's start, with no shader compiles: 3 to 7 windows of
+9. Long stalls. The emulator had stretches under 3 fps around some loads and at the race's start, with no shader compiles: 3 to 7 windows of
    10 s in a run with the guard off, 7 to 12 with it on. Unknown whether this is the emulator. Note any stall on the console.
-9. A dark scene with no car and the HUD bright, once in the emulator, while the car was stuck against the wall (emu11, capture 027). It looks
+10. A dark scene with no car and the HUD bright, once in the emulator, while the car was stuck against the wall (emu11, capture 027). It looks
    like the game's own reset of a stuck car; not confirmed. Note it if you see it while driving normally.
-10. Music: pick "Disc 4: Player Disc" under Change BGM, and race. Nobody has listened to this yet, on any platform. The largest pack
-   (Silver Stream, 68.9 MB) opened and streamed on the PC.
-11. Unlock keys: hidden by default. rr6_dlc_unlock_keys = true shows them; that is your decision.
+11. Music: pick "Disc 4: Player Disc" under Change BGM, and race. Nobody has listened to this yet, on any platform. The largest pack
+   (Silver Stream, 68.9 MB) opened and streamed on the PC. An old Xenia report says menu music stems do not loop: listen for that too.
+12. Unlock keys: hidden by default. rr6_dlc_unlock_keys = true shows them; that is your decision.
+13. Never tested here, from old Xenia reports: player 2 black in split-screen, replay saves, save names.
+
+Machine copies
+--------------
+3,183 functions run as machine-optimised copies, up from 421. The NRO is 64.7 MB (35.6 before), with 1,734 MB of heap free in the emulator. Every one was checked on the PC against the generated code, with 0 differences:
+- 3,043 were compared call by call with the original (557 million calls over two verify runs).
+- 140 are a weaker class: functions a profile found hot, whose calls all reach something outside the copy, so they cannot be compared. They
+  ran for real in guard-mode races, where nothing went wrong, but that is not a call-by-call proof. They include some of the hottest.
+Functions my test runs never touched stay as generated code: correct, just not optimised. That covers anything those runs did not visit.
+renut.toml has the guard off. To check on the console, use configs/renut_verify.toml and look for "[hot] DIFFERENCE" in the log: any such line
+is a real finding, send it to me. banjo_cpu_native_bulk = false in renut.toml turns all the copies off, if you suspect them.
 
 Console profile
 ---------------
@@ -51,4 +66,5 @@ Known problems, not fixed
 - PC only: Renut on Vulkan draws the race wrongly (the car's far side shows through, large polygons over the scene). Direct3D 12 and
   deko3d do not. Looks like a depth or stencil problem. Cause not found.
 - PC only: Direct3D 12 hung the GPU twice (device removed, 887A0006), both times with another heavy process running.
+- PC only: one stencil pipeline fails on Direct3D 12 (VS 05203E8E4637A806, PS BB976212FCEF91DA), so its draws are dropped.
 - Direct3D 12 applies rr6_depth_bias only with the Agility SDK.

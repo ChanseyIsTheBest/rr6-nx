@@ -60,7 +60,8 @@ SHIPPED = {
     # 2026-11-03: the foliage's alpha test of >= 1, which flickered on NVIDIA in ours and in the reference.
     'rr6_alpha_near_one': 'true  # false: the test of >= 1 exact, flickering trees on NVIDIA, A/B 74',
     # 2026-11-03: a draw after SetTexture(NULL) samples what the fetch constant holds, as the GPU does: the game's bloom.
-    'rr6_user_clip_plane', 'rr6_fetch_over_pointer': 'true  # false: no bloom, lit surfaces a quarter too dark, A/B 75',
+    'rr6_user_clip_plane': 'true  # false: the car reflects the wrong scene and no sky, A/B 76',
+    'rr6_fetch_over_pointer': 'true  # false: no bloom, lit surfaces a quarter too dark, A/B 75',
 }
 PLAY = {'banjo_renut_diag_resolve_trace': 'false', 'banjo_renut_diag_gpu_shaders': 'false',
         'banjo_renut_diag_terrain': 'false'}
@@ -124,6 +125,8 @@ def main():
     a = ap.parse_args()
     base = open(a.banjo, encoding='utf-8').read().replace('sdmc:/switch/banjo-nx/', 'sdmc:/switch/rr6-nx/')
     base = re.sub(r'# The gamma ramp the game loads.*?(?=banjo_renut_game_gamma)', '', base, count=1, flags=re.S)
+    # rr6-nx: the base's comment names a config this port does not ship.
+    base = base.replace('configs/banjo_cpu_native_bulk_off.toml is the A/B', 'banjo_cpu_native_bulk = false is the A/B')
     shipped = apply(base, SHIPPED)
     os.makedirs(os.path.join(a.out, 'configs'), exist_ok=True)
     outs = {

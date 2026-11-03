@@ -267,7 +267,7 @@ banjo_renut_stream_cache_mb = 128
 
 # Bulk localized copies (2026-10-22, your request; the method of the Bejeweled 3 port): every game function your
 # console profiles found hot that still ran as generated code (363 functions, app/src/cpu/hot/localized_bulk.txt) runs
-# as a localized copy. configs/banjo_cpu_native_bulk_off.toml is the A/B (all of them back to the generated code).
+# as a localized copy. banjo_cpu_native_bulk = false is the A/B (all of them back to the generated code).
 banjo_cpu_native_bulk = true
 # The copies' self-check (the guard) is off: every hook calls its copy directly, with no countdown to the next checked
 # call (bejeweled3-nx's direct dispatch). configs/banjo_hot_guard_on.toml puts the guard back (the first 64 calls of
@@ -584,6 +584,7 @@ renut_ambient_occlusion = "Half"
 banjo_xma_frame_cache = false
 rr6_dlc_unlock_keys = false  # true: also load the 36 car unlock keys
 rr6_alpha_near_one = true  # false: the test of >= 1 exact, flickering trees on NVIDIA, A/B 74
+rr6_user_clip_plane = true  # false: the car reflects the wrong scene and no sky, A/B 76
 rr6_fetch_over_pointer = true  # false: no bloom, lit surfaces a quarter too dark, A/B 75
 
 [input_p1]
