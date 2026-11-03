@@ -9,6 +9,19 @@ Copy COPY_TO_SD_switch_rr6-nx to sdmc:/switch/rr6-nx. Extract your disc into gam
 DLC is optional: put the packages under dlc/, in any folders. The first start then extracts about 1.9 GB next to your saves, so the
 first boot takes longer and needs the space.
 
+Console tests: the chrome car, wedges and black video screen
+------------------------------------------------------------
+The first console run showed faults Ryujinx did not: chrome car paint, streaked and huge black polygons in the course intro, a wrong polygon
+on the rock wall, and a black video screen on the tower. They look the same docked and handheld. Their cause is not known yet.
+tests/ holds renut.toml with suspects switched off. The NRO reads only renut.toml, so copy a test over it, then race the first course.
+  test1_all_suspects_off.toml      run this first: all four below off
+  test2_clip_plane_off.toml        the reflection fix, rr6_user_clip_plane. The car should go matte
+  test3_copies_off.toml            the machine copies, banjo_cpu_native_bulk
+  test4_uniform_branches_off.toml  a shader compiler optimisation. Its shaders compile on the console, so expect a slower first race
+  test5_frames_ahead_0.toml        the game waits for the render thread each frame, rr6_frames_ahead
+If test 1 leaves the faults exactly as they were, none of these is the cause and the rest can be skipped. If it clears any, run the others.
+Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
+
 Which toml
 ----------
 renut.toml        first run: shipped settings, logs on, CPU sampling on.

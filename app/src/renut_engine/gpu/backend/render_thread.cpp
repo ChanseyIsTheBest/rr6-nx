@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -23,6 +24,18 @@
 #include <rex/cvar.h>
 
 // banjo-nx (2026-10-20, from sa2-nx): see g_done_waiters and Run.
+// rr6-nx (2026-11-03, from sasrt-nx, which found this on its console): the game running ahead of the render thread can
+// rewrite data before the render thread reads it. Ryujinx rarely shows it; a slow GPU shows it constantly.
+REXCVAR_DEFINE_INT32(rr6_frames_ahead, 1, "Banjo/Enhancements",
+                     "How many frames the game may run ahead of Renut's render thread. 0: the game waits at its Swap "
+                     "until the render thread has done the frame. 1: one frame ahead")
+    .range(0, 1)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(rr6_diag_render_delay_ms, 0, "Banjo/Enhancements",
+                     "Diagnostic: each frame's work on the render thread waits this long first, so the PC lags behind "
+                     "the game as a console does")
+    .range(0, 500)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_done_notify_waiters, true, "Banjo/Enhancements",
                     "Renut's render thread signals its work done (frames, fences, drains) only when a thread waits for "
                     "it: a signal is a kernel call on the Switch even with nobody waiting, and it made one after every "
@@ -405,6 +418,8 @@ uint64_t QueueFrame(std::function<void()> work) {
     ++g_frames_queued;
   }
   QueueUnlocked([work = std::move(work)] {
+    if (static const int32_t delay = REXCVAR_GET(rr6_diag_render_delay_ms); delay > 0)  // rr6-nx
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     work();
     // The frame's work includes this item's (the present); Run adds the whole
     // item afterwards, so what is left of it counts to the next frame.
@@ -428,7 +443,8 @@ uint64_t QueueFrame(std::function<void()> work) {
   WakeForWaitLocked();  // banjo-nx (from sa2-nx) (banjo_renut_wake_batch)
   ++g_done_waiters;  // banjo-nx (from sa2-nx) (banjo_renut_done_notify_waiters)
   g_done_cv.wait(lock, [] {
-    return !g_running || g_stopping || g_frames_queued - g_frames_done <= kMaxFramesAhead;
+    static const uint64_t ahead = std::min<uint64_t>(uint64_t(REXCVAR_GET(rr6_frames_ahead)), kMaxFramesAhead);  // rr6-nx
+    return !g_running || g_stopping || g_frames_queued - g_frames_done <= ahead;
   });
   --g_done_waiters;
   const uint64_t done = g_frames_done;
