@@ -70,6 +70,14 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    game waiting on the render thread. If the car and the sky go right here, one of the switches
                                    is the cause and the next round halves them; if they stay wrong, every switch is ruled out in
                                    one go and the dump folder is the lead. Send logs/ and texture_dump/
+  test14_range_path.toml           for the cables and the palm fronds drawn as ribbons across the sky in the course intro (your
+                                   07:43 shots): those are triangle strips whose cuts the GPU is not honouring. This takes every
+                                   draw through the path where the CPU keeps the cuts (banjo_renut_whole_buffers off; the fix of
+                                   the earlier wedges lives there). If the intro's cables and fronds come right, that is the cause
+                                   and the next build makes it the default on the console. Some CPU cost; watch the fps line
+  test15_no_strip_restart.toml     the control for test 14: the GPU's primitive restart off altogether (banjo_deko3d_strip_restart).
+                                   If the intro looks exactly as in the plain run, the restart was never taking effect on the
+                                   hardware; if it looks worse, it was partly working. Run after test 14, not instead of it
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
