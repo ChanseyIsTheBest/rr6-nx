@@ -3271,6 +3271,9 @@ inline bool PersistentSharedVerifyOn() {
 void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &sc, u32 equal_lines = 0) {
   constexpr u32 kLine = 64;
   constexpr u32 kSize = u32(sizeof(SharedConstants));
+  // rr6-nx (2026-11-04, from sasrt-nx's debug-deko3d run): the UBO size deko3d is told is a multiple of 256 (the
+  // release library rounds it itself; the debug one refuses 1424). The pushed buffer reserves the rounded size.
+  constexpr u32 kUboSize = (kSize + 255u) & ~255u;
   ++g_shared_pushes;
   const uint64_t ubo = g_pushed_buffers.address + kPushedSharedOffset;
   const u8 *now = reinterpret_cast<const u8 *>(&sc);
@@ -3281,7 +3284,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   const bool tracked = &sc == &g_draw_sc;
   if (!g_bound.pushed_shared_valid) {
     DiagPushLines(0, 22);  // banjo-nx (2026-10-28, diagnostic)
-    plume::Deko3DPushUniform(cmd, ubo, kSize, 0, now, kSize);
+    plume::Deko3DPushUniform(cmd, ubo, kUboSize, 0, now, kSize);
     std::memcpy(held, now, kSize);
 #if defined(PLUME_DEKO3D)
     plume::Deko3DSharedLinesWritten(cmd, ~0u);  // banjo-nx (2026-10-27): the held copy's lines bindTextures reads
@@ -3302,7 +3305,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
       DiagPushLines(first, run);  // banjo-nx (2026-10-28, diagnostic)
-      plume::Deko3DPushUniform(cmd, ubo, kSize, at, now + at, end - at);
+      plume::Deko3DPushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
       u32 off = at;
       for (; off + kLine <= end; off += kLine)
         std::memcpy(held + off, now + off, kLine);
@@ -3339,7 +3342,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
-      plume::Deko3DPushUniform(cmd, ubo, kSize, at, now + at, end - at);
+      plume::Deko3DPushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
       // banjo-nx (2026-10-23, batch 6): line by line at a fixed size (inline), the tail's 16 bytes last: no C library
       // call per run.
       u32 off = at;
@@ -9710,7 +9713,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (!g_bound.pushed_ubos) {
     plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
     plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
-    plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
+    plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
+                             (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
     std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);
     g_bound.pushed_ubos = true;
   }
@@ -11362,7 +11366,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       // textures read from the renderer's copy of the shared constants.
       plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytes);
       plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytes);
-      plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset, u32(sizeof(SharedConstants)));
+      plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
+                             (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
       std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);  // rebind after
       if (!g_bound.shared_words_set) {
         plume::Deko3DSetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
