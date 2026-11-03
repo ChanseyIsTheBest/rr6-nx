@@ -2416,11 +2416,17 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
       if (!buffer)
         return;
       TransitionTextureLocked(t, plume::RenderTextureLayout::COPY_SOURCE);
+      // deko3d and Vulkan take the level's texel size and a box (emu48 proved it); D3D12 wants a block-compressed
+      // footprint rounded to whole blocks and no box (a 2x2 level of a BC3 cube removed the device in pcdump1), as
+      // Upload() gives it.
+      const bool vulkan_like = UsesVulkanBindings();
       const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
       s.command_list->copyTextureRegion(
-          plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host, copy_w, copy_h, 1, row_texels,
-                                                            0),
-          plume::RenderTextureCopyLocation::Subresource(t->texture.get(), level, layer), 0, 0, 0, &box);
+          plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host,
+                                                            vulkan_like ? copy_w : blocks_w * bs,
+                                                            vulkan_like ? copy_h : blocks_h * bs, 1, row_texels, 0),
+          plume::RenderTextureCopyLocation::Subresource(t->texture.get(), level, layer), 0, 0, 0,
+          vulkan_like ? &box : nullptr);
       TransitionTextureLocked(t, plume::RenderTextureLayout::SHADER_READ);
       g_bound.framebuffer = nullptr;
       g_texture_dumps[s.frame].push_back(
