@@ -50,6 +50,11 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    that the pruned vertex shader no longer writes is garbage on the hardware and zero in Ryujinx:
                                    noise, black, blown-out patches are what that looks like) and uam's four passes. The shaders
                                    recompile on the console, so the first race is slow; the picture after that is the test
+  test12_texture_dump_all.toml     test 9 widened: in four windows (120 s after launch, then every 40 s; one frame each) every
+                                   texture any draw of that frame samples is copied out, up to 150 a window (about 40 MB each):
+                                   the road, the scenery, the palms, the cables, the sky sprites, the tower's video, the car. A
+                                   longer stall at each window. Be in a race with the bridge, palms and the tower in view from
+                                   about 2.5 minutes after launch. Send texture_dump/ with the logs
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
