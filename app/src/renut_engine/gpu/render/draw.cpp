@@ -12,6 +12,8 @@
 #include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <deque>       // rr6-nx (2026-11-03): the texture dump's writer queue
+#include <filesystem>  // rr6-nx (2026-11-03): the texture dump's folder
 #include <cstring>
 #include <limits>
 #include <map>
@@ -130,6 +132,13 @@ REXCVAR_DEFINE_INT32(rr6_diag_paint_frames, 0, "Banjo/Diagnostics",
                      "(the car paint and glass) with its first draw's pixel constants c30-c34: on the console, whether the "
                      "reflection strengths the CPU sets match the emulator's. 0: off")
     .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(rr6_diag_texture_dump, "", "Banjo/Diagnostics",
+                      "Diagnostic (DiagTextureDumpLocked, from sasrt-nx's shadow dump): \"first,every,windows,frames\": "
+                      "from <first> seconds after start, every <every> seconds, <windows> windows of <frames> consecutive "
+                      "frames (e.g. \"240,30,3,2\") in which every texture the car-paint draw samples (level 0, every "
+                      "layer) is copied out of the GPU and written to texture_dump/ next to the executable as raw texels "
+                      "(tools/texture_dump_view.py). Empty: off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(rr6_diag_geometry_frames, 0, "Banjo/Diagnostics",
                      "Diagnostic (DiagGeometryNote): every this many frames, a log line for each indexed draw with hashes "
@@ -2252,6 +2261,231 @@ void DiagPaintNote(const d3d::Device &dev, const FloatConstants &ps_constants, u
     RGPU_INFO("[paint-tex] f{} slot {} words {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} page {:05X} hash4k {:016X}",
               g_stream_cache_frame, r, f.dword[0], f.dword[1], f.dword[2], f.dword[3], f.dword[4], f.dword[5], page, h);
   }
+}
+
+// ---------------------------------------------------------------------------
+// rr6-nx (2026-11-03 evening, rr6_diag_texture_dump; the mechanism is sasrt-nx's shadow dump): the textures the car-paint
+// draw samples, as the GPU holds them. In a window, at the paint draw, level 0 of each texture in the draw's pixel slots
+// (every layer: a cube's six faces) is copied to a readback buffer of its own; when the frame slot's fence has been
+// waited the buffers are copied to memory and a writer thread writes each as a file (the render thread's own writes to
+// the console's SD card took sasrt-nx 76 s a frame). The console's chrome car and black cables look like textures
+// sampling as black or garbage, and only the console can show what its GPU holds.
+// ---------------------------------------------------------------------------
+struct TextureDump {
+  plume::RenderBuffer *buffer;
+  std::string name;
+  uint32_t rows, row_bytes, row_pitch;
+  int window;
+};
+std::vector<TextureDump> g_texture_dumps[kFramesInFlight];
+
+struct TextureDumpSpec {
+  int first = 0, every = 0, windows = 0, frames = 2;
+};
+const TextureDumpSpec &TextureDumpSpecGet() {
+  static const TextureDumpSpec spec = [] {
+    TextureDumpSpec out;
+    const std::string text = REXCVAR_GET(rr6_diag_texture_dump);
+    int field = 0;
+    for (size_t at = 0; at < text.size(); ++field) {
+      const size_t comma = std::min(text.find(',', at), text.size());
+      const std::string item = text.substr(at, comma - at);
+      at = comma + 1;
+      if (field == 0)
+        out.first = std::atoi(item.c_str());
+      else if (field == 1)
+        out.every = std::atoi(item.c_str());
+      else if (field == 2)
+        out.windows = std::atoi(item.c_str());
+      else if (field == 3)
+        out.frames = std::max(1, std::atoi(item.c_str()));
+    }
+    return out;
+  }();
+  return spec;
+}
+
+// Called once per frame that has a paint draw: the window that frame is in (-1: none). A window opens at the first
+// such frame past its time mark (<first> seconds after start, then <every> seconds after the previous window opened:
+// a race that begins late gets its windows spaced all the same) and holds <frames> such frames.
+int TextureDumpWindow(uint64_t frame) {
+  const TextureDumpSpec &spec = TextureDumpSpecGet();
+  if (spec.windows <= 0)
+    return -1;
+  static const auto start = std::chrono::steady_clock::now();
+  static int window = -1, frames_in = 0, next = 0;
+  static double next_open = double(spec.first);
+  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  if (window >= 0 && frames_in >= spec.frames)
+    window = -1;
+  if (window < 0 && next < spec.windows && seconds >= next_open) {
+    window = next++;
+    frames_in = 0;
+    next_open = seconds + double(std::max(1, spec.every));
+    RGPU_INFO("[rr6] texture dump window {} from frame {} ({:.0f} s, {} frames)", window, frame, seconds, spec.frames);
+  }
+  if (window >= 0)
+    ++frames_in;
+  return window;
+}
+
+constexpr size_t kTextureDumpQueued = size_t(48) << 20;
+struct TextureDumpWriter {
+  std::mutex mutex;
+  std::condition_variable wake, room;
+  std::deque<std::pair<std::string, std::vector<u8>>> queue;
+  size_t queued = 0;
+  uint64_t written = 0, written_bytes = 0, failed = 0;
+};
+TextureDumpWriter *g_texture_dump_writer = nullptr;
+
+void TextureDumpWriterMain() {
+  TextureDumpWriter *const w = g_texture_dump_writer;
+  for (;;) {
+    std::pair<std::string, std::vector<u8>> item;
+    {
+      std::unique_lock<std::mutex> lock(w->mutex);
+      w->wake.wait(lock, [w] { return !w->queue.empty(); });
+      item = std::move(w->queue.front());
+      w->queue.pop_front();
+    }
+    const std::string path = banjo::renut_gpu::NextToExecutable("texture_dump/" + item.first + ".bin").string();
+    bool ok = false;
+    if (FILE *f = std::fopen(path.c_str(), "wb")) {
+      std::setvbuf(f, nullptr, _IONBF, 0);
+      ok = std::fwrite(item.second.data(), 1, item.second.size(), f) == item.second.size();
+      ok = std::fclose(f) == 0 && ok;
+    }
+    bool drained;
+    uint64_t written, bytes, failed;
+    {
+      std::lock_guard<std::mutex> lock(w->mutex);
+      w->queued -= item.second.size();
+      ++(ok ? w->written : w->failed);
+      w->written_bytes += ok ? item.second.size() : 0;
+      drained = w->queue.empty();
+      written = w->written, bytes = w->written_bytes, failed = w->failed;
+    }
+    w->room.notify_all();
+    if (!ok)
+      RGPU_WARN("[rr6] texture dump: {} not written", path);
+    if (drained)
+      RGPU_INFO("[rr6] texture dump: {} files written ({:.1f} MB), {} failed, queue empty", written,
+                double(bytes) / 1048576.0, failed);
+  }
+}
+
+TextureDumpWriter &TextureDumpWriterGet() {
+  static TextureDumpWriter *const writer = [] {
+    auto *w = new TextureDumpWriter;
+    std::error_code ec;
+    std::filesystem::create_directories(banjo::renut_gpu::NextToExecutable("texture_dump"), ec);
+    g_texture_dump_writer = w;
+    banjo::renut_gpu::StartLongLivedThread(&TextureDumpWriterMain, 256 * 1024);
+    return w;
+  }();
+  return *writer;
+}
+
+// Level 0 of 't', every layer, into readback buffers of this frame slot.
+void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index, u32 guest_va, int window) {
+  if (!t || !t->texture || !t->alloc_width || !t->alloc_height)
+    return;
+  const u32 bs = std::max(1u, t->info.block_size), hbb = std::max(1u, t->info.host_block_bytes);
+  const u32 w = t->alloc_width, h = t->alloc_height;
+  const u32 blocks_w = (w + bs - 1) / bs, blocks_h = (h + bs - 1) / bs;
+  const u32 row_bytes = blocks_w * hbb;
+  const u32 row_align = t->info.decoded_blocks ? 256u * bs : 256u;
+  const u32 row_pitch = (row_bytes + row_align - 1) / row_align * row_align;
+  const u32 copy_w = std::min(blocks_w * bs, w), copy_h = std::min(blocks_h * bs, h);
+  const u32 row_texels = row_pitch / hbb * bs;
+  const u32 layers = std::max(1u, t->depth);
+  static uint32_t serial = 0;
+  for (u32 layer = 0; layer < layers && layer < 16; ++layer) {
+    std::unique_ptr<plume::RenderBuffer> buffer =
+        s.device->createBuffer(plume::RenderBufferDesc::ReadbackBuffer(uint64_t(row_pitch) * blocks_h));
+    if (!buffer)
+      return;
+    TransitionTextureLocked(t, plume::RenderTextureLayout::COPY_SOURCE);
+    const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
+    s.command_list->copyTextureRegion(
+        plume::RenderTextureCopyLocation::PlacedFootprint(buffer.get(), t->info.host, copy_w, copy_h, 1, row_texels, 0),
+        plume::RenderTextureCopyLocation::Subresource(t->texture.get(), 0, layer), 0, 0, 0, &box);
+    TransitionTextureLocked(t, plume::RenderTextureLayout::SHADER_READ);
+    g_bound.framebuffer = nullptr;
+    g_texture_dumps[s.frame].push_back(
+        {buffer.release(),
+         fmt::format("w{}_f{}_{:04}_s{}_{:08X}_{}x{}_fmt{}_l{}", window, g_stream_cache_frame, serial++, slot_index,
+                     guest_va, w, h, u32(t->info.host), layer),
+         blocks_h, row_bytes, row_pitch, window});
+  }
+}
+
+// At the car-paint draw (DiagPaintNote's shader), in a window: every pixel slot holding a texture.
+void DiagTextureDumpLocked(const GuestDevice &device, uint64_t ps_hash) {
+  if (ps_hash != 0x22A0920B4D109C62ull || TextureDumpSpecGet().windows <= 0)
+    return;
+  VideoState &s = State();
+  static uint64_t frame = UINT64_MAX;
+  if (frame == g_stream_cache_frame)
+    return;  // the first paint draw of the frame only
+  frame = g_stream_cache_frame;
+  const int window = TextureDumpWindow(g_stream_cache_frame);
+  if (window < 0)
+    return;
+  u32 dumped = 0;
+  for (u32 r = 0; r < 16; ++r) {
+    const u32 va = device.U32(d3d::kDeviceOffsetTextures + r * 4);
+    if (!va)
+      continue;
+    if (HostTexture *t = FindHostTextureLocked(va)) {
+      DiagTextureDumpTextureLocked(s, t, r, va, window);
+      ++dumped;
+    }
+  }
+  RGPU_INFO("[rr6] texture dump: frame {} window {}: {} textures queued", g_stream_cache_frame, window, dumped);
+}
+
+// The slot's fence has been waited: its readbacks to memory and to the writer.
+void DiagTextureDumpCompleteLocked(uint32_t slot) {
+  std::vector<TextureDump> &list = g_texture_dumps[slot];
+  if (list.empty())
+    return;
+  TextureDumpWriter &writer = TextureDumpWriterGet();
+  uint32_t queued = 0, dropped = 0;
+  for (TextureDump &d : list) {
+    const size_t bytes = size_t(d.row_bytes) * d.rows;
+    bool take;
+    {
+      std::unique_lock<std::mutex> lock(writer.mutex);
+      take = writer.room.wait_for(lock, std::chrono::seconds(3),
+                                  [&] { return writer.queued == 0 || writer.queued + bytes <= kTextureDumpQueued; });
+      if (take)
+        writer.queued += bytes;
+    }
+    const auto *data = take ? static_cast<const u8 *>(d.buffer->map()) : nullptr;
+    if (data) {
+      std::vector<u8> texels(bytes);
+      for (uint32_t y = 0; y < d.rows; ++y)
+        std::memcpy(texels.data() + size_t(y) * d.row_bytes, data + size_t(y) * d.row_pitch, d.row_bytes);
+      d.buffer->unmap();
+      {
+        std::lock_guard<std::mutex> lock(writer.mutex);
+        writer.queue.emplace_back(std::move(d.name), std::move(texels));
+      }
+      writer.wake.notify_one();
+      ++queued;
+    } else {
+      if (take) {
+        std::lock_guard<std::mutex> lock(writer.mutex);
+        writer.queued -= bytes;
+      }
+      ++dropped;
+    }
+    Video::RetireLocked(std::unique_ptr<plume::RenderBuffer>(d.buffer));
+  }
+  RGPU_INFO("[rr6] texture dump: {} textures queued for writing, {} dropped (rr6_diag_texture_dump)", queued, dropped);
+  list.clear();
 }
 
 // Float constants go by groups of four registers (64 bytes): the unit m_Pending
@@ -9210,8 +9444,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const FloatConstants vs_constants = DrawFloatConstants(device_state, replay, false);
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
-  if (ps)
+  if (ps) {
     DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
+    DiagTextureDumpLocked(device, ps->hash);
+  }
 #if defined(PLUME_DEKO3D)
   g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
   PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
@@ -10743,8 +10979,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
-  if (ps)
+  if (ps) {
     DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
+    DiagTextureDumpLocked(device, ps->hash);
+  }
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
 #if defined(PLUME_DEKO3D)
@@ -11182,6 +11420,7 @@ void ReleaseCacheCopiesLocked(uint32_t slot) {
 }
 
 void CompleteMemExportsLocked(uint32_t slot) {
+  DiagTextureDumpCompleteLocked(slot);  // rr6-nx (2026-11-03)
   SlotExports &exports = g_exports[slot];
   if (exports.pending.empty())
     return;
