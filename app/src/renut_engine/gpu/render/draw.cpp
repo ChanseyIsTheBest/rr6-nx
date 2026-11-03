@@ -2198,7 +2198,9 @@ void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t v
 // CPU sets (c31.y/.z the fresnel range, c32.x the scale in PS 22A0920B4D109C62). A line per cube-sampling pixel shader every
 // N frames with c30-c34 of its first main-target draw: the same values on the console as in the emulator put the fault on
 // the GPU side (the faces' contents, the normal map, the blend); different ones put it on the CPU (the machine copies).
-void DiagPaintNote(const FloatConstants &ps_constants, uint64_t vs_hash, uint64_t ps_hash, const Targets &targets) {
+TextureFetch DeviceTextureFetch(const d3d::Device &dev, u32 r);
+void DiagPaintNote(const d3d::Device &dev, const FloatConstants &ps_constants, uint64_t vs_hash, uint64_t ps_hash,
+                   const Targets &targets) {
   static const int32_t every = REXCVAR_GET(rr6_diag_paint_frames);
   if (!every || targets.width < 1000 || !targets.depth || g_stream_cache_frame % uint64_t(every))
     return;
@@ -2232,6 +2234,24 @@ void DiagPaintNote(const FloatConstants &ps_constants, uint64_t vs_hash, uint64_
   RGPU_INFO("[paint] f{} vs {:016X} ps {:016X} c30 {} {} {} {} | c31 {} {} {} {} | c32 {} {} {} {} | c33 {} {} {} {} | c34 {} {} {} {}",
             g_stream_cache_frame, vs_hash, ps_hash, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11],
             c[12], c[13], c[14], c[15], c[16], c[17], c[18], c[19]);
+  // rr6-nx (2026-11-03 evening): the draw's texture fetch constants (the pixel slots that hold a texture) and a hash of
+  // each one's first 4 KB of level-0 guest data: whether the texture words and bytes the console's draws fetch are the
+  // emulator's (then the upload or the sampling is the fault) or not (then the game's code or the reads are).
+  if (which != 3)  // the main paint shader only (22A0920B4D109C62)
+    return;
+  for (u32 r = 0; r < 16; ++r) {
+    const TextureFetch f = DeviceTextureFetch(dev, r);
+    if (!f.IsTexture())
+      continue;
+    uint64_t h = 1469598103934665603ull;
+    const u32 page = f.BasePage();
+    if (const u8 *p = page ? GuestPhysicalPtr<const u8>(page << 12) : nullptr) {
+      for (u32 i = 0; i < 4096; ++i)
+        h = (h ^ p[i]) * 1099511628211ull;
+    }
+    RGPU_INFO("[paint-tex] f{} slot {} words {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} page {:05X} hash4k {:016X}",
+              g_stream_cache_frame, r, f.dword[0], f.dword[1], f.dword[2], f.dword[3], f.dword[4], f.dword[5], page, h);
+  }
 }
 
 // Float constants go by groups of four registers (64 bytes): the unit m_Pending
@@ -9191,7 +9211,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
   if (ps)
-    DiagPaintNote(ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
+    DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
 #if defined(PLUME_DEKO3D)
   g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
   PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
@@ -10724,7 +10744,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
   if (ps)
-    DiagPaintNote(ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
+    DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
 #if defined(PLUME_DEKO3D)
