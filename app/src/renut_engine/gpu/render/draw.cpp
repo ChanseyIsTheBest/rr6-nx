@@ -2399,6 +2399,13 @@ void DiagTextureDumpTextureLocked(VideoState &s, HostTexture *t, u32 slot_index,
   if (!t || !t->texture || !t->alloc_width || !t->alloc_height)
     return;
   const u32 bs = std::max(1u, t->info.block_size), hbb = std::max(1u, t->info.host_block_bytes);
+  // A volume (a host 3D image: its depth is slices in one subresource, not layers) is not dumped: the car's paint
+  // samples none, and a copy of layer 1 of a 3D image removes the D3D12 device.
+  if (t->dimension == TextureDimension::Tex3D && !t->stacked) {
+    RGPU_INFO("[rr6] texture dump: slot {} {:08X} is a volume ({}x{}x{}): not dumped", slot_index, guest_va,
+              t->alloc_width, t->alloc_height, t->depth);
+    return;
+  }
   const u32 layers = std::max(1u, t->depth);
   const u32 levels = std::max(1u, t->mip_levels);
   static uint32_t serial = 0;
