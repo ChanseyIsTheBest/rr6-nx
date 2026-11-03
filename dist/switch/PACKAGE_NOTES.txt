@@ -63,6 +63,13 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    the road, the scenery, the palms, the cables, the sky sprites, the tower's video, the car. A
                                    longer stall at each window. Be in a race with the bridge, palms and the tower in view from
                                    about 2.5 minutes after launch. Send texture_dump/ with the logs
+  test13_everything.toml           all of the above at once, in one run (asked for 2026-11-04 07:15): tests 3-8, 10 and 11 switched
+                                   the safe way plus test 12's whole-frame dump (windows from 3 minutes, every 45 s, four frames),
+                                   but not test 2 (the clip plane off makes the car matte by design, so the chrome could not be
+                                   judged). Slow: every barrier a full wait, copies off, shaders recompiled on the console, the
+                                   game waiting on the render thread. If the car and the sky go right here, one of the switches
+                                   is the cause and the next round halves them; if they stay wrong, every switch is ruled out in
+                                   one go and the dump folder is the lead. Send logs/ and texture_dump/
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
