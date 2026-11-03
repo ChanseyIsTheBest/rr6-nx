@@ -50,6 +50,8 @@ REXCVAR_DEFINE_STRING(banjo_record_ffmpeg, "C:/ffmpeg/ffmpeg.exe", "NFSMW", "ffm
 REXCVAR_DEFINE_INT32(banjo_captura_rafaga, 1, "NFSMW", "Capturas seguidas en cada tick (rafaga)").range(1, 30);
 REXCVAR_DEFINE_INT32(banjo_captura_rafaga_ms, 40, "NFSMW", "Milisegundos entre las capturas de una rafaga")
     .range(1, 1000);
+// rr6-nx (2026-11-03): bursts from the start slow the emulator enough that a scripted route loses its menus.
+REXCVAR_DEFINE_INT32(banjo_captura_desde_s, 0, "NFSMW", "Segundos tras el inicio antes de la primera captura").range(0, 3600);
 
 extern std::atomic<uint64_t> g_banjo_game_frames;  // banjo_me_hooks.cpp (D3DDevice_Swap)
 
@@ -151,6 +153,12 @@ std::vector<uint8_t> CodificarPng(const rex::ui::RawImage& imagen) {
 void Bucle(Capturador capturar, int cada_s, int maximo) {
   const std::filesystem::path carpeta = rex::filesystem::GetExecutableFolder() / "capturas";
   const auto inicio = std::chrono::steady_clock::now();
+  {
+    std::unique_lock<std::mutex> cerrojo(g_mutex);
+    if (g_cv.wait_for(cerrojo, std::chrono::seconds(REXCVAR_GET(banjo_captura_desde_s)), [] { return g_parar; })) {
+      return;
+    }
+  }
   for (int n = 1; n <= maximo; ++n) {
     {
       std::unique_lock<std::mutex> cerrojo(g_mutex);

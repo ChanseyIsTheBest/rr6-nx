@@ -906,6 +906,14 @@ namespace plume {
         // primitive restart on (only dkCmdBufSetPrimitiveRestart writes method 0x591, libdeko3d disassembled) and
         // plume did not either, so a cut drew triangles to and from vertex 65535 on deko3d alone.
         bool stripRestart = true;
+        // sasrt-nx (2026-10-30, the far-cascade shadow flicker's console A/Bs; rr6-nx 2026-11-03): deko3d's fragment
+        // barrier (DkBarrier_Fragments, with the tiled cache's texture invalidate) replaced by a wait for idle
+        // (DkBarrier_Primitives, with the texture cache's own invalidate) for a transition into a read layout
+        // (readWait) or into a write layout (writeWait); clearWait: a wait for idle before each clear. Ryujinx runs
+        // no two draws' work at once, so only the console can tell whether any of these matters.
+        bool readWait = false;
+        bool writeWait = false;
+        bool clearWait = false;
         // banjo-nx (2026-10-21, after a console freeze in a run-time compile that never ended): a variant missing from
         // the cache is compiled on the uam thread in the background; until it is done the pipeline draws with the
         // shader's generic variant (without the specializations that only fold what the shader reads at run time:

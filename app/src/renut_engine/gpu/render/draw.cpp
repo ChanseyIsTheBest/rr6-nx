@@ -120,6 +120,16 @@ REXCVAR_DEFINE_BOOL(banjo_renut_fetch_data_unread, true, "Banjo/Enhancements",
                     "Renut's renderer on deko3d: a draw whose shaders fetch nothing by address gets fetch data address "
                     "and size 0 (they never read them) instead of a new allocation's, and no fetch binding")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// rr6-nx (2026-11-03): DiagCameraNote, below.
+REXCVAR_DEFINE_BOOL(rr6_diag_camera, false, "Banjo/Diagnostics",
+                    "Diagnostic: a log line a frame with the first main-target draw's world-view-projection (c50-c53) "
+                    "and how many of the frame's main-target draws had a NaN or a value over 1e7 in it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(rr6_diag_geometry_frames, 0, "Banjo/Diagnostics",
+                     "Diagnostic (DiagGeometryNote): every this many frames, a log line for each indexed draw with hashes "
+                     "of its indices and converted vertices. 0: off")
+    .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_whole_buffers, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-26, API-level stage 2, Unleashed's bindings): a draw whose every stream "
                     "and whose index buffer have a converted copy of the whole buffer (made once the store cards show "
@@ -2148,6 +2158,35 @@ FloatConstants DrawFloatConstants(const u8 *state, const ReplayConstants *replay
   return c;
 }
 
+// rr6-nx (2026-11-03, rr6_diag_camera): a bad frame in the course's fly-by lasts one frame and captures miss most of them.
+// A line a frame with the first main-target draw's world-view-projection (c50-c53 in this game's vertex shaders), so a
+// frame whose camera differs from those around it can be found in the log; and how many draws had a broken matrix.
+void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t vs_hash, const Targets &targets) {
+  static const bool on = REXCVAR_GET(rr6_diag_camera);
+  if (!on || targets.width < 1000 || !targets.depth || !((used[50 / 32] >> (50 % 32)) & 1))
+    return;
+  float m[16];
+  bool bad = false;
+  for (u32 i = 0; i < 16; ++i) {
+    u32 word;
+    std::memcpy(&word, constants.Register(50 + i / 4) + (i % 4) * 4, 4);
+    word = __builtin_bswap32(word);
+    std::memcpy(&m[i], &word, 4);
+    bad |= !(std::abs(m[i]) <= 1e7f);
+  }
+  static uint64_t frame = UINT64_MAX;
+  static u32 draws = 0, broken = 0;
+  ++draws;
+  broken += bad;
+  if (frame == g_stream_cache_frame)
+    return;
+  RGPU_INFO("[camera] frame {} before: {} draws {} broken; vs {:016X} {} {} {} {} | {} {} {} {} | {} {} {} {} | {} {} {} {}",
+            g_stream_cache_frame, draws, broken, vs_hash, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
+            m[11], m[12], m[13], m[14], m[15]);
+  frame = g_stream_cache_frame;
+  draws = broken = 0;
+}
+
 // Float constants go by groups of four registers (64 bytes): the unit m_Pending
 // marks dirty, and the one a replayed draw takes from its snapshot or from the
 // running device (FloatConstants::Register), so a group's bytes are contiguous.
@@ -3743,6 +3782,7 @@ struct Geometry {
   u32 first_index = 0;
   i32 base_vertex = 0;
   u32 whole_base = 0;
+  const void *diag_indices = nullptr;  // rr6-nx (2026-11-03): DiagGeometryNote
 };
 
 // Reads 'count' guest indices into g_indices.
@@ -3937,6 +3977,7 @@ bool CachedIndexDraw(const IndexKey &key, const DrawCall &call, Geometry &g) {
   g.vertex_range = c.max_index + 1;
   g.indexed = true;
   g.index_count = c.index_count;
+  g.diag_indices = c.copy.cpu;  // rr6-nx (2026-11-03)
   g.index_view = plume::RenderIndexBufferView(
       c.copy.Ref(), c.bytes,
       c.wide ? plume::RenderFormat::R32_UINT : plume::RenderFormat::R16_UINT);
@@ -3992,6 +4033,9 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
   u32 lo = 0, max_index = 0;  // host indices are g_indices - lo, the largest max_index
   IndexKey index_key{};
   bool cacheable_indices = false;
+  // rr6-nx (2026-11-03, rr6_strip_markers): the strip's restart markers among g_indices, and the guest's marker value.
+  const bool strip = !expand && (call.primitive == kLineStrip || call.primitive == kTriangleStrip);
+  u32 markers = 0, guest_marker = 0xFFFFu;
   if (call.indexed) {
     const u8 *src = nullptr;
     bool is32 = false;
@@ -4018,6 +4062,7 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
       if (cacheable_indices && CachedIndexDraw(index_key, call, g))
         return true;
     }
+    guest_marker = is32 ? 0xFFFFFFFFu : 0xFFFFu;
     u32 hi = 0;
     if (!is32 && !expand) {
       // banjo-nx (2026-10-23, batch 6): read and ranged in one NEON pass (ReadIndices16WithRange).
@@ -4035,6 +4080,28 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
         lo = std::min(lo, index);
         hi = std::max(hi, index);
       }
+    }
+    // rr6-nx (2026-11-03, rr6_strip_markers, A/B 77): a strip's restart marker (the all-ones index of the guest format;
+    // plume restarts indexed strips at the host format's all-ones on every back end) is not a vertex. Taken into the
+    // range it made every strip with a cut read vertex 65535: the range became the buffer's tail (65536 vertices
+    // converted a draw), the host indices 32-bit, and 0xFFFF in a 32-bit index buffer restarts nothing on deko3d or
+    // Vulkan (their marker is 0xFFFFFFFF): the strip ran on through the cut and the cut's vertex read past the copy,
+    // the Switch's torn meshes and the fly-by's wedges. D3D12's cut value is 0xFFFF whatever the width, so the PC
+    // never showed it; a whole-buffer copy keeps the guest's 16-bit indices, so the Switch showed it only until the
+    // copy was made. The markers are left out of the range and each is rewritten to the host format's marker below.
+    if (strip && hi == guest_marker && banjo::renut_gpu::StripMarkersOn()) {
+      lo = UINT32_MAX;
+      hi = 0;
+      for (const u32 index : g_indices) {
+        if (index == guest_marker) {
+          ++markers;
+          continue;
+        }
+        lo = std::min(lo, index);
+        hi = std::max(hi, index);
+      }
+      if (lo == UINT32_MAX)
+        return false;  // markers only: nothing to draw
     }
     if (hi - lo >= kMaxDrawVertices)
       return false;
@@ -4070,6 +4137,17 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
     UploadAllocation alloc = Video::UploadsLocked().Allocate(bytes, 16);
     if (!alloc)
       return false;
+    // rr6-nx (2026-11-03, rr6_strip_markers): each marker becomes lo + the host marker, so the rebase below (index - lo,
+    // in u32, then narrowed) leaves the host format's marker: 0xFFFF for 16-bit host indices (never a vertex: max_index
+    // is below it); for 32-bit ones 0xFFFFFFFF, except on D3D12, whose cut value is 0xFFFF for every width (a 32-bit
+    // strip of over 65535 vertices with a cut would lose a real index 0xFFFF there: none seen in this game, whose
+    // index buffers are 16-bit). The cached copy (TrackIndices) is rebased from the same g_indices.
+    if (markers) {
+      const u32 host_marker = wide && UsesVulkanBindings() ? 0xFFFFFFFFu : 0xFFFFu;
+      for (u32 &index : g_indices)
+        if (index == guest_marker)
+          index = lo + host_marker;
+    }
     if (wide) {
       auto *out = static_cast<u32 *>(alloc.cpu);
       for (size_t i = 0; i < g_indices.size(); ++i)
@@ -4079,6 +4157,7 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
     }
     g.indexed = true;
     g.index_count = u32(g_indices.size());
+    g.diag_indices = alloc.cpu;  // rr6-nx (2026-11-03)
     g.index_view = plume::RenderIndexBufferView(
         alloc.ref, bytes, wide ? plume::RenderFormat::R32_UINT : plume::RenderFormat::R16_UINT);
     if (cacheable_indices)
@@ -5587,6 +5666,69 @@ bool BindStreams(const GuestDevice &device, const DrawCall &call, const ShaderRe
   const plume::RenderInputSlot zero_slot(kZeroStreamSlot, 0);
   SetVertexBuffer(cmd, zero_view, zero_slot);
   return true;
+}
+
+// rr6-nx (2026-11-03, rr6_diag_geometry_frames): the indexed draws of every Nth frame, with hashes of the guest's indices,
+// the host's and the converted vertices, to compare the PC's range path (clean) with the Switch's (torn meshes) by line.
+void DiagGeometryNote(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs, const u32 *shader_strides,
+                      const HostVertexLayout &layout, const Geometry &g, bool whole) {
+  static const int32_t every = REXCVAR_GET(rr6_diag_geometry_frames);
+  if (!every || !call.indexed || call.up_indices || g_stream_cache_frame % uint64_t(every))
+    return;
+  static uint64_t frame = UINT64_MAX;
+  static u32 lines = 0;
+  if (frame != g_stream_cache_frame) {
+    frame = g_stream_cache_frame;
+    lines = 0;
+  }
+  if (lines++ >= 300)
+    return;
+  const auto *ib = GuestPtr<const d3d::IndexBuffer>(device.U32(d3d::kDeviceOffsetIndexBuffer));
+  if (!ib)
+    return;
+  const u32 common = ib->resource.Common;
+  const bool is32 = (common & d3d::kIndexBufferCommon32Bit) != 0;
+  const u8 *index_src = AddressPtr(ib->Address);
+  if (!index_src || !ReadIndices(index_src + size_t(call.start_index) * (is32 ? 4 : 2), call.count, is32,
+                                 d3d::IndexBufferEndian(common)))
+    return;
+  const auto fnv = [](const void *data, size_t bytes) {
+    uint64_t h = 1469598103934665603ull;
+    const u8 *p = static_cast<const u8 *>(data);
+    for (size_t i = 0; i < bytes; ++i)
+      h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+  };
+  u32 lo = UINT32_MAX, hi = 0, resets = 0;
+  for (const u32 index : g_indices) {
+    lo = std::min(lo, index);
+    hi = std::max(hi, index);
+    resets += index == (is32 ? 0xFFFFFFFFu : 0xFFFFu);
+  }
+  const u32 host_size = g.index_view.format == plume::RenderFormat::R32_UINT ? 4u : 2u;
+  const uint64_t host_hash = g.diag_indices ? fnv(g.diag_indices, size_t(g.index_count) * host_size) : 0;
+  std::string line = fmt::format("[geom] f{} vs {:016X} prim {} n {} start {} base {} is32 {} lo {} hi {} resets {} "
+                                 "guest {:016X} host {} {} {:016X} first {} range {} whole {}",
+                                 g_stream_cache_frame, vs.hash, call.primitive, call.count, call.start_index,
+                                 call.base_vertex, is32 ? 1 : 0, lo, hi, resets, fnv(g_indices.data(), g_indices.size() * 4),
+                                 g.index_count, host_size, host_hash, g.first_vertex, g.vertex_range, whole ? 1 : 0);
+  static std::vector<u8> fresh;
+  for (u32 left = layout.used_mask; left; left &= left - 1) {
+    const u32 stream = u32(std::countr_zero(left));
+    const HostVertexStream &hs = layout.streams[stream];
+    if (!hs.used)
+      continue;
+    const StreamSource src = GetStreamSource(device, call, vs, shader_strides, stream);
+    const u32 first = src.stride ? g.first_vertex : 0;
+    u32 count = src.stride ? g.vertex_range : 1;
+    count = first < src.vertex_count ? std::min(count, src.vertex_count - first) : 0;
+    fresh.resize(size_t(count) * hs.host_stride);
+    if (count && src.data)
+      ConvertVertices(hs, src.data + size_t(first) * src.stride, src.stride, count, src.endian, fresh.data());
+    line += fmt::format(" | s{} stride {} host {} vertices {} count {} endian {} {:016X}", stream, src.stride,
+                        hs.host_stride, src.vertex_count, count, src.endian, fnv(fresh.data(), fresh.size()));
+  }
+  RGPU_INFO("{}", line);
 }
 
 // banjo-nx (2026-10-23, render-thread round): the stream cache keys BindStreams will look up for this draw (its strided
@@ -8522,6 +8664,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                          declaration->layout_hash, geometry, whole_copies);
   if (!whole && !PrepareGeometry(device, call, geometry))
     return FastMiss(kFastGeometry);
+  DiagGeometryNote(device, call, *vs, shader_strides, declaration->layout, geometry, whole);  // rr6-nx (2026-11-03)
   // banjo-nx (2026-10-27, render thread night, A/B 30): a whole-buffer draw whose vertex shader never reads the vertex
   // index draws with its base vertex (the hardware adds it to each index) from copies bound at their start, rather than
   // from copies bound at the base and a vertex index offset in the shared constants: the same vertices, without a
@@ -8999,6 +9142,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
   const FloatConstants vs_constants = DrawFloatConstants(device_state, replay, false);
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
+  DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
 #if defined(PLUME_DEKO3D)
   g_diag_draw_no_ps = !ps;  // banjo-nx (2026-10-28, diagnostic)
   PushFloatConstants(cmd, vs_constants, vs_used, g_bound.pushed_vs, vs->entry, g_pushed_buffers.address,
@@ -10423,6 +10567,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       return false;
     }
   }
+  DiagGeometryNote(device, call, *vs, shader_strides, declaration->layout, geometry, whole);  // rr6-nx (2026-11-03)
   // The host draws the vertex range in use from vertex 0 (indices rebased to
   // it in PrepareGeometry); the guest's r0.x is the vertex index itself.
   if (!call.tessellation)
@@ -10528,6 +10673,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   static constexpr u32 kNoRegisters[8] = {};
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
+  DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
   // banjo-nx (2026-10-19, banjo_deko3d_push_constants): pushed, except for draws point_sprite_gs expands (it reads
   // SharedConstants through its address).
 #if defined(PLUME_DEKO3D)

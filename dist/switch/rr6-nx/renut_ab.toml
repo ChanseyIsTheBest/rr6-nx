@@ -585,8 +585,9 @@ banjo_xma_frame_cache = false
 rr6_dlc_unlock_keys = false  # true: also load the 36 car unlock keys
 rr6_alpha_near_one = true  # false: the test of >= 1 exact, flickering trees on NVIDIA, A/B 74
 rr6_user_clip_plane = true  # false: the car reflects the wrong scene and no sky, A/B 76
+rr6_strip_markers = true  # false: torn meshes and wedges on the Switch (a strip restart marker drawn as a vertex), A/B 77
 rr6_fetch_over_pointer = true  # false: no bloom, lit surfaces a quarter too dark, A/B 75
-banjo_renut_ab_targets = "25,28,22,26,33,42,70,71,72,73,74,75,76,1"
+banjo_renut_ab_targets = "25,28,22,26,33,42,70,71,72,73,74,75,76,77,1"
 banjo_renut_ab_s = 30
 
 [input_p1]

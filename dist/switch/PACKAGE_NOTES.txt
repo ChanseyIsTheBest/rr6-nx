@@ -9,17 +9,33 @@ Copy COPY_TO_SD_switch_rr6-nx to sdmc:/switch/rr6-nx. Extract your disc into gam
 DLC is optional: put the packages under dlc/, in any folders. The first start then extracts about 1.9 GB next to your saves, so the
 first boot takes longer and needs the space.
 
-Console tests: the chrome car, wedges and black video screen
-------------------------------------------------------------
-The first console run showed faults Ryujinx did not: chrome car paint, streaked and huge black polygons in the course intro, a wrong polygon
-on the rock wall, and a black video screen on the tower. They look the same docked and handheld. Their cause is not known yet.
-tests/ holds renut.toml with suspects switched off. The NRO reads only renut.toml, so copy a test over it, then race the first course.
-  test1_all_suspects_off.toml      run this first: all four below off
+The wedges: fixed (2026-11-03 evening, rr6_strip_markers)
+----------------------------------------------------------
+The streaked and huge black polygons in the course intro, and the wrong polygon on the rock wall, were the renderer's: the game's meshes
+are triangle strips with 0xFFFF restart markers, and the draw path used until a mesh's whole-buffer copy exists counted the marker as a
+vertex. On deko3d that ran each strip on through its cuts, with the cut's vertex read as zeros (a triangle to the object's origin). The PC
+never showed it (Direct3D 12 cuts at 0xFFFF whatever the index width), and the emulator showed it only for a frame or two after each
+camera cut. Ryujinx with the shipped settings now shows 0 bad frames in 364 burst captures through the intro and the race. Please confirm
+on the console: the intro's three shots (tower, bridge, palms) and the race's first lap. It should also be faster: those draws converted
+65536 vertices each before. In renut_ab.toml it is target 77: the off half brings the wedges back.
+
+Console tests: the chrome car and the black video screen
+--------------------------------------------------------
+Still console-only: the chrome car paint (hard white and black patches, plates blown out, opponents too) and the black video screen on
+the tower. Ryujinx and the PC draw both right. The first suspect is now GPU ordering: the reflection map is drawn, resolved, warped into
+six cube faces and sampled by the car, and the tower's video is a texture uploaded every frame; Ryujinx runs each draw's work to the end
+before the next, the console's GPU does not. tests/ holds renut.toml with suspects switched off (or waits switched on). The NRO reads only
+renut.toml, so copy a test over it, then race the first course and look at the car and the tower screen.
+  test6_gpu_waits.toml             run this first: the GPU waits for idle at every render-to-texture hand-over and before every clear
+                                   (banjo_deko3d_read_wait, _write_wait, _clear_wait). Slower; if the car goes right, one of the three is it
+  test7_gpu_all_safe.toml          the waits plus Zcull, depth compression, barrier merging, lean barriers and the cached upload ring off,
+                                   and rr6_frames_ahead 0: everything the console's GPU does and Ryujinx does not emulate
+  test1_all_suspects_off.toml      the earlier set: tests 2-5 at once
   test2_clip_plane_off.toml        the reflection fix, rr6_user_clip_plane. The car should go matte
   test3_copies_off.toml            the machine copies, banjo_cpu_native_bulk
   test4_uniform_branches_off.toml  a shader compiler optimisation. Its shaders compile on the console, so expect a slower first race
   test5_frames_ahead_0.toml        the game waits for the render thread each frame, rr6_frames_ahead
-If test 1 leaves the faults exactly as they were, none of these is the cause and the rest can be skipped. If it clears any, run the others.
+If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 
 Which toml
@@ -31,9 +47,8 @@ renut_ab.toml     A/B: stay in one place for 10+ minutes, send logs/renut_001.lo
 What to test, most important first
 ----------------------------------
 1. Boot to a race. Logos, Pac-Man loader, title, World Xplorer, car select, first race.
-2. Large wedge-shaped polygons in the race. Seen ONCE in the emulator: emu4, capture at lap 00:32, big flat streaked shapes each side of
-   the road, over the rock wall on the first course. Not reproduced since, cause unknown. If you see them, note where, and whether
-   rr6_depth_bias = false in renut.toml makes them go.
+2. Large wedge-shaped polygons: fixed by rr6_strip_markers (see above). If any are left, note where, and run renut_ab.toml: target 77's
+   off half is the old behaviour.
 3. Overall brightness. banjo_renut_game_gamma is now on: the display's gamma ramp, which the reference applies and Renut did not. Menus went
    from 3 to 12 levels off the reference to under 1. In renut_ab.toml it is target 73: the off half is visibly brighter in the darks.
 4. Car reflections: the main thing to confirm. Fixed by rr6_user_clip_plane: the game's reflection map needs a clip plane Renut never applied.

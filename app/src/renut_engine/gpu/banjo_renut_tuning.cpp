@@ -366,6 +366,13 @@ REXCVAR_DEFINE_BOOL(rr6_user_clip_plane, true, "Banjo/Enhancements",
                     "need it, as the GPU and the emulated GPU clip with it; Renut stored it and never applied it. Off: "
                     "each half of the reflection map holds only the last of its two views, so the car reflects the "
                     "wrong scene and no sky. Costs one plane write per draw that has one on. In-run A/B target 76");
+REXCVAR_DEFINE_BOOL(rr6_strip_markers, true, "Banjo/Enhancements",
+                    "rr6-nx (2026-11-03): an indexed strip's restart markers (index 0xFFFF) are kept out of the vertex "
+                    "range a draw converts and rewritten to the host's marker, as the GPU and the emulated GPU cut "
+                    "the strip there. Off: as Renut had it, the marker counted as vertex 65535: the strip ran on through "
+                    "the cut with a vertex read past the copy (torn meshes and wedges on the Switch, where a 32-bit "
+                    "index buffer restarts only at 0xFFFFFFFF; the PC's D3D12 cuts at 0xFFFF for any width), and the "
+                    "range converted the buffer's tail (65536 vertices a draw). In-run A/B target 77");
 REXCVAR_DEFINE_BOOL(rr6_fetch_over_pointer, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): a draw after SetTexture(NULL) samples the texture its fetch constant still holds, "
                     "as the GPU and the emulated GPU do; Renut bound the null texture. Off: the game's bloom is lost, its "
@@ -506,6 +513,22 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_barrier_lean, true, "Banjo/Enhancements",
                     "the texture cache (only a read after a write needs it invalidated, and that read's transition "
                     "does it), and a texture going from one read layout to another needs no barrier at all. Same "
                     "pixels");
+// rr6-nx (2026-11-03, from sasrt-nx): console A/Bs for a fault Ryujinx cannot show (it runs no two draws' work at once).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_read_wait, false, "Banjo/Diagnostics",
+                    "deko3d renderer (sasrt-nx 2026-10-30, a console test): a texture moving to a read layout (rendered, "
+                    "then sampled) waits for the GPU to go idle and drops the texture cache itself (DkBarrier_Primitives), "
+                    "instead of deko3d's fragment barrier with the tiled cache's invalidate. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_write_wait, false, "Banjo/Diagnostics",
+                    "deko3d renderer (sasrt-nx 2026-10-30, a console test): a texture moving to a write layout (sampled, "
+                    "then rendered or cleared again) waits for the GPU to go idle (DkBarrier_Primitives) instead of "
+                    "deko3d's fragment barrier. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_clear_wait, false, "Banjo/Diagnostics",
+                    "deko3d renderer (sasrt-nx 2026-10-30, a console test): the GPU goes idle before each clear "
+                    "(DkBarrier_Primitives): a clear cannot start while draws before it still read the target. Read at "
+                    "start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_zcull, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): hierarchical depth culling (Zcull) on the queue: tiles a draw cannot "
                     "pass the depth test in are skipped before shading. Same pixels");
@@ -946,6 +969,7 @@ const char *AbName(int target) {
   case 73: return "banjo_renut_game_gamma (off half: the output without the display's ramp)";  // rr6-nx (2026-11-03)
   case 74: return "rr6_alpha_near_one (off half: the alpha test of >= 1 exact)";  // rr6-nx (2026-11-03)
   case 76: return "rr6_user_clip_plane (off half: no user clip plane, the reflection map holds the wrong views)";
+  case 77: return "rr6_strip_markers (off half: a strip's restart marker counts as vertex 65535: torn meshes on deko3d)";
   case 75: return "rr6_fetch_over_pointer (off half: a null texture pointer binds the null texture)";  // rr6-nx (2026-11-03)
   default: return "none";
   }
@@ -1414,6 +1438,9 @@ bool Deko3DZcullOn() { return REXCVAR_GET(banjo_deko3d_zcull); }
 bool Deko3DMsaaPositionsOn() { return REXCVAR_GET(banjo_deko3d_msaa_positions); }  // 2026-10-30, from sasrt-nx
 bool Deko3DA2cDitherOn() { return REXCVAR_GET(banjo_deko3d_a2c_dither); }
 bool Deko3DStripRestartOn() { return REXCVAR_GET(banjo_deko3d_strip_restart); }
+bool Deko3DReadWaitOn() { return REXCVAR_GET(banjo_deko3d_read_wait); }    // rr6-nx (2026-11-03, from sasrt-nx)
+bool Deko3DWriteWaitOn() { return REXCVAR_GET(banjo_deko3d_write_wait); }
+bool Deko3DClearWaitOn() { return REXCVAR_GET(banjo_deko3d_clear_wait); }
 bool Deko3DGpuRegionOn() { return REXCVAR_GET(banjo_deko3d_gpu_region); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
 bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }
@@ -1605,6 +1632,11 @@ bool FetchOverPointerOn() {
 bool UserClipPlaneOn() {
   static const bool on = REXCVAR_GET(rr6_user_clip_plane);
   return on && g_ab_off.load(std::memory_order_relaxed) != 76;
+}
+
+bool StripMarkersOn() {
+  static const bool on = REXCVAR_GET(rr6_strip_markers);
+  return on && g_ab_off.load(std::memory_order_relaxed) != 77;
 }
 
 bool GameGammaAbOff() {

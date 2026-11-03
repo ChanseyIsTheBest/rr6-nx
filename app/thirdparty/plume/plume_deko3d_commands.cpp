@@ -215,7 +215,8 @@ namespace plume {
             case RenderTextureLayout::DEPTH_READ:
             case RenderTextureLayout::GENERAL:
                 invalidate |= DkInvalidateFlags_Image;
-                mode = std::max(mode, DkBarrier_Fragments);
+                // sasrt-nx (2026-10-30, Deko3DOptions::readWait): or a wait for idle.
+                mode = std::max(mode, Deko3DGetOptions().readWait ? DkBarrier_Primitives : DkBarrier_Fragments);
                 break;
             case RenderTextureLayout::COPY_SOURCE:
             case RenderTextureLayout::COPY_DEST:
@@ -226,7 +227,8 @@ namespace plume {
             case RenderTextureLayout::PRESENT:
             case RenderTextureLayout::COLOR_WRITE:
             case RenderTextureLayout::DEPTH_WRITE:
-                mode = std::max(mode, DkBarrier_Fragments);
+                // sasrt-nx (2026-10-30, Deko3DOptions::writeWait): or a wait for idle.
+                mode = std::max(mode, Deko3DGetOptions().writeWait ? DkBarrier_Primitives : DkBarrier_Fragments);
                 // banjo-nx (2026-10-19, Deko3DOptions::leanBarriers): written next, not read: no invalidation.
                 if (!Deko3DGetOptions().leanBarriers)
                     invalidate |= DkInvalidateFlags_Image;
@@ -951,6 +953,11 @@ namespace plume {
                  color.b, color.a, rectsCount, rectsCount ? "" : " (whole target)");
         }
 #endif
+        // sasrt-nx (2026-10-30, Deko3DOptions::clearWait): the GPU idle before the clear.
+        if (Deko3DGetOptions().clearWait) {
+            flushBarriers();
+            dkCmdBufBarrier(cmd, DkBarrier_Primitives, 0);
+        }
         // deko3d's clears go through scissor 0 (it enables the clear's scissor flag): a rectangle is a scissor.
         if (rectsCount == 0) {
             const DkScissor all = {0, 0, 16384, 16384};
@@ -972,6 +979,11 @@ namespace plume {
     }
 
     void Deko3DCommandList::clearDepthStencil(bool clearDepth, bool clearStencil, float depthValue, uint32_t stencilValue, const RenderRect *rects, uint32_t rectsCount) {
+        // sasrt-nx (2026-10-30, Deko3DOptions::clearWait): the GPU idle before the clear.
+        if (Deko3DGetOptions().clearWait) {
+            flushBarriers();
+            dkCmdBufBarrier(cmd, DkBarrier_Primitives, 0);
+        }
         if (rectsCount == 0) {
             const DkScissor all = {0, 0, 16384, 16384};
             dkCmdBufSetScissors(cmd, 0, &all, 1);

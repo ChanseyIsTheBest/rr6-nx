@@ -236,6 +236,10 @@ bool Deko3DZcullOn();
 bool Deko3DMsaaPositionsOn();
 bool Deko3DA2cDitherOn();
 bool Deko3DStripRestartOn();
+// rr6-nx (2026-11-03, from sasrt-nx): banjo_deko3d_read_wait, _write_wait, _clear_wait (console tests).
+bool Deko3DReadWaitOn();
+bool Deko3DWriteWaitOn();
+bool Deko3DClearWaitOn();
 bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
 bool Deko3DBarrierMergeOn();
@@ -361,6 +365,7 @@ bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
 bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
 bool FetchOverPointerOn();  // rr6-nx (2026-11-03, rr6_fetch_over_pointer, A/B 75)
 bool UserClipPlaneOn();  // rr6-nx (2026-11-03, rr6_user_clip_plane, A/B 76)
+bool StripMarkersOn();   // rr6-nx (2026-11-03, rr6_strip_markers, A/B 77)
 bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 73
 float AlphaNearOne(uint32_t func, float threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
 bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state
