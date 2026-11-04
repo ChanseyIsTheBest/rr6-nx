@@ -63,7 +63,7 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    the road, the scenery, the palms, the cables, the sky sprites, the tower's video, the car. A
                                    longer stall at each window. Be in a race with the bridge, palms and the tower in view from
                                    about 2.5 minutes after launch. Send texture_dump/ with the logs
-  test13_everything.toml           all of the above at once, in one run (asked for 2026-11-04 07:15): tests 3-8, 10 and 11 switched
+  test13_everything.toml           all of the above at once, in one run (asked for 2026-11-04 07:15): tests 3-8, 10, 11 and 14 switched
                                    the safe way plus test 12's whole-frame dump (windows from 3 minutes, every 45 s, four frames),
                                    but not test 2 (the clip plane off makes the car matte by design, so the chrome could not be
                                    judged). Slow: every barrier a full wait, copies off, shaders recompiled on the console, the
