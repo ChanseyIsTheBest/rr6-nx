@@ -27,6 +27,17 @@ link and the draws were skipped; on the console they linked silently with the sp
 read from the wrong slots: a flat-coloured quad of a wrong size. If the hard rectangles in the sky were point sprites,
 they are gone now; anything the game draws as points (glows, sparks, sun, lens flares) may appear for the first time.
 
+Two runs that cover everything (2026-11-04 11:10)
+---------------------------------------------------
+  tests/all_A_everything_restart_ffffffff.toml   every switch of tests 3-8, 10, 11 and 14, the whole-frame dump from 90 s after launch
+                                                 (every 40 s, four frames), and the GPU's strip-cut index as 0xFFFFFFFF (test 16)
+  tests/all_B_everything_restart_ffff.toml       the same with the strip-cut index as 0xFFFF (test 17)
+The index register holds one value, so the two values are two runs; everything else is in both. Before either run delete
+deko3d_shaders.bin from the SD's rr6-nx folder, so the shader switches really recompile the shaders (a slow first race; put
+the file back afterwards). Be in a race by 90 s and stay in it past 3 minutes so the dump's windows come. Send logs/ and
+texture_dump/ from each, with a shot of the intro's cables and of the car. Not in them: test 2 (a matte car by design) and
+test 15 (restart off: the control).
+
 Console tests: the chrome car and the black video screen
 --------------------------------------------------------
 Still console-only: the chrome car paint (hard white and black patches, plates blown out, opponents too) and the black video screen on
