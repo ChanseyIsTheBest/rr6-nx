@@ -1,0 +1,5 @@
+gpuprobe.nro
+*.elf
+*.nacp
+build/
+romfs/shaders/
