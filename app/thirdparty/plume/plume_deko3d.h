@@ -865,6 +865,10 @@ namespace plume {
         // rr6-nx (2026-11-04, console test 10): colour targets without hardware compression (Ryujinx ignores it, so
         // only the console can show a compressed target sampled, copied or uploaded into wrongly).
         bool colorCompression = true;
+        // rr6-nx (2026-11-04, console tests 16 and 17): the primitive restart index written for an indexed strip: 0 the
+        // bound index format's all-ones (as now), 1 always 0xFFFFFFFF, 2 always 0xFFFF. Ryujinx ignores the register
+        // (its Vulkan back end restarts at the index type's maximum), the hardware compares it.
+        unsigned restartIndexMode = 0;
         bool zcull = false;
         // A pipeline's vertex shader gets specialization constant 905 (when it declares it), the locations its pixel
         // shader reads of the ones it writes (none without a pixel shader; not with a geometry shader): banjo-nx's

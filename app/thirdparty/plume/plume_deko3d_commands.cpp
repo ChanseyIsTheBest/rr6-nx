@@ -506,7 +506,9 @@ namespace plume {
         const DkPrimitive prim = graphicsPipeline->primitive;
         uint32_t restart = 0;
         if ((prim == DkPrimitive_TriangleStrip || prim == DkPrimitive_LineStrip) && Deko3DGetOptions().stripRestart) {
-            restart = boundIndexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : boundIndexFormat == DkIdxFormat_Uint8 ? 0xFFu : 0xFFFFu;
+            const unsigned mode = Deko3DGetOptions().restartIndexMode;  // rr6-nx (2026-11-04): console tests 16 and 17
+            restart = mode == 1 ? 0xFFFFFFFFu : mode == 2 ? 0xFFFFu
+                   : boundIndexFormat == DkIdxFormat_Uint32 ? 0xFFFFFFFFu : boundIndexFormat == DkIdxFormat_Uint8 ? 0xFFu : 0xFFFFu;
             ++statStripRestarts;
         }
         if (restart != boundRestart) {

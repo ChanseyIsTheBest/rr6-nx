@@ -454,6 +454,7 @@ void InstallShaderCache() {
   options.clearWait = Deko3DClearWaitOn();
   options.fullBarriers = Deko3DFullBarriersOn();
   options.colorCompression = Deko3DColorCompressionOn();  // rr6-nx (2026-11-04): console test 10
+  options.restartIndexMode = unsigned(std::max(0, Deko3DRestartIndexMode()));  // console tests 16 and 17
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
   options.mergeBarriers = Deko3DBarrierMergeOn();  // banjo-nx (2026-10-19, GPU)

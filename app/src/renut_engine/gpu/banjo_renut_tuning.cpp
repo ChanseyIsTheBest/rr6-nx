@@ -539,6 +539,11 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_color_compression, true, "Banjo/Enhancements",
                     "(bandwidth). Ryujinx ignores it, so a compressed target sampled, copied or uploaded into wrongly "
                     "shows only on the console: off there to test. Read at start")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_deko3d_restart_index, 0, "Banjo/Diagnostics",
+                     "deko3d renderer (rr6-nx 2026-11-04, console tests 16 and 17): the primitive restart index written for an "
+                     "indexed strip: 0 the index format's all-ones, 1 always 0xFFFFFFFF, 2 always 0xFFFF. Ryujinx ignores the "
+                     "register, the hardware compares it. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_deko3d_zcull, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): hierarchical depth culling (Zcull) on the queue: tiles a draw cannot "
                     "pass the depth test in are skipped before shading. Same pixels");
@@ -1453,6 +1458,7 @@ bool Deko3DWriteWaitOn() { return REXCVAR_GET(banjo_deko3d_write_wait); }
 bool Deko3DClearWaitOn() { return REXCVAR_GET(banjo_deko3d_clear_wait); }
 bool Deko3DFullBarriersOn() { return REXCVAR_GET(banjo_deko3d_full_barriers); }
 bool Deko3DColorCompressionOn() { return REXCVAR_GET(banjo_deko3d_color_compression); }  // rr6-nx (2026-11-04)
+int Deko3DRestartIndexMode() { return REXCVAR_GET(banjo_deko3d_restart_index); }  // rr6-nx (2026-11-04)
 bool Deko3DGpuRegionOn() { return REXCVAR_GET(banjo_deko3d_gpu_region); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
 bool Deko3DBarrierLeanOn() { return REXCVAR_GET(banjo_deko3d_barrier_lean); }

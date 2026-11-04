@@ -64,7 +64,7 @@ renut.toml, so copy a test over it, then race the first course and look at the c
                                    longer stall at each window. Be in a race with the bridge, palms and the tower in view from
                                    about 2.5 minutes after launch. Send texture_dump/ with the logs
   test13_everything.toml           all of the above at once, in one run (asked for 2026-11-04 07:15): tests 3-8, 10, 11 and 14 switched
-                                   the safe way plus test 12's whole-frame dump (windows from 3 minutes, every 45 s, four frames),
+                                   the safe way plus test 12's whole-frame dump (windows from 90 s, every 40 s, four frames),
                                    but not test 2 (the clip plane off makes the car matte by design, so the chrome could not be
                                    judged). Slow: every barrier a full wait, copies off, shaders recompiled on the console, the
                                    game waiting on the render thread. If the car and the sky go right here, one of the switches
@@ -78,6 +78,17 @@ renut.toml, so copy a test over it, then race the first course and look at the c
   test15_no_strip_restart.toml     the control for test 14: the GPU's primitive restart off altogether (banjo_deko3d_strip_restart).
                                    If the intro looks exactly as in the plain run, the restart was never taking effect on the
                                    hardware; if it looks worse, it was partly working. Run after test 14, not instead of it
+  test16_restart_all_ones.toml     the intro's cables and fronds again: the GPU's strip cut index written as 0xFFFFFFFF for every strip
+  test17_restart_ffff.toml         ... and as 0xFFFF for every strip. Ryujinx ignores this register (its Vulkan back end cuts at the index
+                                   type's maximum whatever the value), the hardware compares it; today it is the index format's all-ones.
+                                   If 16 or 17 draws the intro's cables and fronds right, that is the hardware's rule and it becomes the default
+  A note on test 11 and the shader cache: the console served every shader from the prebuilt cache (deko3d_shaders.bin next to
+  the NRO; the log says "uam 0 compiles"), so the shader-optimisation switches changed nothing in your 10:25 run. To test them,
+  delete deko3d_shaders.bin from the SD's rr6-nx folder before running test 11 (or 13): every shader then compiles on the
+  console at first use (a slow first race) with the switches honoured. Put the file back afterwards for the normal speed.
+  A note on your 07:44 "plain" run: its log shows every barrier a full one, so the SD's renut.toml was still a full-barrier test
+  toml from the earlier package; it was not the shipped configuration. The faults were the same under it, which rules out GPU
+  ordering just as test 13 did.
 If a test leaves the car exactly as it was, its keys are not the cause. If it clears the car, say which test, and I narrow it down.
 Keep a copy of renut.toml first, to go back. Send logs/renut_001.log and logs/rex/rex_profile.log, and say which test each is from.
 Whatever you run, the shipped renut.toml now writes a "[paint]" line a second per car-paint shader with the reflection constants the
