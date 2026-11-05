@@ -2,7 +2,7 @@
 """rr6-nx (2026-11-04): the console over the network, through two sysmodules the user runs under Atmosphere:
 sys-botbase (masagrator's fork; TCP 6000: controller presses, screenshots, memory) and ftpd (TCP 5000: the SD card).
 Outbound connections only; nothing on this PC listens.
-The user's rule (2026-11-05): on the SD card only /switch/rr6-nx may be touched. Every ftp path is checked against it and
+The user's rule (2026-11-05): on the SD card only /switch/rr6-nx may be touched, plus the GPU probe's two files (SD_PROBE). Every ftp path is checked against it and
 refused otherwise, relative paths are taken from it, and raw takes only commands that cannot reach the card or write memory.
 ftp logs in anonymously, and sys-ftpd-light has that off by default: it needs anonymous:=1 in the card's
 /config/sys-ftpd/config.ini. Never run against a console yet.
@@ -33,12 +33,17 @@ from ftplib import FTP
 
 BOT_PORT, FTP_PORT = 6000, 5000
 SD_ROOT = '/switch/rr6-nx'
+# The user's one exception (2026-11-05): the GPU probe and its results file, these exact paths and nothing else.
+# Git Bash rewrites them unless MSYS_NO_PATHCONV=1 is set for the command.
+SD_PROBE = ('/switch/gpuprobe.nro', '/gpuprobe.txt')
 RAW_ALLOWED = ('click', 'press', 'release', 'setStick', 'pixelPeek', 'getTitleID', 'getVersion', 'getHeapBase', 'peekAbsolute',
                'configure')
 
 
 def sd_path(path=''):
     """The path on the card, refused unless it is inside SD_ROOT."""
+    if path in SD_PROBE:
+        return path
     if ':' in path:  # Git Bash turns /x into C:/.../x before this sees it: never take that for a path in the folder
         sys.exit('refused: %s looks like a Windows path (use a path relative to %s)' % (path, SD_ROOT))
     full = posixpath.normpath(posixpath.join(SD_ROOT, path.replace('\\', '/')))
