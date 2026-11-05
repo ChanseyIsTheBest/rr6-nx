@@ -122,6 +122,16 @@ REXCVAR_DEFINE_BOOL(banjo_renut_fetch_data_unread, true, "Banjo/Enhancements",
                     "Renut's renderer on deko3d: a draw whose shaders fetch nothing by address gets fetch data address "
                     "and size 0 (they never read them) instead of a new allocation's, and no fetch binding")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_clear_magenta, false, "Banjo/Diagnostics",
+                    "Diagnostic (rr6-nx 2026-11-05): the scene's 1440x800 colour target cleared to magenta at its depth clear: what "
+                    "no draw reaches shows magenta instead of an older frame")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(rr6_diag_gpu_counters, 0, "Banjo/Diagnostics",
+                     "Diagnostic (rr6-nx 2026-11-05, deko3d): every this many frames, a log line per draw with the GPU's own counters: "
+                     "primitives assembled, vertex shaders run, primitives into and out of the clipper, fragments shaded, samples passed. "
+                     "0: off")
+    .range(0, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // rr6-nx (2026-11-03): DiagCameraNote, below.
 REXCVAR_DEFINE_BOOL(rr6_diag_camera, false, "Banjo/Diagnostics",
                     "Diagnostic: a log line a frame with the first main-target draw's world-view-projection (c50-c53) "
@@ -1647,6 +1657,8 @@ plume::RenderPrimitiveTopology Topology(u32 primitive) {
   case kLineLoop:
     return plume::RenderPrimitiveTopology::LINE_STRIP;
   case kTriangleStrip:
+    if (banjo::renut_gpu::StripListsOn())  // rr6-nx (2026-11-05): PrepareGeometry made it a list
+      return plume::RenderPrimitiveTopology::TRIANGLE_LIST;
     return plume::RenderPrimitiveTopology::TRIANGLE_STRIP;
   default:  // lists, and fans / quads expanded to lists
     return plume::RenderPrimitiveTopology::TRIANGLE_LIST;
@@ -2181,6 +2193,21 @@ FloatConstants DrawFloatConstants(const u8 *state, const ReplayConstants *replay
 // A line a frame with the first main-target draw's world-view-projection (c50-c53 in this game's vertex shaders), so a
 // frame whose camera differs from those around it can be found in the log; and how many draws had a broken matrix.
 void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t vs_hash, const Targets &targets) {
+  // rr6-nx (2026-11-05): with rr6_diag_geometry_frames, c50-c53 of every main-target draw of the frames its [geom]
+  // lines are in: a mesh drawn in the wrong place has either another matrix than its neighbours or the same one.
+  static const int32_t geometry_every = REXCVAR_GET(rr6_diag_geometry_frames);
+  if (geometry_every && !(g_stream_cache_frame % uint64_t(geometry_every)) && targets.width >= 1000 &&
+      ((used[50 / 32] >> (50 % 32)) & 1)) {
+    float w[16];
+    for (u32 i = 0; i < 16; ++i) {
+      u32 word;
+      std::memcpy(&word, constants.Register(50 + i / 4) + (i % 4) * 4, 4);
+      word = __builtin_bswap32(word);
+      std::memcpy(&w[i], &word, 4);
+    }
+    RGPU_INFO("[wvp] f{} vs {:016X} {} {} {} {} | {} {} {} {} | {} {} {} {} | {} {} {} {}", g_stream_cache_frame, vs_hash,
+              w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15]);
+  }
   static const bool on = REXCVAR_GET(rr6_diag_camera);
   if (!on || targets.width < 1000 || !targets.depth || !((used[50 / 32] >> (50 % 32)) & 1))
     return;
@@ -2204,6 +2231,36 @@ void DiagCameraNote(const FloatConstants &constants, const u32 *used, uint64_t v
             m[11], m[12], m[13], m[14], m[15]);
   frame = g_stream_cache_frame;
   draws = broken = 0;
+}
+
+// rr6-nx (2026-11-05, rr6_diag_gpu_counters): plume's Deko3DDiagCounters around every draw of one frame in so many.
+void DiagGpuCounters(uint64_t vs_hash, uint64_t ps_hash) {
+#if defined(PLUME_DEKO3D)
+  static const int32_t every = REXCVAR_GET(rr6_diag_gpu_counters);
+  if (!every)
+    return;
+  static uint64_t frame = UINT64_MAX, read_at = UINT64_MAX, captured = 0;
+  if (frame != g_stream_cache_frame) {
+    frame = g_stream_cache_frame;
+    if (plume::Deko3DDiagCountersStop())
+      read_at = frame + 8;  // the frames in flight finished by then
+    if (read_at != UINT64_MAX && frame >= read_at) {
+      static uint64_t row_frame;
+      row_frame = captured;
+      plume::Deko3DDiagCountersRead([](const plume::Deko3DDrawCounters &r, uint32_t i) {
+        RGPU_INFO("[gpuctr] f{} d{} vs {:016X} ps {:016X} w {} prim {} n {} inst {} | in {} vs {} clipin {} clipout {} frag {} pass {}", row_frame, i,
+                  r.vs, r.ps, r.width, r.primitive, r.count, r.instances, r.inputPrimitives, r.vertexShaders, r.clipperIn, r.clipperOut,
+                  r.fragments, r.samples);
+      });
+      read_at = UINT64_MAX;
+    }
+    if (read_at == UINT64_MAX && !(frame % uint64_t(every))) {
+      captured = frame;
+      plume::Deko3DDiagCountersArm();
+    }
+  }
+  plume::Deko3DDiagCountersTag(vs_hash, ps_hash);
+#endif
 }
 
 // rr6-nx (2026-11-03, rr6_diag_paint_frames): the console's car paint looks like chrome (hard white and black patches) where
@@ -4230,11 +4287,28 @@ void RebaseIndices16(uint16_t *out, u32 lo) {
 }
 
 // Rewrites g_indices for fans and quads as triangle lists.
-void ExpandIndices(u32 primitive) {
+void ExpandIndices(u32 primitive, u32 strip_marker = UINT32_MAX) {
   // banjo-nx (2026-10-19, render-thread proposal 20): a scratch vector kept between draws (swapped with g_indices, so
   // both keep their capacity), not a new one per fan or quad draw.
   static std::vector<u32> out;
-  if (primitive == kTriangleFan) {
+  if (primitive == kTriangleStrip) {  // rr6-nx (2026-11-05, rr6_strip_lists): each cut starts a new strip
+    out.clear();
+    u32 run = 0;
+    for (size_t i = 0; i < g_indices.size(); ++i) {
+      if (g_indices[i] == strip_marker) {
+        run = 0;
+        continue;
+      }
+      if (run >= 2) {
+        const u32 a = g_indices[i - 2], b = g_indices[i - 1], c = g_indices[i];
+        out.push_back((run & 1) ? b : a);
+        out.push_back((run & 1) ? a : b);
+        out.push_back(c);
+      }
+      ++run;
+    }
+    g_indices.swap(out);
+  } else if (primitive == kTriangleFan) {
     const size_t n = g_indices.size() > 2 ? g_indices.size() - 2 : 0;
     out.resize(n * 3);
     for (size_t i = 2, o = 0; i < g_indices.size(); ++i, o += 3) {
@@ -4397,7 +4471,8 @@ void TrackIndices(const IndexKey &key, u32 lo, u32 max_index) {
 }
 
 bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &g) {
-  const bool expand = call.primitive == kTriangleFan || call.primitive == kQuadList;
+  const bool expand = call.primitive == kTriangleFan || call.primitive == kQuadList ||
+                      (call.primitive == kTriangleStrip && banjo::renut_gpu::StripListsOn());  // rr6-nx (2026-11-05)
   static uint32_t rect_logged = 0;
   if (call.primitive == kRectangleList && !State().rectangle_list_gs && LogLimited(rect_logged, 1))
     RGPU_WARN("Rectangle lists are drawn as triangle lists");
@@ -4444,7 +4519,7 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
       if (!ReadIndices(src, call.count, is32, endian))
         return false;
       if (expand)
-        ExpandIndices(call.primitive);
+        ExpandIndices(call.primitive, is32 ? 0xFFFFFFFFu : 0xFFFFu);
       if (g_indices.empty())
         return false;
       lo = UINT32_MAX;
@@ -5586,7 +5661,8 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
   // A/B target 22 (banjo_renut_ab_targets) turns it off for a half.
   if (!on || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 22 || !IsDeko3D() || call.tessellation ||
       call.up_vertices || call.up_indices || !call.count || call.primitive == kTriangleFan ||
-      call.primitive == kQuadList || DrawSummaryOf(vs).skin_once) {
+      call.primitive == kQuadList || (call.primitive == kTriangleStrip && banjo::renut_gpu::StripListsOn()) ||
+      DrawSummaryOf(vs).skin_once) {
     return false;
   }
   // banjo-nx (2026-10-26, API-level stage 4): with exports pending, a draw none of whose buffers a pending export
@@ -6053,7 +6129,7 @@ void DiagGeometryNote(const GuestDevice &device, const DrawCall &call, const Sha
     frame = g_stream_cache_frame;
     lines = 0;
   }
-  if (lines++ >= 300)
+  if (lines++ >= 4000)  // rr6-nx (2026-11-05): every draw of the frame (300 before; a race frame has about 2000)
     return;
   const auto *ib = GuestPtr<const d3d::IndexBuffer>(device.U32(d3d::kDeviceOffsetIndexBuffer));
   if (!ib)
@@ -6073,9 +6149,12 @@ void DiagGeometryNote(const GuestDevice &device, const DrawCall &call, const Sha
   };
   u32 lo = UINT32_MAX, hi = 0, resets = 0;
   for (const u32 index : g_indices) {
+    if (index == (is32 ? 0xFFFFFFFFu : 0xFFFFu)) {  // rr6-nx (2026-11-05): the range without the markers
+      ++resets;
+      continue;
+    }
     lo = std::min(lo, index);
     hi = std::max(hi, index);
-    resets += index == (is32 ? 0xFFFFFFFFu : 0xFFFFu);
   }
   const u32 host_size = g.index_view.format == plume::RenderFormat::R32_UINT ? 4u : 2u;
   const uint64_t host_hash = g.diag_indices ? fnv(g.diag_indices, size_t(g.index_count) * host_size) : 0;
@@ -6091,8 +6170,12 @@ void DiagGeometryNote(const GuestDevice &device, const DrawCall &call, const Sha
     if (!hs.used)
       continue;
     const StreamSource src = GetStreamSource(device, call, vs, shader_strides, stream);
-    const u32 first = src.stride ? g.first_vertex : 0;
+    u32 first = src.stride ? g.first_vertex : 0;
     u32 count = src.stride ? g.vertex_range : 1;
+    if (whole && src.stride && lo <= hi) {  // rr6-nx (2026-11-05): a whole-buffer draw: the vertices its indices reach
+      first = u32(int64_t(call.base_vertex) + lo);
+      count = hi - lo + 1;
+    }
     count = first < src.vertex_count ? std::min(count, src.vertex_count - first) : 0;
     fresh.resize(size_t(count) * hs.host_stride);
     if (count && src.data)
@@ -9351,9 +9434,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       booleans[i] = __builtin_bswap32(word);
     }
     const u32 color_control = dev.m_ControlPacket.ColorControl;
-    u32 func = (color_control & 8) ? (color_control & 7) : 7;
+    u32 func = (color_control & 8) && !banjo::renut_gpu::AlphaAlwaysOn() ? (color_control & 7) : 7;  // rr6-nx (2026-11-05)
     float threshold = dev.m_ValuesPacket.AlphaRef;
-    if (func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
+    if (func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn() && !banjo::renut_gpu::AlphaAlwaysOn()) {
       const HostSurface *first = targets.color_count ? targets.colors[0] : targets.depth;
       if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1) {
         func = 6;
@@ -9515,6 +9598,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const FloatConstants vs_constants = DrawFloatConstants(device_state, replay, false);
   const FloatConstants ps_constants = DrawFloatConstants(device_state, replay, true);
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
+  DiagGpuCounters(vs->hash, ps ? ps->hash : 0);  // rr6-nx (2026-11-05)
   if (ps) {
     DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
     DiagTextureDumpLocked(device, ps->hash);
@@ -10828,11 +10912,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   }
   SetShared(sc, sc.booleans, booleans);  // banjo-nx (2026-10-26): its line marked only when they changed
   const u32 color_control = dev.m_ControlPacket.ColorControl;
-  u32 alpha_test_func = (color_control & 8) ? (color_control & 7) : 7;
+  u32 alpha_test_func = (color_control & 8) && !banjo::renut_gpu::AlphaAlwaysOn() ? (color_control & 7) : 7;  // rr6-nx (2026-11-05)
   float alpha_threshold = dev.m_ValuesPacket.AlphaRef;
   // banjo-nx (2026-10-26): this draw's function (the kept block's sc.alpha_test_func is the draw before's: read here
   // since API-level stage 1, every other alpha-to-coverage draw lost its test, the console's title-screen grass cards).
-  if (alpha_test_func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
+  if (alpha_test_func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn() && !banjo::renut_gpu::AlphaAlwaysOn()) {
     // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): alpha to coverage on a single-sample target is an alpha
     // test at 0.5 (MakeKey leaves the pipeline's alpha to coverage off for it). NVIDIA GPUs dither alpha to coverage
     // without samples: the checker-patterned grass, fur and foliage edges of the console and Ryujinx runs.
@@ -11051,6 +11135,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   const u32 *vs_used = vs->entry ? vs->entry->floatConstants : kAllRegisters;
   const u32 *ps_used = !ps ? kNoRegisters : ps->entry ? ps->entry->floatConstants : kAllRegisters;
   DiagCameraNote(vs_constants, vs_used, vs->hash, targets);  // rr6-nx (2026-11-03)
+  DiagGpuCounters(vs->hash, ps ? ps->hash : 0);  // rr6-nx (2026-11-05)
   if (ps) {
     DiagPaintNote(device.dev(), ps_constants, vs->hash, ps->hash, targets);  // rr6-nx (2026-11-03)
     DiagTextureDumpLocked(device, ps->hash);
@@ -12086,6 +12171,12 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
   plume::RenderCommandList *cmd = State().command_list;
   const plume::RenderRect host_rect = ScaleRect(rect, t.scale);
   const plume::RenderColor clear_color(color[0], color[1], color[2], color[3]);
+  // rr6-nx (2026-11-05, rr6_diag_clear_magenta): the scene's colour target is never cleared by the game (its sky covers it). A
+  // pixel nothing draws keeps an old frame, which reads as a window onto another view. Cleared to magenta at the
+  // depth clear, such a pixel is magenta.
+  static const bool diag_magenta = REXCVAR_GET(rr6_diag_clear_magenta);
+  if (diag_magenta && (flags & 0x10) && !(flags & 1) && t.color_count && t.width == 1440)
+    cmd->clearColor(0, plume::RenderColor(1.0f, 0.0f, 1.0f, 1.0f), &host_rect, 1);
   // banjo-nx (2026-10-19, render-thread proposal 20): scratch vectors kept between clears (render thread only).
   static std::vector<HostSurface *> aliases;
   static std::vector<HostSurface *> found;

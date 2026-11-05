@@ -12,6 +12,7 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -57,6 +58,9 @@ REXCVAR_DEFINE_INT32(masseffect_io_warning_ms, 8, "Filesystem",
 REXCVAR_DEFINE_INT32(masseffect_io_us_per_kb, 0, "Filesystem",
                      "Diagnostic (Mac): every NtReadFile sleeps this many microseconds per KiB read after the read, to "
                      "emulate the Switch SD card (~100 = 13 ms per 128 KiB); 0 = off.");
+REXCVAR_DEFINE_BOOL(rr6_diag_read_crc, false, "Filesystem",
+                    "Diagnostic (rr6-nx 2026-11-05): a log line per NtReadFile with the CRC-32 of the bytes it left in guest "
+                    "memory (tools/check_read_crc.py compares them with the game's files on the PC).");
 REXCVAR_DEFINE_INT32(masseffect_io_summary_s, 15, "Filesystem",
                      "How many seconds between [io] summaries (0 = never).");
 
@@ -591,6 +595,23 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
                           &bytes_read, apc_context.guest_address());
       if (const int32_t us_kb = REXCVAR_GET(masseffect_io_us_per_kb); us_kb > 0 && bytes_read) {
         std::this_thread::sleep_for(std::chrono::microseconds(uint64_t(us_kb) * bytes_read / 1024));
+      }
+      if (REXCVAR_GET(rr6_diag_read_crc) && bytes_read) {  // rr6-nx (2026-11-05)
+        static const auto table = [] {
+          std::array<uint32_t, 256> t{};
+          for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k)
+              c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[i] = c;
+          }
+          return t;
+        }();
+        const auto *p = REX_KERNEL_MEMORY()->TranslateVirtual<const uint8_t*>(buffer.guest_address());
+        uint32_t crc = ~0u;
+        for (uint32_t i = 0; i < bytes_read; ++i)
+          crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+        REXKRNL_INFO("[readcrc] {} {} {} {:08X}", file->path(), displacement, bytes_read, ~crc);
       }
       const uint64_t io_us_end = NowUs();
       NoteRead(io_us_end - io_us_start, bytes_read, file->path(), displacement);

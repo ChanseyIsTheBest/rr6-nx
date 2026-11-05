@@ -24,6 +24,23 @@ namespace plume {
 
     static constexpr uint32_t alignUp(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 
+    // rr6-nx (2026-11-05, rr6_diag_gpu_counters): Deko3DDiagCountersArm's capture.
+    namespace {
+    constexpr DkCounter kDiagCounters[6] = {DkCounter_InputPrimitives, DkCounter_VertexShaderInvocations, DkCounter_ClipperInputPrimitives,
+                                            DkCounter_ClipperOutputPrimitives, DkCounter_FragmentShaderInvocations, DkCounter_SamplesPassed};
+    constexpr uint32_t kDiagMaxDraws = 6000;
+    struct DiagCapture {
+        DkMemBlock block = nullptr;
+        const uint8_t *cpu = nullptr;
+        DkGpuAddr gpu = 0;
+        bool armed = false, closing = false;
+        uint32_t used = 0;
+        uint64_t vs = 0, ps = 0;
+        Deko3DDrawCounters rows[kDiagMaxDraws];
+    };
+    DiagCapture *g_diagCapture = nullptr;
+    }
+
     // The push constants' UBO binding in every stage, and the address window's storage binding (tools/deko3d_glsl.py).
     static constexpr uint32_t PushUboSlot = 5;
     static constexpr uint32_t TexSizeUboSlot = 3;  // banjo-nx (2026-10-19, txq)
@@ -152,6 +169,12 @@ namespace plume {
         texSizeValid = 0;
         // Whatever the GPU holds of descriptors and shader code from before is dropped.
         dkCmdBufBarrier(cmd, DkBarrier_None, DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
+        if (const int clip = Deko3DGetOptions().userClipEnable; clip >= 0) {  // rr6-nx (2026-11-05): see Deko3DOptions
+            const uint32_t words[2] = {(1u << 29) | (1u << 16) | 0x544u, uint32_t(clip)};
+            dkCmdBufReplayCmds(cmd, words, 2);
+        }
+        if (Deko3DGetOptions().l2AtBegin)  // rr6-nx (2026-11-05): a console test
+            dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
         descriptorEpoch = currentEpoch();
         seenDescriptors = device->descriptorEpoch.load(std::memory_order_relaxed);  // banjo-nx (2026-10-28)
         seenCode = device->codeEpoch.load(std::memory_order_relaxed);
@@ -482,6 +505,85 @@ namespace plume {
         }
     }
 
+    // rr6-nx (2026-11-05, rr6_diag_gpu_counters): the counters before this draw; their difference to the next report is its own.
+    static void diagCountersAt(DkCmdBuf cmd, Deko3DDevice *device, const Deko3DFramebuffer *fb, uint32_t primitive, uint32_t count, uint32_t instances) {
+        DiagCapture *d = g_diagCapture;
+        if (!d->block) {
+            d->block = device->makeBlock(alignUp(sizeof(uint64_t) * 2 * 6 * (kDiagMaxDraws + 1), DK_MEMBLOCK_ALIGNMENT),
+                                         DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "gpu counters");
+            if (!d->block) {
+                d->armed = d->closing = false;
+                return;
+            }
+            d->cpu = static_cast<const uint8_t *>(dkMemBlockGetCpuAddr(d->block));
+            d->gpu = dkMemBlockGetGpuAddr(d->block);
+        }
+        const auto report = [&](uint32_t row) {
+            for (uint32_t c = 0; c < 6; ++c)
+                dkCmdBufReportCounter(cmd, kDiagCounters[c], d->gpu + uint64_t(row) * 96 + c * 16);
+        };
+        if (d->closing) {  // the report that ends the last draw, and everything out of the L2 for the CPU
+            report(d->used);
+            dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+            d->closing = false;
+            return;
+        }
+        if (!d->armed || d->used >= kDiagMaxDraws)
+            return;
+        report(d->used);
+        Deko3DDrawCounters &r = d->rows[d->used++];
+        r.vs = d->vs;
+        r.ps = d->ps;
+        r.width = fb ? fb->width : 0;
+        r.primitive = primitive;
+        r.count = count;
+        r.instances = instances;
+    }
+
+    void Deko3DDiagCountersArm() {
+        if (!g_diagCapture)
+            g_diagCapture = new DiagCapture();
+        g_diagCapture->armed = true;
+        g_diagCapture->closing = false;
+        g_diagCapture->used = 0;
+    }
+
+    void Deko3DDiagCountersTag(uint64_t vs, uint64_t ps) {
+        if (g_diagCapture) {
+            g_diagCapture->vs = vs;
+            g_diagCapture->ps = ps;
+        }
+    }
+
+    bool Deko3DDiagCountersStop() {
+        if (!g_diagCapture || !g_diagCapture->armed)
+            return false;
+        g_diagCapture->armed = false;
+        g_diagCapture->closing = true;
+        return true;
+    }
+
+    void Deko3DDiagCountersRead(void (*row)(const Deko3DDrawCounters &, uint32_t index)) {
+        DiagCapture *d = g_diagCapture;
+        if (!d || !d->cpu)
+            return;
+        const auto value = [&](uint32_t r, uint32_t c) {
+            uint64_t v;
+            std::memcpy(&v, d->cpu + uint64_t(r) * 96 + c * 16, 8);
+            return v;
+        };
+        for (uint32_t i = 0; i < d->used; ++i) {
+            Deko3DDrawCounters out = d->rows[i];
+            out.inputPrimitives = value(i + 1, 0) - value(i, 0);
+            out.vertexShaders = value(i + 1, 1) - value(i, 1);
+            out.clipperIn = value(i + 1, 2) - value(i, 2);
+            out.clipperOut = value(i + 1, 3) - value(i, 3);
+            out.fragments = value(i + 1, 4) - value(i, 4);
+            out.samples = value(i + 1, 5) - value(i, 5);
+            row(out, i);
+        }
+    }
+
     void Deko3DCommandList::drawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) {
         if (!graphicsPipeline || !graphicsPipeline->valid)
             return;
@@ -490,6 +592,8 @@ namespace plume {
         if (graphicsPipeline->boundTextures)
             bindTextures();
         flushBarriers();
+        if (g_diagCapture && (g_diagCapture->armed || g_diagCapture->closing))  // rr6-nx (2026-11-05)
+            diagCountersAt(cmd, device, framebuffer, uint32_t(graphicsPipeline->primitive), vertexCount, instanceCount);
         dkCmdBufDraw(cmd, graphicsPipeline->primitive, vertexCount, instanceCount, startVertex, startInstance);
         ++statDraws;
     }
@@ -515,6 +619,8 @@ namespace plume {
             dkCmdBufSetPrimitiveRestart(cmd, restart != 0, restart);
             boundRestart = restart;
         }
+        if (g_diagCapture && (g_diagCapture->armed || g_diagCapture->closing))  // rr6-nx (2026-11-05)
+            diagCountersAt(cmd, device, framebuffer, uint32_t(prim), indexCount, instanceCount);
         dkCmdBufDrawIndexed(cmd, prim, indexCount, instanceCount, startIndex, baseVertex, startInstance);
         ++statDraws;
     }
@@ -822,7 +928,10 @@ namespace plume {
         const uint32_t count = std::min<uint32_t>(viewCount, 16 - std::min<uint32_t>(startSlot, 16));
         for (uint32_t i = 0; i < count; i++) {
             const Deko3DBuffer *b = static_cast<const Deko3DBuffer *>(views[i].buffer.ref);
-            extents[i] = (b && b->block) ? DkBufExtents{b->gpu + views[i].buffer.offset, std::max<uint32_t>(views[i].size, 4)}
+            const uint32_t viewBytes = Deko3DGetOptions().vtxFullExtent && b && b->block && b->desc.size > views[i].buffer.offset
+                                           ? uint32_t(b->desc.size - views[i].buffer.offset)
+                                           : views[i].size;  // rr6-nx (2026-11-05): a console test
+            extents[i] = (b && b->block) ? DkBufExtents{b->gpu + views[i].buffer.offset, std::max<uint32_t>(viewBytes, 4)}
                                          : DkBufExtents{device->zeroAddr, Deko3DDevice::ZeroSize};
         }
         // banjo-nx (2026-10-26, Unleashed-style step 2): only the slots whose range differs from the one this list bound

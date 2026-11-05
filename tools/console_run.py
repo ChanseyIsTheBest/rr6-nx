@@ -53,11 +53,19 @@ def fetch_logs(host, out):
     return logs[-1:] if logs else []
 
 
-def running(bot):
+RR6_TITLE = 0x050C558A3DE72000  # Ridge Racer 6's icon on the user's console
+
+
+def title_of(bot):
+    """The running title's id, 0 on the home menu."""
     # killGame answers "ok", which can arrive ahead of this answer: the last word of the reply is the one asked for.
     words = bot.ask('getTitleID', timeout=8.0).split()
     t = words[-1] if words else ''
-    return all(c in '0123456789abcdefABCDEF' for c in t) and bool(t) and int(t, 16) != 0
+    return int(t, 16) if t and all(c in '0123456789abcdefABCDEF' for c in t) else 0
+
+
+def running(bot):
+    return title_of(bot) != 0
 
 
 def close_game(bot):
@@ -84,16 +92,22 @@ def close_game(bot):
 
 
 def launch(bot):
-    """A on the selected icon, again if a dialog took the press. The time the game was seen running counts as the start."""
-    for attempt in range(3):
-        bot.send('click A')
-        began = time.time()
-        for _ in range(10):
-            time.sleep(0.5)
-            if running(bot):
-                print('launched on press', attempt + 1)
-                return began
-    print('the game did not start')
+    """One A on the icon a screenshot has just shown selected (read it first, tools/switch_remote.py shot): no cursor moves, no
+    second press. On 2026-11-05 presses here opened the eShop and, with blind moves to the first icon, Sonic Unleashed, whose
+    timeline of presses then ran in that game. So only Ridge Racer 6's own title id starts the timeline; the time it was seen
+    running counts as the start."""
+    bot.send('click A')
+    began = time.time()
+    for _ in range(20):
+        time.sleep(0.5)
+        t = title_of(bot)
+        if t == RR6_TITLE:
+            print('launched Ridge Racer 6')
+            return began
+        if t:
+            print('WRONG TITLE %016X running: stopping, no more presses' % t)
+            return None
+    print('the game did not start: stopping, no more presses')
     return None
 
 
@@ -133,8 +147,16 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     bot = sr.Bot(host, timeout=15)
-    if not args.no_launch and running(bot):
-        print('closing the running game:', close_game(bot))
+    running_now = title_of(bot)
+    if not args.no_launch and running_now:
+        # No close here: a launch needs a screenshot of the home menu read first, and another game is not this tool's to close.
+        print('a game is running (%016X): stopping, nothing sent' % running_now)
+        bot.close()
+        sys.exit(1)
+    if args.no_launch and running_now != RR6_TITLE:
+        print('Ridge Racer 6 is not running (%016X): stopping, nothing sent' % running_now)
+        bot.close()
+        sys.exit(1)
     if args.toml:
         put(host, args.toml, 'renut.toml')
     if args.nro:
@@ -187,7 +209,7 @@ def main():
         time.sleep(wait)
     alive = False
     try:
-        alive = running(bot)
+        alive = title_of(bot) == RR6_TITLE
     except OSError as e:
         print('botbase:', e)
     print('game running at the end:', alive, '; finished', time.strftime('%H:%M:%S'))
@@ -196,7 +218,10 @@ def main():
     bot.close()
     sheet(out, shots)
     if not args.no_kill:
-        fetch_logs(host, out)
+        try:
+            fetch_logs(host, out)
+        except (OSError, EOFError) as e:
+            print('log fetch stopped:', e)
     print('out', os.path.normpath(out))
 
 

@@ -173,6 +173,22 @@ REXCVAR_DEFINE_BOOL(banjo_deko3d_vs_outputs, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): a pipeline's vertex shader writes only the outputs its pixel shader "
                     "reads (none for depth-only draws: the shadow maps), specialization constant 905: the others and "
                     "what computes them go. Same pixels");
+REXCVAR_DEFINE_INT32(banjo_deko3d_user_clip_enable, 1, "Banjo/Enhancements",
+                     "deko3d renderer (rr6-nx 2026-11-05): the GPU's user clip enable, bit i for clip distance i. 1: the only one the "
+                     "shaders write. -1: left as deko3d leaves it, every slot on: triangles of the vertex shaders that clip are cut by "
+                     "unwritten outputs on the console (holes, black squares, broken cables, the chrome car), not in the emulator. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_l2_at_begin, false, "Banjo/Diagnostics",
+                    "deko3d renderer (rr6-nx 2026-11-05, a console test): the GPU's L2 cache flushed and invalidated at the start of "
+                    "every command list. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_vtx_full_extent, false, "Banjo/Diagnostics",
+                    "deko3d renderer (rr6-nx 2026-11-05, a console test): a vertex buffer's limit is the end of its buffer, not of "
+                    "the view. The hardware returns zeros past the limit. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(banjo_deko3d_uam_flags, -1, "Banjo/Diagnostics",
+                     "deko3d renderer (rr6-nx 2026-11-05, a console test): the shader compiler's pass flags as a number, overriding\n"
+                     "the keys that switch some of them (0: every pass off; -1: the keys decide). Its DKSH cache is a file of its own");
 REXCVAR_DEFINE_BOOL(banjo_deko3d_uam_prmt, true, "Banjo/Enhancements",
                     "deko3d renderer (2026-10-18): uam turns the shaders' byte swaps (the big-endian words the vertex "
                     "fetch reads from memory: bones, skinned vertices) into Maxwell's PRMT, one instruction each. Off: "
@@ -366,6 +382,29 @@ REXCVAR_DEFINE_BOOL(rr6_user_clip_plane, true, "Banjo/Enhancements",
                     "need it, as the GPU and the emulated GPU clip with it; Renut stored it and never applied it. Off: "
                     "each half of the reflection map holds only the last of its two views, so the car reflects the "
                     "wrong scene and no sky. Costs one plane write per draw that has one on. In-run A/B target 76");
+REXCVAR_DEFINE_BOOL(rr6_strip_lists, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): triangle strips made triangle lists on the CPU, so the GPU never uses "
+                    "primitive restart or strip order. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_alpha_always, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): no alpha test: a pixel a shader would discard for its alpha is drawn. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_depth_always, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): the depth test always passes and no stencil test: a pixel covered by any "
+                    "draw is drawn, in draw order. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_blend_off, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): no blending: a pixel a shader writes with alpha 0 shows its colour instead "
+                    "of leaving what was there. Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_depth_clamp, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): depth clamped instead of clipped: geometry past the far or near plane is drawn. "
+                    "Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_diag_cull_none, false, "Banjo/Diagnostics",
+                    "Console test (rr6-nx 2026-11-05): no face culling at all (a triangle that disappears for its winding "
+                    "comes back). Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(rr6_strip_markers, true, "Banjo/Enhancements",
                     "rr6-nx (2026-11-03): an indexed strip's restart markers (index 0xFFFF) are kept out of the vertex "
                     "range a draw converts and rewritten to the host's marker, as the GPU and the emulated GPU cut "
@@ -1458,6 +1497,9 @@ bool Deko3DWriteWaitOn() { return REXCVAR_GET(banjo_deko3d_write_wait); }
 bool Deko3DClearWaitOn() { return REXCVAR_GET(banjo_deko3d_clear_wait); }
 bool Deko3DFullBarriersOn() { return REXCVAR_GET(banjo_deko3d_full_barriers); }
 bool Deko3DColorCompressionOn() { return REXCVAR_GET(banjo_deko3d_color_compression); }  // rr6-nx (2026-11-04)
+bool Deko3DVtxFullExtentOn() { return REXCVAR_GET(banjo_deko3d_vtx_full_extent); }  // rr6-nx (2026-11-05)
+bool Deko3DL2AtBeginOn() { return REXCVAR_GET(banjo_deko3d_l2_at_begin); }  // rr6-nx (2026-11-05)
+int Deko3DUserClipEnable() { return REXCVAR_GET(banjo_deko3d_user_clip_enable); }  // rr6-nx (2026-11-05)
 int Deko3DRestartIndexMode() { return REXCVAR_GET(banjo_deko3d_restart_index); }  // rr6-nx (2026-11-04)
 bool Deko3DGpuRegionOn() { return REXCVAR_GET(banjo_deko3d_gpu_region); }
 bool Deko3DBarrierMergeOn() { return REXCVAR_GET(banjo_deko3d_barrier_merge); }
@@ -1526,6 +1568,9 @@ unsigned Deko3DUamFlags() {
   // PRMT (1), offsets in the load (2), the shift distribution (4), the input interpolation cache (8), the choice
   // per pixel shader (16), value numbering (32) keeping the interpolations (128), no reconvergence around uniform
   // branches (256), bone rows as 128-bit loads (1024, 2026-10-20): docs/deko3d-shader-optimisations.md
+  const int32_t forced = REXCVAR_GET(banjo_deko3d_uam_flags);  // rr6-nx (2026-11-05)
+  if (forced >= 0)
+    return unsigned(forced);
   unsigned flags = 1471u;
   if (!REXCVAR_GET(banjo_deko3d_uam_wide_rows))
     flags &= ~1024u;
@@ -1652,6 +1697,30 @@ bool UserClipPlaneOn() {
   return on && g_ab_off.load(std::memory_order_relaxed) != 76;
 }
 
+bool StripListsOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_strip_lists);
+  return on;
+}
+bool AlphaAlwaysOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_diag_alpha_always);
+  return on;
+}
+bool DepthAlwaysOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_diag_depth_always);
+  return on;
+}
+bool BlendOffOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_diag_blend_off);
+  return on;
+}
+bool DepthClampOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_diag_depth_clamp);
+  return on;
+}
+bool CullNoneOn() {  // rr6-nx (2026-11-05)
+  static const bool on = REXCVAR_GET(rr6_diag_cull_none);
+  return on;
+}
 bool StripMarkersOn() {
   static const bool on = REXCVAR_GET(rr6_strip_markers);
   return on && g_ab_off.load(std::memory_order_relaxed) != 77;
