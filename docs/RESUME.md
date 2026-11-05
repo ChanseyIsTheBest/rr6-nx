@@ -41,7 +41,7 @@ library refuses nothing in a whole run (emu57).
 
 Optional: sys-botbase and an ftp sysmodule on the console would let these runs be driven from the PC (`tools/switch_remote.py`,
 written but never connected to anything). The install steps given to the user came from memory, not from the current releases:
-check each project's README first.
+check each project's README first. On the user's console sys-botbase stops the boot with 2021-0003 (0x615; 2026-11-05): `sm::ResultOutOfSessions`, a process asked for a service whose session limit was reached (`sm_service_manager.cpp`, `GetServiceHandle`). Which process and service is not known yet; the report in `atmosphere/` names the process. Not needed for the tests: they run by hand.
 
 ## Follow-ups, none urgent
 
