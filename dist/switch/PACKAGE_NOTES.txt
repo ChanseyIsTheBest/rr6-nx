@@ -1,7 +1,14 @@
 rr6-nx: package notes, what to test on the console
 ==================================================
 
-Nothing in this package has run on real hardware. Everything below was seen on the PC or in Ryujinx, which are proxies.
+This build ran on the real console on 2026-11-05 (Harborline, as far as a car at full throttle gets, with this renut.toml).
+Sections below written before that were seen on the PC or in Ryujinx, which are proxies.
+
+The console's visual faults: fixed (2026-11-05, banjo_deko3d_user_clip_enable)
+-----------------------------------------------------------------------------
+The black squares and blurred blocks in the course intro, the broken bridge cables, the holes in the rock wall, the sky
+rectangles, the chrome car and the black tower screen were one fault: the GPU clipped with clip slots the shaders never wrote.
+Compared with the PC at the same camera they are gone. Not looked at yet: other courses and a whole lap.
 
 Install
 -------

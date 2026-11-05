@@ -1,4 +1,22 @@
-# Ridge Racer 6 port: where it stands (2026-11-04, paused by the user for about a month)
+# Ridge Racer 6 port: where it stands (2026-11-05)
+
+**Use this package:** the newest folder under `builds/` named `clip_enable_fix`. Everything is committed; nothing is pushed.
+
+## Working
+
+PC (Direct3D 12), the emulator (deko3d) and the console boot and race. On the console (m22, shipped renut.toml): the Harborline fly-by, the race as far as the route drives it (the bridge, the rock wall, the hairpin signs), the car and the tower's screen match the PC reference, 60 fps in the race. The console-only visual faults had one cause, fixed: the last section of `docs/rr6-notes.md`.
+
+## Not tested on the console
+
+Only Harborline, and only as far as a car held at full throttle gets before it hits a wall (about 45 s of lap time). Other courses, a whole lap and the menus beyond the route have not been looked at since the fix.
+
+## Driving the console
+
+`python tools/console_run.py NAME --toml F --nro F --script-file out/console_tests/m/dbg.txt --until 135`. Read a screenshot first (`python tools/switch_remote.py shot F`): it must show Ridge Racer 6 selected. The launcher presses A once, with no cursor moves, and starts its timeline only on the game's own title id. Shaders can be swapped without a build (`tools/debug_shader_package.py`, `deko3d_glsl.bin` beside the NRO; delete it after). The user's rule for the card: only `/switch/rr6-nx`, plus `/switch/gpuprobe.nro` and `/gpuprobe.txt`.
+
+Diagnostics that found the fault, all off by default: `rr6_diag_gpu_counters`, `rr6_diag_clear_magenta`, `rr6_diag_read_crc`, `rr6_diag_geometry_frames`.
+
+## History: where it stood before the fix (2026-11-04, superseded)
 
 **Use this package:** `builds/2026-11-04_1102_restart_index_tests17` (NRO 2C47F586EBCF). Everything is committed; nothing is pushed.
 
