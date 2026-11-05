@@ -147,6 +147,8 @@ def main():
         finally:
             b.close()
     elif cmd in ('ls', 'get', 'put', 'rm'):
+        # Refused before any connection is made: the card path is rest[1] for put, rest[0] for the others.
+        sd_path(rest[1] if cmd == 'put' else (rest[0] if rest else ''))
         f = ftp_open(host)
         try:
             if cmd == 'ls':
