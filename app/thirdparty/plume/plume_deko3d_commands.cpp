@@ -173,8 +173,6 @@ namespace plume {
             const uint32_t words[2] = {(1u << 29) | (1u << 16) | 0x544u, uint32_t(clip)};
             dkCmdBufReplayCmds(cmd, words, 2);
         }
-        if (Deko3DGetOptions().l2AtBegin)  // rr6-nx (2026-11-05): a console test
-            dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
         descriptorEpoch = currentEpoch();
         seenDescriptors = device->descriptorEpoch.load(std::memory_order_relaxed);  // banjo-nx (2026-10-28)
         seenCode = device->codeEpoch.load(std::memory_order_relaxed);
@@ -928,10 +926,7 @@ namespace plume {
         const uint32_t count = std::min<uint32_t>(viewCount, 16 - std::min<uint32_t>(startSlot, 16));
         for (uint32_t i = 0; i < count; i++) {
             const Deko3DBuffer *b = static_cast<const Deko3DBuffer *>(views[i].buffer.ref);
-            const uint32_t viewBytes = Deko3DGetOptions().vtxFullExtent && b && b->block && b->desc.size > views[i].buffer.offset
-                                           ? uint32_t(b->desc.size - views[i].buffer.offset)
-                                           : views[i].size;  // rr6-nx (2026-11-05): a console test
-            extents[i] = (b && b->block) ? DkBufExtents{b->gpu + views[i].buffer.offset, std::max<uint32_t>(viewBytes, 4)}
+            extents[i] = (b && b->block) ? DkBufExtents{b->gpu + views[i].buffer.offset, std::max<uint32_t>(views[i].size, 4)}
                                          : DkBufExtents{device->zeroAddr, Deko3DDevice::ZeroSize};
         }
         // banjo-nx (2026-10-26, Unleashed-style step 2): only the slots whose range differs from the one this list bound

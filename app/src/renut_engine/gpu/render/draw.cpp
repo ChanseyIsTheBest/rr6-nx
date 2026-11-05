@@ -1657,8 +1657,6 @@ plume::RenderPrimitiveTopology Topology(u32 primitive) {
   case kLineLoop:
     return plume::RenderPrimitiveTopology::LINE_STRIP;
   case kTriangleStrip:
-    if (banjo::renut_gpu::StripListsOn())  // rr6-nx (2026-11-05): PrepareGeometry made it a list
-      return plume::RenderPrimitiveTopology::TRIANGLE_LIST;
     return plume::RenderPrimitiveTopology::TRIANGLE_STRIP;
   default:  // lists, and fans / quads expanded to lists
     return plume::RenderPrimitiveTopology::TRIANGLE_LIST;
@@ -4287,28 +4285,11 @@ void RebaseIndices16(uint16_t *out, u32 lo) {
 }
 
 // Rewrites g_indices for fans and quads as triangle lists.
-void ExpandIndices(u32 primitive, u32 strip_marker = UINT32_MAX) {
+void ExpandIndices(u32 primitive) {
   // banjo-nx (2026-10-19, render-thread proposal 20): a scratch vector kept between draws (swapped with g_indices, so
   // both keep their capacity), not a new one per fan or quad draw.
   static std::vector<u32> out;
-  if (primitive == kTriangleStrip) {  // rr6-nx (2026-11-05, rr6_strip_lists): each cut starts a new strip
-    out.clear();
-    u32 run = 0;
-    for (size_t i = 0; i < g_indices.size(); ++i) {
-      if (g_indices[i] == strip_marker) {
-        run = 0;
-        continue;
-      }
-      if (run >= 2) {
-        const u32 a = g_indices[i - 2], b = g_indices[i - 1], c = g_indices[i];
-        out.push_back((run & 1) ? b : a);
-        out.push_back((run & 1) ? a : b);
-        out.push_back(c);
-      }
-      ++run;
-    }
-    g_indices.swap(out);
-  } else if (primitive == kTriangleFan) {
+  if (primitive == kTriangleFan) {
     const size_t n = g_indices.size() > 2 ? g_indices.size() - 2 : 0;
     out.resize(n * 3);
     for (size_t i = 2, o = 0; i < g_indices.size(); ++i, o += 3) {
@@ -4471,8 +4452,7 @@ void TrackIndices(const IndexKey &key, u32 lo, u32 max_index) {
 }
 
 bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &g) {
-  const bool expand = call.primitive == kTriangleFan || call.primitive == kQuadList ||
-                      (call.primitive == kTriangleStrip && banjo::renut_gpu::StripListsOn());  // rr6-nx (2026-11-05)
+  const bool expand = call.primitive == kTriangleFan || call.primitive == kQuadList;
   static uint32_t rect_logged = 0;
   if (call.primitive == kRectangleList && !State().rectangle_list_gs && LogLimited(rect_logged, 1))
     RGPU_WARN("Rectangle lists are drawn as triangle lists");
@@ -4519,7 +4499,7 @@ bool PrepareGeometry(const GuestDevice &device, const DrawCall &call, Geometry &
       if (!ReadIndices(src, call.count, is32, endian))
         return false;
       if (expand)
-        ExpandIndices(call.primitive, is32 ? 0xFFFFFFFFu : 0xFFFFu);
+        ExpandIndices(call.primitive);
       if (g_indices.empty())
         return false;
       lo = UINT32_MAX;
@@ -5661,8 +5641,7 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
   // A/B target 22 (banjo_renut_ab_targets) turns it off for a half.
   if (!on || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 22 || !IsDeko3D() || call.tessellation ||
       call.up_vertices || call.up_indices || !call.count || call.primitive == kTriangleFan ||
-      call.primitive == kQuadList || (call.primitive == kTriangleStrip && banjo::renut_gpu::StripListsOn()) ||
-      DrawSummaryOf(vs).skin_once) {
+      call.primitive == kQuadList || DrawSummaryOf(vs).skin_once) {
     return false;
   }
   // banjo-nx (2026-10-26, API-level stage 4): with exports pending, a draw none of whose buffers a pending export
@@ -9434,9 +9413,9 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       booleans[i] = __builtin_bswap32(word);
     }
     const u32 color_control = dev.m_ControlPacket.ColorControl;
-    u32 func = (color_control & 8) && !banjo::renut_gpu::AlphaAlwaysOn() ? (color_control & 7) : 7;  // rr6-nx (2026-11-05)
+    u32 func = (color_control & 8) ? (color_control & 7) : 7;
     float threshold = dev.m_ValuesPacket.AlphaRef;
-    if (func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn() && !banjo::renut_gpu::AlphaAlwaysOn()) {
+    if (func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
       const HostSurface *first = targets.color_count ? targets.colors[0] : targets.depth;
       if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1) {
         func = 6;
@@ -10912,11 +10891,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   }
   SetShared(sc, sc.booleans, booleans);  // banjo-nx (2026-10-26): its line marked only when they changed
   const u32 color_control = dev.m_ControlPacket.ColorControl;
-  u32 alpha_test_func = (color_control & 8) && !banjo::renut_gpu::AlphaAlwaysOn() ? (color_control & 7) : 7;  // rr6-nx (2026-11-05)
+  u32 alpha_test_func = (color_control & 8) ? (color_control & 7) : 7;
   float alpha_threshold = dev.m_ValuesPacket.AlphaRef;
   // banjo-nx (2026-10-26): this draw's function (the kept block's sc.alpha_test_func is the draw before's: read here
   // since API-level stage 1, every other alpha-to-coverage draw lost its test, the console's title-screen grass cards).
-  if (alpha_test_func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn() && !banjo::renut_gpu::AlphaAlwaysOn()) {
+  if (alpha_test_func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
     // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): alpha to coverage on a single-sample target is an alpha
     // test at 0.5 (MakeKey leaves the pipeline's alpha to coverage off for it). NVIDIA GPUs dither alpha to coverage
     // without samples: the checker-patterned grass, fur and foliage edges of the console and Ryujinx runs.

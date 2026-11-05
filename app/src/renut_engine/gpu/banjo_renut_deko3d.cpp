@@ -454,8 +454,6 @@ void InstallShaderCache() {
   options.clearWait = Deko3DClearWaitOn();
   options.fullBarriers = Deko3DFullBarriersOn();
   options.colorCompression = Deko3DColorCompressionOn();  // rr6-nx (2026-11-04): console test 10
-  options.vtxFullExtent = Deko3DVtxFullExtentOn();  // rr6-nx (2026-11-05): a console test
-  options.l2AtBegin = Deko3DL2AtBeginOn();  // rr6-nx (2026-11-05): a console test
   options.userClipEnable = Deko3DUserClipEnable();  // rr6-nx (2026-11-05)
   options.restartIndexMode = unsigned(std::max(0, Deko3DRestartIndexMode()));  // console tests 16 and 17
   options.vsOutputs = Deko3DVsOutputsOn();

@@ -242,8 +242,6 @@ bool Deko3DWriteWaitOn();
 bool Deko3DClearWaitOn();
 bool Deko3DFullBarriersOn();  // banjo_deko3d_full_barriers (a console test)
 bool Deko3DColorCompressionOn();  // banjo_deko3d_color_compression (console test 10)
-bool Deko3DVtxFullExtentOn();  // banjo_deko3d_vtx_full_extent (a console test)
-bool Deko3DL2AtBeginOn();  // banjo_deko3d_l2_at_begin (a console test)
 int Deko3DUserClipEnable();  // banjo_deko3d_user_clip_enable
 int Deko3DRestartIndexMode();  // banjo_deko3d_restart_index (console tests 16 and 17)
 bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
@@ -372,12 +370,6 @@ bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
 bool FetchOverPointerOn();  // rr6-nx (2026-11-03, rr6_fetch_over_pointer, A/B 75)
 bool UserClipPlaneOn();  // rr6-nx (2026-11-03, rr6_user_clip_plane, A/B 76)
 bool StripMarkersOn();   // rr6-nx (2026-11-03, rr6_strip_markers, A/B 77)
-bool StripListsOn();     // rr6-nx (2026-11-05, rr6_strip_lists, a console test)
-bool CullNoneOn();       // rr6-nx (2026-11-05, rr6_diag_cull_none, a console test)
-bool AlphaAlwaysOn();    // rr6-nx (2026-11-05, rr6_diag_alpha_always, a console test)
-bool DepthAlwaysOn();    // rr6-nx (2026-11-05, rr6_diag_depth_always, a console test)
-bool BlendOffOn();       // rr6-nx (2026-11-05, rr6_diag_blend_off, a console test)
-bool DepthClampOn();     // rr6-nx (2026-11-05, rr6_diag_depth_clamp, a console test)
 bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 73
 float AlphaNearOne(uint32_t func, float threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
 bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state

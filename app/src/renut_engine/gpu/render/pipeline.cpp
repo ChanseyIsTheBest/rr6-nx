@@ -314,11 +314,9 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   desc.cullMode = cull_front && !cull_back   ? plume::RenderCullMode::FRONT
                   : cull_back && !cull_front ? plume::RenderCullMode::BACK
                                              : plume::RenderCullMode::NONE;
-  if (banjo::renut_gpu::CullNoneOn())  // rr6-nx (2026-11-05): a console test
-    desc.cullMode = plume::RenderCullMode::NONE;
   desc.frontFace = (key.mode_control & 4) ? plume::RenderFrontFace::CLOCKWISE
                                           : plume::RenderFrontFace::COUNTER_CLOCKWISE;
-  desc.depthClipEnabled = !banjo::renut_gpu::DepthClampOn();  // rr6-nx (2026-11-05): the test's key; true otherwise
+  desc.depthClipEnabled = true;
   // rr6-nx (2026-11-03, rr6_depth_bias): set per draw (SetDrawDepthBias), so no value of it makes a pipeline.
   desc.dynamicDepthBiasEnabled = banjo::renut_gpu::DepthBiasKeyOn() && s.device->getCapabilities().dynamicDepthBias;
 
@@ -333,11 +331,6 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
       desc.depthEnabled = false;
     desc.depthFunction = ConvertCompareFunction((dc >> 4) & 7);
     desc.stencilEnabled = dc & 1;
-    if (banjo::renut_gpu::DepthAlwaysOn()) {  // rr6-nx (2026-11-05): a console test
-      desc.depthEnabled = true;
-      desc.depthFunction = plume::RenderComparisonFunction::ALWAYS;
-      desc.stencilEnabled = false;
-    }
     desc.stencilReference = key.stencil_ref_mask & 0xFF;
     desc.stencilReadMask = (key.stencil_ref_mask >> 8) & 0xFF;
     desc.stencilWriteMask = (key.stencil_ref_mask >> 16) & 0xFF;
@@ -360,8 +353,6 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
   for (uint32_t i = 0; i < key.color_count; ++i) {
     desc.renderTargetFormat[i] = key.color_formats[i];
     desc.renderTargetBlend[i] = BlendDesc(key.blend_control[i], key.color_mask >> (i * 4));
-    if (banjo::renut_gpu::BlendOffOn() && key.color_formats[i] != plume::RenderFormat::UNKNOWN)  // rr6-nx (2026-11-05): a console test
-      desc.renderTargetBlend[i].blendEnabled = false;
   }
   desc.multisampling = plume::RenderMultisampling(plume::RenderSampleCounts(key.samples));
   // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): not on a single-sample target, where the draw's shared

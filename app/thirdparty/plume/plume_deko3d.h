@@ -881,18 +881,12 @@ namespace plume {
         // bound index format's all-ones (as now), 1 always 0xFFFFFFFF, 2 always 0xFFFF. Ryujinx ignores the register
         // (its Vulkan back end restarts at the index type's maximum), the hardware compares it.
         unsigned restartIndexMode = 0;
-        // rr6-nx (2026-11-05, a console test): a vertex buffer's limit is the end of its buffer, not of the view: the
-        // hardware returns zeros past the limit, which would send a vertex to the origin.
         // rr6-nx (2026-11-05, the console's holes, black squares, broken cables and chrome car): Maxwell's SET_USER_CLIP_ENABLE
         // (method 0x544), written at the start of every list. deko3d never writes it (libdeko3d disassembled; it has no
         // API for it), so the console clips with every slot, and a vertex shader that writes gl_ClipDistance[0] alone has
         // slots 1-7 clipping on whatever its unwritten outputs hold. Ryujinx clips only with what the shader writes, so the
         // emulator never shows it. Bit i: slot i. Renut's shaders write slot 0 only. -1: the register left alone.
         int userClipEnable = 1;
-        bool vtxFullExtent = false;
-        // rr6-nx (2026-11-05, a console test): the GPU's L2 flushed and invalidated at the start of every list. CPU-uncached memory
-        // is written past the L2, so a line the GPU read before (a freed span reused, a neighbour's line) stays stale there.
-        bool l2AtBegin = false;
         bool zcull = false;
         // A pipeline's vertex shader gets specialization constant 905 (when it declares it), the locations its pixel
         // shader reads of the ones it writes (none without a pixel shader; not with a geometry shader): banjo-nx's

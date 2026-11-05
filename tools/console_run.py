@@ -193,7 +193,8 @@ def main():
             time.sleep(wait)
         try:
             if action == 'shot':
-                path = os.path.join(out, 'shot_%04d.jpg' % t)
+                # A fractional time (a burst of shots) keeps its fraction in the name.
+                path = os.path.join(out, 'shot_%04d.jpg' % t if t == int(t) else 'shot_%07.2f.jpg' % t)
                 bot.shot(path)
                 shots.append((t, path))
             elif action.startswith('stick '):
