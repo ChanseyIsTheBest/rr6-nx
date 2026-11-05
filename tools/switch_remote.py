@@ -2,6 +2,8 @@
 """rr6-nx (2026-11-04): the console over the network, through two sysmodules the user runs under Atmosphere:
 sys-botbase (masagrator's fork; TCP 6000: controller presses, screenshots, memory) and ftpd (TCP 5000: the SD card).
 Outbound connections only; nothing on this PC listens.
+ftp logs in anonymously, and sys-ftpd-light has that off by default: it needs anonymous:=1 in the card's
+/config/sys-ftpd/config.ini. Never run against a console yet.
 
     python tools/switch_remote.py [--host IP] CMD ...
 
