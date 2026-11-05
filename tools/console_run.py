@@ -60,6 +60,43 @@ def running(bot):
     return all(c in '0123456789abcdefABCDEF' for c in t) and bool(t) and int(t, 16) != 0
 
 
+def close_game(bot):
+    """The normal way, HOME, X, A: killGame leaves the system's 'closed because an error occurred' dialog (the user, 2026-11-05),
+    which then needs A. killGame only as the fallback."""
+    bot.send('release ZR')
+    time.sleep(0.3)
+    bot.send('click HOME')
+    time.sleep(2.5)
+    bot.send('click X')
+    time.sleep(1.5)
+    bot.send('click A')
+    for _ in range(24):
+        time.sleep(0.5)
+        if not running(bot):
+            time.sleep(1.5)
+            return 'closed'
+    print('normal close failed: killGame, then A for its dialog')
+    bot.ask('killGame', timeout=15.0)
+    time.sleep(4)
+    bot.send('click A')
+    time.sleep(2)
+    return 'killed'
+
+
+def launch(bot):
+    """A on the selected icon, again if a dialog took the press. The time the game was seen running counts as the start."""
+    for attempt in range(3):
+        bot.send('click A')
+        began = time.time()
+        for _ in range(10):
+            time.sleep(0.5)
+            if running(bot):
+                print('launched on press', attempt + 1)
+                return began
+    print('the game did not start')
+    return None
+
+
 def sheet(out, shots):
     try:
         from PIL import Image, ImageDraw
@@ -85,6 +122,8 @@ def main():
     a.add_argument('--nro')
     a.add_argument('--put', action='append', default=[])
     a.add_argument('--script', default='')
+    a.add_argument('--script-file', help='the --script text in a file (long mash timelines)')
+    a.add_argument('--pre', default='', help='comma-separated home menu presses before the launch, e.g. click DRIGHT')
     a.add_argument('--until', type=float, default=120)
     a.add_argument('--no-launch', action='store_true')
     a.add_argument('--no-kill', action='store_true')
@@ -95,12 +134,7 @@ def main():
 
     bot = sr.Bot(host, timeout=15)
     if not args.no_launch and running(bot):
-        bot.ask('killGame', timeout=15.0)
-        for _ in range(20):
-            time.sleep(0.5)
-            if not running(bot):
-                break
-        time.sleep(3)
+        print('closing the running game:', close_game(bot))
     if args.toml:
         put(host, args.toml, 'renut.toml')
     if args.nro:
@@ -110,14 +144,22 @@ def main():
         put(host, local, remote)
 
     steps = []
-    for item in filter(None, (s.strip() for s in args.script.split(','))):
+    text = open(args.script_file, encoding='utf-8').read() if args.script_file else args.script
+    for item in filter(None, (s.strip() for s in text.split(','))):
         t, action = item.split(':', 1)
         steps.append((float(t), action.strip()))
     steps.sort(key=lambda s: s[0])
 
     if not args.no_launch:
-        bot.send('click A')
-    start = time.time()
+        for press in filter(None, (s.strip() for s in args.pre.split(','))):
+            bot.send(press)
+            time.sleep(0.8)
+        start = launch(bot)
+        if start is None:
+            bot.close()
+            sys.exit(1)
+    else:
+        start = time.time()
     print('started', time.strftime('%H:%M:%S'))
     shots = []
     dead_at = None
@@ -150,12 +192,7 @@ def main():
         print('botbase:', e)
     print('game running at the end:', alive, '; finished', time.strftime('%H:%M:%S'))
     if alive and not args.no_kill:
-        bot.ask('killGame', timeout=15.0)
-        for _ in range(20):
-            time.sleep(0.5)
-            if not running(bot):
-                break
-        time.sleep(2)
+        print('closing:', close_game(bot))
     bot.close()
     sheet(out, shots)
     if not args.no_kill:

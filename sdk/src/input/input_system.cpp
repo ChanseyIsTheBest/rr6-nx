@@ -43,6 +43,11 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
 #endif
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+// rr6-nx (2026-11-05): only user 0 has a profile (XamUserGetSigninState, xam_user.cpp), so a first press from any other
+// controller made the game ask "No Gamer Profile selected" at launch, intermittently: it depended on which pad pressed
+// first (the handheld is player 1; a second pad, or sys-botbase's virtual one, is player 2).
+REXCVAR_DEFINE_BOOL(input_all_pads_user0, true, "Input",
+                    "Every controller feeds guest user 0, the one with the profile (false: controller N is user N)");
 REXCVAR_DEFINE_STRING(input_script, "", "Input",
                       "Test automation: button presses for user 0 as 'seconds:button,...' counted from the first input "
                       "poll (buttons A B X Y START BACK UP DOWN LEFT RIGHT LB RB), each held 0.2 s, or as long as "
@@ -601,7 +606,10 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   // NOP driver (primary in tool mode, fallback otherwise)
   uint8_t nop_index = tool_mode ? 0 : 1;
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
-  input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+  if (REXCVAR_GET(input_all_pads_user0))
+    input->SetDeviceAssignment(std::make_unique<SharedAssignment>());
+  else
+    input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
   return input;
 }
 
