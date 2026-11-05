@@ -27,6 +27,9 @@ link and the draws were skipped; on the console they linked silently with the sp
 read from the wrong slots: a flat-coloured quad of a wrong size. If the hard rectangles in the sky were point sprites,
 they are gone now; anything the game draws as points (glows, sparks, sun, lens flares) may appear for the first time.
 
+WARNING (2026-11-05): the texture dump crashes the game on the console when its first window opens. Do not run a toml that sets
+rr6_diag_texture_dump (tests 9, 12, 13, all_A, all_B) until this is fixed.
+
 Two runs that cover everything (2026-11-04 11:10)
 ---------------------------------------------------
   tests/all_A_everything_restart_ffffffff.toml   every switch of tests 3-8, 10, 11 and 14, the whole-frame dump from 90 s after launch

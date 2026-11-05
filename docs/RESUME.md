@@ -28,6 +28,14 @@ library refuses nothing in a whole run (emu57).
   not be the cuts.
 - Best guesses, unproven: the restart index for the ribbons; the reflection cube's contents for the car.
 
+## Do not run the texture dump on the console (2026-11-05)
+
+Its first real run crashed the game. Log `out/console_runs/run5_dump_crash`: the window opened at 13:36:30.044, 180 s after launch; 132 textures
+and 932 readback buffers were queued in about 0.2 s; the log stops there, with no `texture_dump` folder written and 1552 MB of heap free. How it
+dies is not known: the leading guess, untested, is one GPU memory block per readback buffer hitting a hardware limit Ryujinx lacks. The crash report
+is in `/atmosphere`, outside the user's rule, so it needs their OK or their copy. Any toml with `rr6_diag_texture_dump` set has this: tests 9, 12, 13,
+`all_A`, `all_B`. Step 2 below needs the dump fixed or removed first. The console's `renut.toml` may still have it armed: check before launching.
+
 ## Pick up here
 
 1. `gpuprobe.nro` (in the package; `GPUPROBE_README.txt` says how to read it). A couple of minutes, and it answers independently
