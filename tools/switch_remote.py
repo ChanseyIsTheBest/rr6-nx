@@ -39,6 +39,8 @@ RAW_ALLOWED = ('click', 'press', 'release', 'setStick', 'pixelPeek', 'getTitleID
 
 def sd_path(path=''):
     """The path on the card, refused unless it is inside SD_ROOT."""
+    if ':' in path:  # Git Bash turns /x into C:/.../x before this sees it: never take that for a path in the folder
+        sys.exit('refused: %s looks like a Windows path (use a path relative to %s)' % (path, SD_ROOT))
     full = posixpath.normpath(posixpath.join(SD_ROOT, path.replace('\\', '/')))
     if full != SD_ROOT and not full.startswith(SD_ROOT + '/'):
         sys.exit('refused: %s is outside %s' % (path, SD_ROOT))
