@@ -2,6 +2,8 @@
 """rr6-nx (2026-11-04): the console over the network, through two sysmodules the user runs under Atmosphere:
 sys-botbase (masagrator's fork; TCP 6000: controller presses, screenshots, memory) and ftpd (TCP 5000: the SD card).
 Outbound connections only; nothing on this PC listens.
+The user's rule (2026-11-05): on the SD card only /switch/rr6-nx may be touched. Every ftp path is checked against it and
+refused otherwise, relative paths are taken from it, and raw takes only commands that cannot reach the card or write memory.
 ftp logs in anonymously, and sys-ftpd-light has that off by default: it needs anonymous:=1 in the card's
 /config/sys-ftpd/config.ini. Never run against a console yet.
 
@@ -14,7 +16,7 @@ ftp logs in anonymously, and sys-ftpd-light has that off by default: it needs an
   stick L|R X Y [ms]         a stick at X, Y in -1..1 (y up), released after ms (default 300)
   title | version | heap     getTitleID, getVersion, getHeapBase
   peek ADDR SIZE             SIZE bytes at the absolute address, hex
-  ls [PATH]                  ftp listing (PATH as on the card, e.g. /switch/rr6-nx)
+  ls [PATH]                  ftp listing (default /switch/rr6-nx)
   get REMOTE [LOCAL]         ftp download (a folder: every file in it, one level)
   put LOCAL REMOTE           ftp upload
   rm REMOTE                  ftp delete (a file)
@@ -23,12 +25,24 @@ ftp logs in anonymously, and sys-ftpd-light has that off by default: it needs an
 The host comes from --host, else the RR6_SWITCH_HOST environment variable, else out/switch_host.txt's first line.
 """
 import os
+import posixpath
 import socket
 import sys
 import time
 from ftplib import FTP
 
 BOT_PORT, FTP_PORT = 6000, 5000
+SD_ROOT = '/switch/rr6-nx'
+RAW_ALLOWED = ('click', 'press', 'release', 'setStick', 'pixelPeek', 'getTitleID', 'getVersion', 'getHeapBase', 'peekAbsolute',
+               'configure')
+
+
+def sd_path(path=''):
+    """The path on the card, refused unless it is inside SD_ROOT."""
+    full = posixpath.normpath(posixpath.join(SD_ROOT, path.replace('\\', '/')))
+    if full != SD_ROOT and not full.startswith(SD_ROOT + '/'):
+        sys.exit('refused: %s is outside %s' % (path, SD_ROOT))
+    return full
 
 
 def host_of(args):
@@ -127,6 +141,8 @@ def main():
             elif cmd == 'peek':
                 print(b.ask('peekAbsolute %s %s' % (rest[0], rest[1])))
             elif cmd == 'raw':
+                if not rest or rest[0].split(' ')[0] not in RAW_ALLOWED:
+                    sys.exit('refused: raw takes only ' + ', '.join(RAW_ALLOWED))
                 print(b.ask(' '.join(rest)))
         finally:
             b.close()
@@ -134,10 +150,10 @@ def main():
         f = ftp_open(host)
         try:
             if cmd == 'ls':
-                f.cwd(rest[0] if rest else '/')
+                f.cwd(sd_path(rest[0] if rest else ''))
                 f.retrlines('LIST')
             elif cmd == 'get':
-                remote = rest[0]
+                remote = sd_path(rest[0])
                 local = rest[1] if len(rest) > 1 else os.path.basename(remote.rstrip('/')) or 'root'
                 names = []
                 try:
@@ -161,11 +177,11 @@ def main():
                             print('skipped', base, e)
             elif cmd == 'put':
                 with open(rest[0], 'rb') as src:
-                    f.storbinary('STOR ' + rest[1], src)
-                print('put', rest[0], '->', rest[1])
+                    f.storbinary('STOR ' + sd_path(rest[1]), src)
+                print('put', rest[0], '->', sd_path(rest[1]))
             elif cmd == 'rm':
-                f.delete(rest[0])
-                print('deleted', rest[0])
+                f.delete(sd_path(rest[0]))
+                print('deleted', sd_path(rest[0]))
         finally:
             f.quit()
     else:
