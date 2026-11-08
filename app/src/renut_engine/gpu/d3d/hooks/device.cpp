@@ -85,6 +85,8 @@ REX_IMPORT(__imp__VdGetCurrentDisplayGamma, VdGetCurrentDisplayGamma, void(u32, 
 
 namespace {
 
+bool g_gamma_piecewise = false;  // halo3-nx (2026-11-03): which form the device's gamma ramp is in (Video::NoteGameGamma)
+
 // Scratch space packets go to: the inline writers in N&B's own code (D3D's
 // header helpers), which reserve against m_pRingGuarantee. Large enough for
 // the biggest single reservation; the guarantee margin is what inline writers
@@ -815,6 +817,14 @@ u32 D3DDevice_BeginCommandBuffer_hook(u32 device_va, u32 command_buffer, u32 fla
   d.TouchRange(native::off::TextureFetch, 0x300);  // banjo-nx (2026-10-26, banjo_renut_tags)
   for (u32 i = 0; i < 5; ++i)
     d.SetPending(i, ~u64(own[i]));
+  static uint32_t begin_logged = 0;  // halo3-nx (2026-11-03): what this game's recordings inherit
+  if (begin_logged < 8) {
+    ++begin_logged;
+    RGPU_INFO("BeginCommandBuffer {:08X} on device {:08X} (global {:08X}): flags {:X}, inherit tags {:016X} {:016X} {:016X} "
+              "{:016X} {:016X}, RT0 {:08X}, depth {:08X}",
+              command_buffer, device_va, native::GlobalDevice(), flags, u64(own[0]), u64(own[1]), u64(own[2]), u64(own[3]),
+              u64(own[4]), d.W(d3d::kDeviceOffsetRenderTargets), d.W(d3d::kDeviceOffsetDepthStencil));
+  }
 
   BeginRecording(device_va, command_buffer);
   return 0;
@@ -920,7 +930,7 @@ void D3DDevice_Swap_hook(u32 device_va, u32 front_buffer, u32 /*parameters*/) {
     banjo::renut_gpu::checks::QueueKickFlush();
     KickFence(device);
     // banjo-nx (2026-10-20, banjo_renut_game_gamma): the device's gamma ramp (StoreGamma's +0x3A9C) for the present.
-    Video::NoteGameGamma(device + 0x3A84);  // katamari-nx: 0x3A9C->0x3A84
+    Video::NoteGameGamma(device + 0x3A84, g_gamma_piecewise);  // katamari-nx: 0x3A9C->0x3A84; halo3-nx: the form
   }
 
   render_thread::QueueFrame([front_buffer, swap_ordinal] {
@@ -1150,6 +1160,7 @@ void StoreGamma(native::Device d, const be_u16 (&corrected)[768]) {
 // D3DDevice_SetGammaRamp's work: the ramp (D3DGAMMARAMP, 3 x 256 words)
 // through the gamma table (GammaRampCorrected 0x826593F8).
 void SetGammaRamp(native::Device d, const u16 *ramp) {
+  g_gamma_piecewise = false;  // halo3-nx
   const std::array<u16, 1024> table = GammaTable(false);
   be_u16 corrected[768];
   for (u32 i = 0; i < 768; ++i)
@@ -1160,6 +1171,7 @@ void SetGammaRamp(native::Device d, const u16 *ramp) {
 // D3DDevice_SetPWLGamma's: D3DPWLGAMMA (3 x 128 {base, delta}) through the
 // table (sub_82659490), each segment's end clamped to 0x3FF.
 void SetPWLGamma(native::Device d, const u16 *pwl) {
+  g_gamma_piecewise = true;  // halo3-nx
   const std::array<u16, 1024> table = GammaTable(false);
   be_u16 corrected[768];
   for (u32 c = 0; c < 3; ++c) {

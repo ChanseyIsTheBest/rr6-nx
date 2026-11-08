@@ -76,6 +76,22 @@ namespace plume {
         std::atomic<uint64_t> msaaPipelines{0}, msaaAlphaToCoverage{0}, msaaPositioned{0};
         // sasrt-nx (2026-10-30, Deko3DOptions::stripRestart): indexed strip draws drawn with primitive restart.
         std::atomic<uint64_t> stripRestartDraws{0};
+        // renut-ultimate (2026-11-08): depth decompresses done where the target was bound, left for later
+        // (depthResolveLazy), and done later for a read.
+        std::atomic<uint64_t> depthResolvesBound{0}, depthResolvesDeferred{0}, depthResolvesLater{0};
+        // sasrt-nx (2026-11-08, Deko3DOptions::diagBarriers): the barriers emitted by what they wait for and why
+        // (Deko3DBarrierWhy bits of every call merged into them): [mode 0 primitives, 1 fragments, 2 full][why].
+        std::atomic<uint64_t> barrierWhy[3][256] = {};
+        // sasrt-nx (2026-11-08, the GPU round): what plume's items did, by the round's item number (sasrt_gpu_round.h;
+        // load and store counts, as the others): 1 binds of a compressed depth image known decompressed (not marked
+        // dirty), 5 decompressions whose barrier merged with a pending one, 6 readback barriers merged, 8 buffer
+        // barriers with the data-only invalidate.
+        std::atomic<uint64_t> sasrtRound[64] = {};  // sasrt-nx (2026-11-08): 32 with the second round, 64 with the third
+        // sasrt-nx (2026-11-08, sasrt_deko3d_diag_barriers, the second GPU round's census): descriptor and code cache
+        // invalidations recorded (flushDescriptorInvalidate), framebuffer binds and the depth target changes among them,
+        // command lists ended, compute dispatches, colour and depth clears.
+        std::atomic<uint64_t> diagDescInvalidates{0}, diagCodeInvalidates{0}, diagFramebufferBinds{0},
+            diagDepthChanges{0}, diagListEnds{0}, diagDispatches{0}, diagClears{0};
     };
     // banjo-nx (2026-10-19, render-thread proposal 13): read inline (no call per draw).
     extern Deko3DStats g_deko3dStats;
@@ -128,6 +144,27 @@ namespace plume {
         Deko3DImageAlloc alloc;
         bool ownsMemory = true;
         bool valid = false;
+        bool compressed = false;  // sasrt-nx (2026-10-21): made with DkImageFlags_HwCompression
+        // renut-ultimate (2026-11-08, Deko3DOptions::depthResolveLazy): a compressed depth target written through
+        // depthPendingView and not decompressed since it left the bind point. Decompressed when it next moves to a read
+        // layout (a barrier), or before it is bound through another view. The command lists that touch it are recorded
+        // one after another, in the order the GPU runs them.
+        mutable bool depthPending = false;
+        mutable DkImageView depthPendingView{};
+        // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate): the texture-cache drop epoch
+        // (g_deko3dTexDropEpoch) in which a draw last had it bound for sampling; 0: never.
+        mutable uint64_t sampledEpoch = 0;
+        // sasrt-nx (2026-11-08, Deko3DOptions::trackedTargetWait): the fragment-wait epoch (g_deko3dWaitEpoch) of its last
+        // sampling bind, copy, resolve or decompression; 0: never.
+        mutable uint64_t usedWaitEpoch = 0;
+        // sasrt-nx (2026-11-08, Deko3DOptions::trackedReadWait): the fragment-wait epoch of its last write (bound as a target,
+        // cleared, copied or resolved into, decompressed); 0: never.
+        mutable uint64_t writtenWaitEpoch = 0;
+        // sasrt-nx (2026-11-08, Deko3DOptions::preciseDepthResolve): a compressed depth image may hold compressed tiles
+        // written since its last decompression (true until one: nothing known). Set where the GPU writes it (a draw that
+        // writes depth or stencil, a clear, a copy, upload, blit or resolve into it), cleared by dkCmdBufResolveDepthValues
+        // on it; kept in the order the lists are recorded (the order the GPU runs them).
+        mutable bool depthUnresolved = true;
 
         Deko3DTexture(Deko3DDevice *device, const RenderTextureDesc &desc);
         Deko3DTexture(Deko3DDevice *device) : device(device) {} // swapchain images
@@ -158,8 +195,11 @@ namespace plume {
         bool textures = false;
         // Bound textures (the game shaders' texb): binding k's handle is made from two words of the shared constants
         // (UBO binding 2): the texture word's low 20 bits and the sampler word's high 12 (SamplerNone: sampler 0).
+        // vivapinata-nx (2026-11-03): samplerVariant, added to the sampler's part of the handle: a fetch that names its own
+        // filters takes the slot that many after its word's (render/textures.cpp SamplerSlotUncached).
         struct TexBinding {
             uint16_t textureWord = 0, samplerWord = 0;
+            uint32_t samplerVariant = 0;
         };
         static constexpr uint16_t SamplerNone = 0xFFFF;
         std::vector<TexBinding> texBindings;
@@ -175,6 +215,8 @@ namespace plume {
         // buffer (UBO binding 3, entry k of the pixel stage, 32 + k of the vertex stage) instead of a texture query
         // (the banjo-dk line's txq=; tools/deko3d_glsl_opt.py, pass txq).
         uint32_t txqMask = 0;
+        // vivapinata-nx (2026-11-03): a vertex shader that has the kill's constant 914 (tools/deko3d_glsl_opt.py vskill).
+        bool writesVertexKill = false;
     };
 
     struct Deko3DShader : RenderShader {
@@ -194,8 +236,11 @@ namespace plume {
 
     // A loaded variant: DKSH in the device's code memory.
     struct Deko3DShaderVariant {
-        DkShader shader{};
+        DkShader shader{};  // first: a pipeline's const DkShader * is its variant's address (vsInputs below)
         bool valid = false;
+        // sasrt-nx (2026-11-08, Deko3DOptions::vsInputMask): a vertex variant's generic attributes its program reads
+        // (bit a: location a), from its shader program header's input map; all ones when not known.
+        uint32_t vsInputs = ~0u;
     };
 
     struct Deko3DPipelineLayout : RenderPipelineLayout {
@@ -233,6 +278,8 @@ namespace plume {
         // banjo-nx (2026-10-19, GPU): per image id, the level-0 size of the view written there as a texture query
         // reads it (width, height, depth or layers), for the texture size buffer (txq).
         std::vector<std::array<uint32_t, 3>> imageSizes;
+        // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate): per image id, the texture written there (null: none).
+        std::vector<const struct Deko3DTexture *> imageTextures;
 
         Deko3DDescriptorSet(Deko3DDevice *device, const RenderDescriptorSetDesc &desc);
         ~Deko3DDescriptorSet() override;
@@ -274,6 +321,12 @@ namespace plume {
         bool textures = false;
         bool usesBlendConstant = false;
         bool stencilEnabled = false;
+        // sasrt-nx (2026-11-08, Deko3DOptions::preciseDepthResolve): a draw with it may write the depth target (depth
+        // writes, or a stencil test with an operation other than keep).
+        bool writesDepthStencil = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): its vertex shader has constant 929 = 0 (no user clip distance): the
+        // draws set the clip slot off (SET_USER_CLIP_ENABLE 0) while it is bound.
+        bool noUserClip = false;
         bool dynamicStencilReference = false;
         bool dynamicDepthBias = false;
         std::atomic<bool> provisional{false};  // (see pending, below; counted in g_deko3dProvisionalPipelines)
@@ -308,6 +361,7 @@ namespace plume {
         float depthBias = 0.0f, depthBiasClamp = 0.0f, slopeScaledDepthBias = 0.0f;
         DkVtxAttribState attribs[32]{};
         uint32_t attribCount = 0;
+        uint32_t fetchedAttribs = 0;  // sasrt-nx (2026-11-08, Deko3DOptions::vsInputMask): the attribs that read a buffer
         DkVtxBufferState vtxBuffers[16]{};
         uint32_t vtxBufferCount = 0;
         // banjo-nx (2026-10-21, Deko3DOptions::asyncVariants): the stages drawn with their shader's generic variant
@@ -338,6 +392,10 @@ namespace plume {
         uint32_t colorCount = 0;
         DkImageView depth{};
         bool hasDepth = false;
+        bool depthCompressed = false;  // sasrt-nx (2026-10-21): the depth target has hardware compression
+        const Deko3DTexture *depthTexture = nullptr;  // renut-ultimate (2026-11-08): its texture (depthResolveLazy)
+        const Deko3DTexture *colorTextures[8] = {};  // sasrt-nx (2026-11-08, Deko3DOptions::trackedReadWait)
+        uint64_t serial = 0;  // sasrt-nx (2026-11-08, Deko3DOptions::sameTargetsKept): unique to this object
         uint32_t width = 0, height = 0;
         bool srgb[8] = {};
         uint32_t getWidth() const override { return width; }
@@ -420,6 +478,9 @@ namespace plume {
         // drops only the caches whose number moved).
         uint64_t seenDescriptors = 0, seenCode = 0;
         const Deko3DFramebuffer *framebuffer = nullptr;
+        // sasrt-nx (2026-10-21, Deko3DOptions::depthResolve): the bound depth target is compressed and may hold tiles
+        // the texture unit cannot read (resolveBoundDepth).
+        bool depthDirty = false;
         // Bound textures: the handles last bound per graphics stage, and the buffer the shared constants were last
         // found in (GPU range and CPU address).
         DkResHandle boundTex[3][32]{};
@@ -498,6 +559,27 @@ namespace plume {
         DkBarrier pendingBarrierMode = DkBarrier_None;
         uint32_t pendingBarrierInvalidate = 0;
         bool pendingBarrier = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_convert_lead_wait): buffer barriers requested (each a wait for idle with the
+        // data caches dropped, before the next work), counted for Deko3DBufferWaits.
+        uint64_t bufferWaits = 0;
+        // sasrt-nx (2026-11-08, Deko3DOptions::sameTargetsKept): the serial of the framebuffer whose targets the GPU has
+        // bound in this list (0: unknown).
+        uint64_t boundTargetsSerial = 0;
+        // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): SET_USER_CLIP_ENABLE as this list last wrote it (-1: plume does not
+        // write it, Deko3DOptions::userClipEnable -1).
+        int boundUserClip = -1;
+        // sasrt-nx (2026-11-08, Deko3DOptions::leanBarrierSkip): work recorded since the last barrier that waited for the
+        // fragments (true at a list's start: the list before may still run).
+        bool workSinceFragmentWait = true;
+        // sasrt-nx (2026-11-08, leanBarrierSkip): a dispatch since the last wait for idle (a fragment barrier does not wait
+        // for compute jobs: it then leaves workSinceFragmentWait set).
+        bool dispatchSinceIdle = true;
+        // sasrt-nx (2026-11-08, sasrt_gpu_export_raster_discard): the next draw with the rasterizer off (Deko3DDiscardNextDraw).
+        bool discardNextDraw = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_export_list_topology): the next draw's primitive instead of the pipeline's
+        // (DkPrimitive + 1; 0 none), taken once.
+        uint32_t nextPrimitive = 0;
+        uint32_t pendingBarrierWhy = 0;  // sasrt-nx (2026-11-08, Deko3DOptions::diagBarriers): Deko3DBarrierWhy bits
         // banjo-nx (2026-10-19, render-thread proposal 13): per-draw counters of this list, added to the totals at end()
         // (no atomic read-modify-write per draw: the A57 has no LSE).
         uint64_t statDraws = 0, statWindowDraws = 0;
@@ -512,10 +594,49 @@ namespace plume {
                 emitBarrier(pendingBarrierMode, pendingBarrierInvalidate);
         }
         void invalidateZcullAfterCopy(const Deko3DTexture *dst);
+        // sasrt-nx (2026-11-08, Deko3DOptions::preciseDepthResolve): the draw about to be recorded may write the bound
+        // compressed depth target: it is dirty (decompressed before it is read or leaves the bind point).
+        // sasrt-nx (2026-11-08): Deko3DStats::sasrtRound[i] + 1 (a load and a store).
+        // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): the clip slot off for a pipeline whose vertex shader writes no clip
+        // distance, back to Deko3DOptions::userClipEnable for one that does (written only when it changes).
+        void noteUserClip();
+        // sasrt-nx (2026-11-08, Deko3DOptions::vsInputMask): the pipeline's vertex attributes and buffers, the ones its
+        // bound vertex variant does not read as constants (bound only when that differs from what is bound).
+        void bindVertexInput(const Deko3DGraphicsPipeline *p, const DkShader *vs);
+        // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate): image id 'id' of the bound image set sampled in
+        // the current epoch; every bound one again (after a drop: later draws sample them still).
+        void markSampled(uint32_t id);
+        void markBoundSampled();
+        void markTargetsWritten();  // sasrt-nx (2026-11-08, trackedReadWait): the bound framebuffer's textures
+        uint32_t extraFragTex[8] = {};  // Deko3DBindFragmentTextures' ids (not in boundTex)
+        uint32_t extraFragTexCount = 0;
+        static void bumpStat(std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+        static void bumpRound(int i) {
+            std::atomic<uint64_t> &c = GetDeko3DStats().sasrtRound[i];
+            c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
+        // sasrt-nx (2026-11-08, Deko3DOptions::lazyDepthResolve): whether the image may wait for its read.
+        static bool lazyResolvable(const Deko3DTexture *t);
+        void resolveUnboundDepth(const Deko3DTexture *t);
+        void noteDepthWrite() {
+            if (framebuffer && framebuffer->depthCompressed && graphicsPipeline->writesDepthStencil) {
+                depthDirty = true;
+                if (framebuffer->depthTexture)
+                    framebuffer->depthTexture->depthUnresolved = true;
+            }
+        }
+        // sasrt-nx (2026-10-21): dkCmdBufResolveDepthValues on the bound depth target when depthDirty (barrierAfter:
+        // a texture-cache barrier follows it, for reads whose own barrier was recorded before it).
+        void resolveBoundDepth(bool barrierAfter);
         uint64_t currentEpoch() const;
         void bindGraphicsBuffers();
         void bindTextures();
         void restoreScissors();
+        // renut-ultimate (2026-11-08, Deko3DOptions::depthResolveLazy): the bound dirty depth target left for later (its
+        // texture's depthPending), and a pending one decompressed through its own view (rebind: the bound targets
+        // bound again after).
+        void deferBoundDepth();
+        void resolvePendingDepth(const Deko3DTexture *t, bool rebind);
     };
 
     struct Deko3DCommandQueue : RenderCommandQueue {
@@ -716,7 +837,7 @@ namespace plume {
         void finishAsync(CompileJob *job);
         // banjo-nx (2026-10-21): Deko3DRefreshPipeline's work; true while a stage still waits.
         bool refreshPipeline(Deko3DGraphicsPipeline *p, bool &changed);
-        bool loadCode(const std::vector<uint8_t> &dksh, DkShader &shader, const char *what);
+        bool loadCode(const std::vector<uint8_t> &dksh, DkShader &shader, const char *what, uint32_t *vsInputs = nullptr);
         void compileWorker();
         void applyCompilePriority();
     };
@@ -740,6 +861,35 @@ namespace plume {
     // banjo-nx: the vertex fetch data of the next draws (storage binding 15 of the graphics stages): size bytes from
     // address, which the shaders index from 0 (shader_common.h, g_DkAddressWindow).
     bool Deko3DBindFetchData(RenderCommandList *commandList, uint64_t address, uint32_t size);
+    // sasrt-nx (2026-11-08, sasrt_gpu_readback_compute): a wait for the 3D engine and its compute, then the L2's dirty
+    // lines to memory (DkInvalidateFlags_L2Cache: L2FlushDirty + L2SysmemInvalidate), as a pending barrier: what a compute
+    // shader wrote for the CPU is in memory when the list's fence is reached.
+    void Deko3DFlushL2(RenderCommandList *commandList);
+    // sasrt-nx (2026-11-08, sasrt_gpu_export_raster_discard): the next draw recorded with the rasterizer off (3D method
+    // 0x0DF RasterizerEnable 0, then 1 again: plume's pipelines all rasterize): its vertex shader runs and exports, no
+    // primitive reaches clipping, setup or the scissor.
+    void Deko3DDiscardNextDraw(RenderCommandList *commandList);
+    // sasrt-nx (2026-11-08, sasrt_gpu_export_list_topology; the fourth GPU round): the next draw recorded with this
+    // DkPrimitive instead of its pipeline's (with the rasterizer off: only which vertices the vertex shader runs for).
+    void Deko3DSetNextPrimitive(RenderCommandList *commandList, uint32_t primitive);
+    // sasrt-nx (2026-11-08, sasrt_gpu_convert_lead_wait): the list's buffer barriers so far (Deko3DCommandList::bufferWaits).
+    uint64_t Deko3DBufferWaits(const RenderCommandList *commandList);
+    // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate): the texture-cache drop epoch (plume_deko3d_commands.cpp).
+    extern std::atomic<uint64_t> g_deko3dTexDropEpoch;
+    extern std::atomic<uint64_t> g_deko3dWaitEpoch;  // sasrt-nx (2026-11-08, Deko3DOptions::trackedTargetWait)
+    // sasrt-nx (2026-11-08, the second GPU round): a wait for the 3D engine (merged with the pending barrier like any
+    // other) that drops only the caches its reader reads through: DkInvalidateFlags_Image (the texture cache, which the
+    // vertex fetch is given), Deko3DGlobalDataInvalidate (storage-buffer loads). countsAsBufferWait: it drops the global-
+    // data cache, so it counts in Deko3DBufferWaits as a buffer barrier does.
+    void Deko3DBufferWait(RenderCommandList *commandList, uint32_t invalidate, bool countsAsBufferWait);
+    // sasrt-nx (2026-11-08, sasrt_deko3d_diag_trace; the second GPU round): while g_deko3dTrace, the command lists'
+    // work as tokens in recording order (runs of one token as "token*n"), for one frame at a time: barriers ("B" +
+    // P primitives / F fragments / X full + the causes + "i" if it drops the texture cache), draws "D", dispatches "X",
+    // target binds "T<colour>:<depth>" (images numbered in order of appearance), clears "Cc" / "Cd", depth
+    // decompressions "Z", copy-engine copies "K", descriptor invalidations "I", list ends "E".
+    extern bool g_deko3dTrace;
+    void Deko3DTraceToken(const char *token);
+    std::string Deko3DTraceTake();
     // banjo-nx (2026-10-20, banjo_deko3d_skin_once): a storage buffer of the next draws at 'slot' (0-13) of the
     // graphics stages that read it (the fur's skin cache: slot 13).
     bool Deko3DBindStorage(RenderCommandList *commandList, uint32_t slot, uint64_t address, uint32_t size);
@@ -795,9 +945,13 @@ namespace plume {
     bool Deko3DRefreshPipelineSlow(RenderPipeline *pipeline);
     // banjo-nx (2026-10-27): whether a shader may read gl_VertexID (Deko3DShaderUsage::readsVertexId); true for null.
     bool Deko3DShaderReadsVertexId(const RenderShader *shader);
+    // vivapinata-nx (2026-11-03): whether a vertex shader has the kill's constant 914 (Deko3DShaderUsage::writesVertexKill).
+    bool Deko3DShaderWritesVertexKill(const RenderShader *shader);
     // banjo-nx (2026-10-21, asyncVariants): this thread does not draw (Renut's pipeline prebuild workers): the variants it
     // asks for are compiled after the draws' ones, and only so many wait at a time (the rest when a draw needs them).
     void Deko3DSetBackgroundThread(bool background);
+    // banjo-nx (2026-11-01): the pipeline this thread builds draws much slower with its generic variants: compile them now, here.
+    void Deko3DSetUrgentVariants(bool urgent);
     // banjo-nx (2026-10-28, the console's OOM): called when a memory block's storage cannot be had from the heap, before
     // asking again (any thread; it must not take the application's renderer lock): the application's spares go back.
     void Deko3DSetMemoryPressureCallback(void (*callback)());
@@ -881,12 +1035,6 @@ namespace plume {
         // bound index format's all-ones (as now), 1 always 0xFFFFFFFF, 2 always 0xFFFF. Ryujinx ignores the register
         // (its Vulkan back end restarts at the index type's maximum), the hardware compares it.
         unsigned restartIndexMode = 0;
-        // rr6-nx (2026-11-05, the console's holes, black squares, broken cables and chrome car): Maxwell's SET_USER_CLIP_ENABLE
-        // (method 0x544), written at the start of every list. deko3d never writes it (libdeko3d disassembled; it has no
-        // API for it), so the console clips with every slot, and a vertex shader that writes gl_ClipDistance[0] alone has
-        // slots 1-7 clipping on whatever its unwritten outputs hold. Ryujinx clips only with what the shader writes, so the
-        // emulator never shows it. Bit i: slot i. Renut's shaders write slot 0 only. -1: the register left alone.
-        int userClipEnable = 1;
         bool zcull = false;
         // A pipeline's vertex shader gets specialization constant 905 (when it declares it), the locations its pixel
         // shader reads of the ones it writes (none without a pixel shader; not with a geometry shader): banjo-nx's
@@ -954,6 +1102,106 @@ namespace plume {
         // read on the uam thread (ahead of the compiles, with no rest after it) while the draw uses the generic
         // variant, as for one that compiles. Same pixels.
         bool asyncCacheReads = false;
+        // rr6-nx (2026-11-05, ported into renut-ultimate): Maxwell's SET_USER_CLIP_ENABLE (method 0x544, register 0x1510),
+        // written at the start of every command list. deko3d never writes it (libdeko3d disassembled; no API), so on the
+        // console every clip slot acts as enabled and a vertex shader that writes gl_ClipDistance[0] alone has slots 1-7
+        // clipping on whatever its unwritten outputs hold. Bit i: slot i. -1 leaves the register alone.
+        int userClipEnable = 1;
+        // sasrt-nx (2026-10-21, ported into renut-ultimate): with depthCompression, a depth target is decompressed
+        // (dkCmdBufResolveDepthValues, Maxwell's DECOMPRESS_ZETA_SURFACE, as NVN's nvnCommandBufferResolveDepthBuffer)
+        // before it is read: when it moves to a read layout while bound, when another depth target (or none) is bound,
+        // and at the end of a list. The texture unit cannot read the GPU's compressed depth tiles. Ryujinx emulates no
+        // compression, so only the console shows it.
+        bool depthResolve = false;
+        // renut-ultimate (2026-11-08): with depthResolve, a target leaving the bind point (or bound at the end of a list)
+        // is decompressed only when something reads it: when it next moves to a read layout, or before it is bound
+        // through another view. Ridge Racer 6, which reads no depth, paid 0.46 ms a frame on the console for the eager
+        // form. Every read of a depth target goes through a barrier (Renut's other back ends need the layout).
+        bool depthResolveLazy = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_precise_depth_resolve): with depthResolve, a depth target is decompressed when
+        // it leaves the bind point or is read only if its image was written since its last decompression
+        // (Deko3DTexture::depthUnresolved), not every time it was bound. Draws that only test depth (the lighting
+        // passes, which take the scene depth on and off dozens of times a frame) leave its tiles as they were: a
+        // decompression of tiles already plain changes nothing. Read at each use (the in-run A/B may change it between
+        // lists); the flag is kept either way.
+        bool preciseDepthResolve = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_decompress_merge): resolveBoundDepth(true) with a barrier pending (not a full
+        // one, mergeBarriers) records the decompression first and merges its following barrier into the pending one.
+        bool decompressMerge = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_readback_barrier_merge): copyTextureRegion's image-to-buffer readback records
+        // its full barriers before and after the copy as pending ones (mergeBarriers): one with the pending barrier
+        // before it, one with the next barrier after it (emitted before the next work or at the list's end).
+        bool readbackMerge = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_data_cache_invalidate): a buffer barrier invalidates the shaders' global-data
+        // and constant caches only (Maxwell 3D method 0x369 InvalidateShaderCaches, bits 4 and 12), not their
+        // instruction cache (DkInvalidateFlags_Shader sets bit 0 as well): Deko3DDataInvalidate in the pending flags.
+        bool dataOnlyInvalidate = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_tiled_cache; off by default, for the console to judge): Maxwell's tiled caching
+        // (binning, the hardware's tile-based rendering, which NVN uses and deko3d leaves off: its queue sets 128x128 tiles
+        // up and never enables them) on from the start of every command list. deko3d's barriers order tiles and
+        // fragments for it (DkBarrier_Tiles / _Fragments), its fences flush it; a full barrier (the copy engine next)
+        // gets a tiled cache flush ahead of it here. Off: a list starts with it off when it was ever on (the in-run A/B).
+        bool tiledCache = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_lazy_depth_resolve; off by default, for the console to judge): with depthResolve
+        // and preciseDepthResolve, a written compressed depth target (one layer, one level) is not decompressed when it
+        // leaves the bind point or at a list's end, but right before something reads it (a texture barrier into a read
+        // or copy layout): bound alone for the decompression, then the targets bound again. A target written, unbound and
+        // bound to be written again before anything reads it is decompressed once instead of at every unbind.
+        bool lazyDepthResolve = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_same_targets_kept; the second GPU round): setFramebuffer with the framebuffer
+        // object whose targets this list bound last (a framebuffer's views never change, and one in use is alive) does
+        // not bind them again: the renderer asks for its targets again after every compute dispatch and resolve.
+        bool sameTargetsKept = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_seed_no_lead_wait / sasrt_gpu_convert_lead_wait): the constant cache dropped at
+        // the start of every command list. A compute dispatch's push constants are fresh transient memory (an address
+        // no earlier read of this recording used), but the list's last recording read the same addresses; deko3d drops
+        // no constant cache for them, and the buffer barrier that used to come right before every seed and conversion
+        // (which dropped it) is gone with those items. One inline method a list.
+        bool freshComputeConstants = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_lean_barrier_skip; the second GPU round): a barrier that only moves textures into
+        // a write layout (colour or depth target: deko3d's fragment barrier, no cache dropped: leanBarriers) is not
+        // recorded when no draw, dispatch, copy or depth decompression came since the last barrier that waited for the
+        // fragments (or more): the reads it would order before the writes have finished already. Clears read no
+        // texture and write in order with the draws.
+        bool leanBarrierSkip = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_vs_input_mask; the third GPU round): a pipeline's attributes that the bound vertex
+        // variant does not read (Deko3DShaderVariant::vsInputs) bound as constants: the vertex attribute fetch reads no
+        // memory for them.
+        bool vsInputMask = false;
+        // sasrt-nx (2026-11-09, sasrt_gpu_exp_sph_no_global_store): an EXPERIMENT: vertex programs loaded with their shader
+        // program header's DoesGlobalStore bit (word 0 bit 16) cleared; bit 0 of the value: that bit, bit 1: DoesLoadOrStore
+        // (bit 26) too.
+        uint32_t expSphStoreBits = 0;
+        // sasrt-nx (2026-11-08, sasrt_gpu_texture_drop_tracked; the third GPU round): a texture moved into a read layout
+        // drops the texture cache only when it was bound for sampling since the last drop that waited for the GPU
+        // (Deko3DTexture::sampledEpoch): the cache holds no line of an image no draw sampled since.
+        bool trackedImageInvalidate = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_target_wait_tracked): a barrier that only moves textures into target layouts is
+        // not recorded when none of them was used (sampled, copied, resolved, decompressed) since the last fragment wait
+        // (Deko3DTexture::usedWaitEpoch).
+        bool trackedTargetWait = false;
+        // sasrt-nx (2026-11-08, sasrt_gpu_read_wait_tracked): a move into a read layout waits only for a texture written
+        // since the last fragment wait (Deko3DTexture::writtenWaitEpoch) or one whose cache drop is due.
+        bool trackedReadWait = false;
+        // sasrt-nx (2026-11-08, sasrt_deko3d_diag_barriers): count the barriers emitted by their causes
+        // (Deko3DStats::barrierWhy, Deko3DBarrierWhy). A diagnostic: one array add per barrier.
+        bool diagBarriers = false;
+    };
+    // sasrt-nx (2026-11-08, Deko3DOptions::dataOnlyInvalidate): plume's own invalidate bit, above deko3d's flags.
+    constexpr uint32_t Deko3DDataInvalidate = 1u << 30;
+    // sasrt-nx (2026-11-08, the second GPU round): the shaders' global-data cache alone (InvalidateShaderCaches bit 4),
+    // for a wait whose reader loads storage buffers (Deko3DBufferWait).
+    constexpr uint32_t Deko3DGlobalDataInvalidate = 1u << 29;
+    // sasrt-nx (2026-11-08): why a barrier was recorded (Deko3DStats::barrierWhy's bits).
+    enum Deko3DBarrierWhy : uint32_t {
+        Deko3DWhyRead = 1,        // a texture into SHADER_READ / DEPTH_READ / GENERAL
+        Deko3DWhyCopy = 2,        // a texture into a copy or resolve layout, or the COPY stage
+        Deko3DWhyColor = 4,       // a texture into COLOR_WRITE
+        Deko3DWhyDepth = 8,       // a texture into DEPTH_WRITE
+        Deko3DWhyOther = 16,      // PRESENT or another layout
+        Deko3DWhyBuffer = 32,     // a buffer barrier
+        Deko3DWhyCompute = 64,    // the COMPUTE stage
+        Deko3DWhyMerged = 128,    // more than one barriers() call merged into it
     };
     void Deko3DSetOptions(const Deko3DOptions &options);
     // banjo-nx (2026-10-19, render-thread proposal 13): read inline (barriers() reads it per call).

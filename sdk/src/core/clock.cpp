@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <utility>
@@ -20,6 +21,7 @@
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/math.h>
+#include <rex/platform.h>
 #include <rex/sys_counters.h>
 
 #if !defined(__SWITCH__)
@@ -151,6 +153,16 @@ REXCVAR_DEFINE_BOOL(clock_lock_free, true, "Clock",
                     "by up to a tick every call (~0.3 % at 300,000 calls a second); this count does not drift. "
                     "false = the locked path");
 
+// rr6-nx (2026-11-08): Ridge Racer 6's drawing thread reads the time base for its timers (sub_82222A08 and the copies
+// that inline it) so often that the clock was about 5 % of that thread while racing on the console, and the lock-free
+// path still made four calls a read: the host count, the clock_no_scaling accessor, the thread pointer for the
+// per-thread count below, and the base through an acquire load of a heap object (most samples right after it). With
+// these settled once (RecomputeGuestTickScalar, after the toml), a read is the counter, the base from its own cache
+// line, a multiply and a divide: the same count.
+REXCVAR_DEFINE_BOOL(clock_count_calls, false, "Clock",
+                    "Count UpdateGuestClock's calls for the runtime census (banjo_diag_runtime_census's clock line). "
+                    "Off, a time-base read takes no thread pointer and no counter (the census shows 0 calls)");
+
 namespace rex::chrono {
 
 // Time scalar applied to all time operations.
@@ -180,16 +192,65 @@ struct TickBase {
   uint64_t num;
   uint64_t den;
   uint64_t max_delta;  // the largest host delta whose product with num fits in 64 bits
+  uint64_t recip = 0;  // rr6-nx (2026-11-08): floor(2^64 / den) for den >= 2 (DivideByDen); 0: divide
 };
 const TickBase initial_tick_base_{last_host_tick_count_, 0, 1, 1, std::numeric_limits<uint64_t>::max()};
 std::atomic<const TickBase*> tick_base_{&initial_tick_base_};
 // clock_lock_free as RecomputeGuestTickScalar last read it (Runtime::Setup, after the toml): a cvar read is a call.
 std::atomic<bool> lock_free_{true};
 
+// rr6-nx (2026-11-08, clock_count_calls): the bases RecomputeGuestTickScalar publishes, each on a cache line of its own
+// (the heap object before shared its line with whatever the allocator put next to it); new past these. And the fast
+// read's switch: clock_lock_free on, clock_no_scaling and clock_count_calls off, as last read there.
+struct alignas(64) AlignedTickBase {
+  TickBase base;
+};
+AlignedTickBase tick_base_slots_[8];
+size_t tick_base_slots_used_ = 0;  // under tick_mutex_
+alignas(64) std::atomic<bool> fast_read_{false};
+
+// The host count, inline where the platform's is one register read.
+[[gnu::always_inline]] inline uint64_t HostTicksNow() {
+#if REX_PLATFORM_SWITCH && defined(__aarch64__)
+  uint64_t ticks;
+  __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(ticks));  // libnx's armGetSystemTick
+  return ticks;
+#else
+  return Clock::QueryHostTickCount();
+#endif
+}
+
+// rr6-nx (2026-11-08): floor(x / den) by a multiply. The A57's 64-bit divide (up to about 40 cycles) sat on the
+// chain every time-base read waits on (125/48 here: 50 MHz guest, 19.2 MHz host). With r = floor(2^64 / den),
+// floor(x * r / 2^64) is floor(x / den) or one less (x < 2^64): one compare of the remainder fixes it. Exact.
+[[gnu::always_inline]] inline uint64_t DivideByDen(const TickBase& base, uint64_t x) {
+#if defined(__SIZEOF_INT128__)
+  if (base.recip) [[likely]] {
+    uint64_t q = uint64_t((static_cast<unsigned __int128>(x) * base.recip) >> 64);
+    if (x - q * base.den >= base.den) ++q;
+    return q;
+  }
+#endif
+  return x / base.den;
+}
+
+// floor(2^64 / den) in 64-bit arithmetic: 2^64 = (2^64 - 1) + 1. (A 128-bit divide needs __udivti3, which the PC
+// build's clang on Windows does not link.)
+inline uint64_t ReciprocalOf(uint64_t den) {
+#if defined(__SIZEOF_INT128__)
+  if (den < 2) return 0;
+  const uint64_t all = std::numeric_limits<uint64_t>::max();
+  return all / den + (all % den == den - 1 ? 1 : 0);
+#else
+  (void)den;
+  return 0;
+#endif
+}
+
 inline uint64_t GuestTicksAt(const TickBase& base, uint64_t host_tick_count) {
   const uint64_t delta = host_tick_count > base.host ? host_tick_count - base.host : 0;
   if (delta <= base.max_delta) [[likely]] {
-    return base.guest + delta * base.num / base.den;
+    return base.guest + DivideByDen(base, delta * base.num);
   }
   // delta = q * den + r: the same floor without the 64-bit overflow (centuries away at the start ratio).
   return base.guest + delta / base.den * base.num + delta % base.den * base.num / base.den;
@@ -216,14 +277,30 @@ void RecomputeGuestTickScalar() {
   // The lock-free base moves to now, so the count goes on from where the old ratio took it.
   const uint64_t host_now = Clock::QueryHostTickCount();
   const TickBase* old_base = tick_base_.load(std::memory_order_relaxed);
-  tick_base_.store(new TickBase{host_now, GuestTicksAt(*old_base, host_now), frac.first, frac.second,
-                                std::numeric_limits<uint64_t>::max() / frac.first},
+  const TickBase next{host_now, GuestTicksAt(*old_base, host_now), frac.first, frac.second,
+                      std::numeric_limits<uint64_t>::max() / frac.first, ReciprocalOf(frac.second)};
+  TickBase* slot = tick_base_slots_used_ < std::size(tick_base_slots_)
+                       ? &tick_base_slots_[tick_base_slots_used_++].base
+                       : new TickBase;
+  *slot = next;
+  tick_base_.store(slot, std::memory_order_release);
+#if REX_CLOCK_RAW_AVAILABLE
+  const bool raw = REXCVAR_GET(clock_source_raw);  // the fast read takes the platform's count
+#else
+  const bool raw = false;
+#endif
+  fast_read_.store(REXCVAR_GET(clock_lock_free) && !REXCVAR_GET(clock_no_scaling) &&
+                       !REXCVAR_GET(clock_count_calls) && !raw,
                    std::memory_order_release);
 }
 
 // Update the guest timer for all threads.
 // Return a copy of the value so locking is reduced.
 uint64_t UpdateGuestClock() {
+  if (fast_read_.load(std::memory_order_relaxed)) [[likely]] {  // rr6-nx (2026-11-08, clock_count_calls)
+    const TickBase& base = *tick_base_.load(std::memory_order_acquire);
+    return GuestTicksAt(base, HostTicksNow());
+  }
   uint64_t host_tick_count = Clock::QueryHostTickCount();
 
   if (REXCVAR_GET(clock_no_scaling)) {

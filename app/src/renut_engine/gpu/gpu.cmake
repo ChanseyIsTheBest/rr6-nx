@@ -286,8 +286,12 @@ function(renut_gpu_setup TARGET)
     renut_host_shader(${TARGET} present_ps ps_6_0)
     renut_host_shader(${TARGET} depth_resolve_ps ps_6_0)
     renut_host_shader(${TARGET} depth_resolve_ms_ps ps_6_0)
+    renut_host_shader(${TARGET} depth_resolve_float_ps ps_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_depth_resolve_float_ps)
     renut_host_shader(${TARGET} texture_mip_ps ps_6_0)
     renut_host_shader(${TARGET} resolve_copy_ps ps_6_0)  # banjo-nx (2026-10-18)
+    renut_host_shader(${TARGET} view_fp10_encode_ps ps_6_0)  # halo3-nx (2026-11-03)
+    renut_host_shader(${TARGET} resolve_clamp_ps ps_6_0)  # sasrt-nx (2026-10-20): 16-bit fixed-point resolves
+    renut_host_shader(${TARGET} depth_restore_ps ps_6_0)  # sasrt-nx (2026-10-20): the EDRAM depth restore
     # banjo-nx (2026-10-21, banjo_renut_smaa): SMAA 1x (render/smaa.cpp; app/thirdparty/smaa, MIT).
     renut_host_shader(${TARGET} smaa_vs vs_6_0)
     renut_host_shader(${TARGET} smaa_edge_ps ps_6_0)
@@ -302,6 +306,8 @@ function(renut_gpu_setup TARGET)
     renut_host_shader(${TARGET} rectangle_list_gs gs_6_0)
     renut_host_shader(${TARGET} point_sprite_gs gs_6_0)
     renut_host_shader(${TARGET} stream_convert_cs cs_6_0)
+    renut_host_shader(${TARGET} fetch_copy_cs cs_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute)
+    renut_host_shader(${TARGET} texel_readback_cs cs_6_0)  # sasrt-nx (2026-11-08, sasrt_gpu_texel_readback_compute)
     renut_host_shader(${TARGET} target_readback_cs cs_6_0)
 
     renut_xenos_shader_cache(${TARGET})

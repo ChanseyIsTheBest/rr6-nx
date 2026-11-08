@@ -12,15 +12,18 @@
 # (BANJO_CENTROID, on unless 0). -NoCentroid translates with BANJO_CENTROID=0 (rc9's shaders) into its own folders
 # (out/deko3d_shaders_nocentroid, app/out/renut_switch_nocentroid: a GLSL package the runtime loads from the SD,
 # /switch/katamari_nx/deko3d_glsl.bin), step 3 left out (the NRO's own shader cache stays the default set's).
-param([switch]$NoCentroid)
+# rr6-nx's ultimate branch (2026-11-08): -Pc names the PC build whose XenosRecomp and shader table are used, -Tag a
+# suffix for the work and package folders (-Pc app\out\pc-ult -Tag _ult: out\deko3d_shaders_ult,
+# app\out\renut_switch_ult), so the master branch's shader files stay as they are.
+param([switch]$NoCentroid, [string]$Pc = "app\out\pc", [string]$Tag = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $py = "C:\Python314\python.exe"
-$exe = Join-Path $root "app\out\pc\xenos_recomp\build\XenosRecomp\XenosRecomp.exe"
+$exe = Join-Path $root "$Pc\xenos_recomp\build\XenosRecomp\XenosRecomp.exe"
 $common = Join-Path $root "app\thirdparty\reblue-XenosRecomp\XenosRecomp\shader_common.h"
 $dump = Join-Path $root "out\renut_shader_dump"
-$work = Join-Path $root $(if ($NoCentroid) { "out\deko3d_shaders_nocentroid" } else { "out\deko3d_shaders" })
-$pkg = $(if ($NoCentroid) { "app\out\renut_switch_nocentroid" } else { "app\out\renut_switch" })
+$work = Join-Path $root $(if ($NoCentroid) { "out\deko3d_shaders_nocentroid$Tag" } else { "out\deko3d_shaders$Tag" })
+$pkg = $(if ($NoCentroid) { "app\out\renut_switch_nocentroid$Tag" } else { "app\out\renut_switch$Tag" })
 if ($NoCentroid) { $env:BANJO_CENTROID = "0" } else { Remove-Item Env:\BANJO_CENTROID -ErrorAction SilentlyContinue }
 $early = Join-Path $work "early_alpha_hlsl"
 $spirv = Join-Path $work "spirv"
@@ -46,7 +49,7 @@ try {
     & $py tools\deko3d_shader_package.py --glsl (Join-Path $work "glsl_opt") --out $pkg
     if ($LASTEXITCODE -ne 0) { throw "deko3d_shader_package.py failed" }
     if (-not $NoCentroid) {
-        & $py tools\renut_switch_shader_cache.py --pc app\out\pc
+        & $py tools\renut_switch_shader_cache.py --pc $Pc --out-dir (Join-Path $root $pkg)
         if ($LASTEXITCODE -ne 0) { throw "renut_switch_shader_cache.py failed" }
     }
 } finally { Pop-Location; Remove-Item Env:\BANJO_CENTROID -ErrorAction SilentlyContinue }

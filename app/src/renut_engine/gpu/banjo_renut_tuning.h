@@ -46,6 +46,7 @@ struct Latched {
   bool output_trim = false;
   bool depth_words_view = false;
   bool tess_spec = false;
+  bool fetch_spec = false;
   bool alpha_spec = false;
   bool draw_resolves = false;
   bool resolve_skip = false;
@@ -76,6 +77,15 @@ struct Latched {
   bool cpu_memos = false;
   bool store_cards = false;
   bool store_cards_verify = false;
+  // bangaio-nx (2026-10-29, the v4 console profile: a load-acquire of a function static's guard for each switch
+  // CaptureDelta read, every draw on the game thread): the delta chain's switches (backend/queued.cpp).
+  bool deltas_narrow = false;
+  bool deltas_verify = false;
+  bool neon_compare = false;
+  bool capture_batches = false;
+  bool small_captures = false;
+  bool delta_masks = false;
+  bool delta_prefetch = false;  // bangaio-nx (2026-10-29, v6)
 };
 extern Latched g_latched;
 extern std::atomic<bool> g_latched_ready;
@@ -242,7 +252,6 @@ bool Deko3DWriteWaitOn();
 bool Deko3DClearWaitOn();
 bool Deko3DFullBarriersOn();  // banjo_deko3d_full_barriers (a console test)
 bool Deko3DColorCompressionOn();  // banjo_deko3d_color_compression (console test 10)
-int Deko3DUserClipEnable();  // banjo_deko3d_user_clip_enable
 int Deko3DRestartIndexMode();  // banjo_deko3d_restart_index (console tests 16 and 17)
 bool Deko3DGpuRegionOn();  // banjo-nx (2026-10-28, h10): banjo_deko3d_gpu_region
 // banjo_deko3d_barrier_merge / _lean (2026-10-19, GPU): fewer pipeline drains and texture cache invalidations.
@@ -256,6 +265,8 @@ bool Deko3DAsyncVariantsOn();  // banjo_deko3d_async_variants (2026-10-21)
 [[gnu::always_inline]] inline bool AlphaSpecOn() { return Latch().alpha_spec; }
 // banjo_deko3d_tess_spec / banjo_deko3d_vs_outputs (2026-10-18): constants 904 and 905 of the deko3d shaders.
 [[gnu::always_inline]] inline bool TessSpecOn() { return Latch().tess_spec; }
+// banjo_gpu_fetch_spec: a tessellated draw's constants 904 and 920-923 (render/draw.cpp FetchSpecWords).
+[[gnu::always_inline]] inline bool FetchSpecOn() { return Latch().fetch_spec; }
 bool Deko3DVsOutputsOn();
 // banjo_deko3d_uam_prmt (2026-10-18): uam's PRMT pass, and the DKSH cache file that goes with it.
 bool Deko3DUamPrmtOn();
@@ -365,15 +376,27 @@ void CountFetchAlignment(bool aligned);
 [[gnu::always_inline]] inline bool DepthHandOverOn() { return Latch().depth_handover; }
 // banjo-nx (2026-10-28, GPU block): banjo_deko3d_depth_handover_readonly (A/B 64).
 bool DepthHandOverReadOnlyOn();
-bool DepthCoversColourOn();  // rr6-nx (2026-11-02, rr6_depth_covers_colour)
-bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 71)
-bool FetchOverPointerOn();  // rr6-nx (2026-11-03, rr6_fetch_over_pointer, A/B 75)
-bool UserClipPlaneOn();  // rr6-nx (2026-11-03, rr6_user_clip_plane, A/B 76)
-bool StripMarkersOn();   // rr6-nx (2026-11-03, rr6_strip_markers, A/B 77)
-bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 73
-float AlphaNearOne(uint32_t func, float threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
-bool DepthBiasKeyOn();  // rr6-nx (2026-11-03, rr6_depth_bias): the pipelines' dynamic state
-bool DepthBiasOn();     // and its value this half (A/B 72: the off half draws with no bias)
+// rr6-nx's own (renut-ultimate's rr6 merge, 2026-11-08: A/B 85-87, as 71, 73 and 74 are the ultimate's). Its other
+// switches (depth covers colour, fetch over pointer, user clip plane, strip markers, depth bias) are in ultimate.h.
+bool FogNanZeroOn();  // rr6-nx (2026-11-03, rr6_fog_nan_zero, A/B 85)
+bool GameGammaAbOff();  // rr6-nx (2026-11-03): banjo_renut_game_gamma's off half of A/B 86
+float AlphaNearOne(uint32_t func, float threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 87)
+bool RecordsLockFreeOn();  // rr6-nx (2026-11-08, rr6_records_lockfree, A/B 150): guest/guest_records.cpp's table
+// kameo-nx (2026-11-03, the GPU round from the third console run; docs/kameo-notes.md). A/B targets 73-79.
+bool ColorHandOverOn();          // banjo_deko3d_color_handover (73)
+bool ScanOutHandOverOn();        // banjo_deko3d_scanout_handover (74)
+bool DepthHandOverSampledOn();   // banjo_deko3d_depth_handover_sampled (75)
+bool DepthReadLayoutOn();        // banjo_deko3d_depth_read_layout (76)
+bool ResolveKeepsTargetOn();     // banjo_deko3d_resolve_keeps_target (77)
+bool PresentNoPowOn();           // banjo_renut_present_no_pow (78)
+bool PresentTexelLoadOn();       // banjo_renut_present_texel_load (79)
+bool GammaUploadOnceOn();        // banjo_renut_gamma_upload_once
+// The colour hand-over's counts, as CountHandOver's: 0 not drawn, 1 binds of an image, 2 taken at a whole clear, 3 drawn after
+// all, 4 of them from a taken image, 5 lost, 7 drawn for a draw writing the target, 8 for a draw sampling it, 9 other.
+void CountColorHandOver(int what);
+// Why a colour resolve was drawn: 0 smaller than the target, into a texture of another size; 1 part of a target into a
+// texture of its size; 2 whole, but the texture is another size or scale; 3 the texture has levels; 4 format or kind.
+void CountColorNotLeft(int why);
 // banjo_deko3d_depth24 (2026-10-19, GPU): D24S8 depth targets as 24-bit unorm (render/format.cpp).
 [[gnu::always_inline]] inline bool Depth24On() { return Latch().depth24; }
 // banjo_deko3d_push_constants (2026-10-19, render-thread proposals 2 and 5): the float constants and SharedConstants

@@ -95,7 +95,9 @@ def main():
         text = re.sub(r'(const size_t g_dxilCacheCompressedSize\s*=\s*)\d+', r'\g<1>0', text)
         text = re.sub(r'(const size_t g_dxilCacheDecompressedSize\s*=\s*)\d+', r'\g<1>0', text)
 
-    out_dir = os.path.join(ROOT, 'app', 'out', 'renut_switch')
+    # rr6-nx's ultimate branch (2026-11-08): --out-dir for the full table too (app/out/renut_switch_ult).
+    out_dir = sys.argv[sys.argv.index('--out-dir') + 1] if '--out-dir' in sys.argv else \
+        os.path.join(ROOT, 'app', 'out', 'renut_switch')
     os.makedirs(out_dir, exist_ok=True)
     m = re.search(r'const uint8_t g_compressedSpirvCache\[\]\s*=\s*\{(.*?)\};', text, re.S)
     if not m:

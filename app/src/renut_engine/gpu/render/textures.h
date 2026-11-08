@@ -154,6 +154,8 @@ struct HostTexture {
   uint64_t handed_writes = 0;
   std::shared_ptr<DepthImage> held;
   bool held_current = false;
+  // kameo-nx (2026-11-03, banjo_deko3d_color_handover): the resolve left in that image is a colour resolve.
+  bool handed_color = false;
 };
 
 struct TextureBinding {

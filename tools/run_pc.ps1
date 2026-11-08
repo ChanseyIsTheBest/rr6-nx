@@ -4,9 +4,11 @@
 # The log is written unbuffered (log_file_writer = false): the run is stopped by force, which would drop the buffer.
 # -Visible: the window is shown (not minimised): Renut presents (and so captures and paces by vsync) only with a
 # swapchain, which a minimised window does not get.
-param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible, [int]$Max = 60)
+# rr6-nx's ultimate branch (2026-11-08): -Build names the build folder under app\out (pc-ult for the ultimate renderer).
+param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible, [int]$Max = 60,
+      [string]$Build = "pc")
 $root = Split-Path -Parent $PSScriptRoot
-$dir = Join-Path $root "app\out\pc"
+$dir = Join-Path $root "app\out\$Build"
 $exe = Join-Path $dir "renut.exe"
 $logs = Join-Path $root "out\pc_runs\$Name"
 New-Item -ItemType Directory -Force $logs | Out-Null

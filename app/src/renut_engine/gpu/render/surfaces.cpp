@@ -15,6 +15,7 @@
 
 #include "renut_engine/gpu/backend/backend.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
 #include "renut_engine/gpu/d3d/d3d.h"
 #include "renut_engine/gpu/render/format.h"
 #include "renut_engine/gpu/render/graphics_options.h"
@@ -37,6 +38,8 @@ REXCVAR_DEFINE_STRING(renut_resolution, "720p", "Nuts&Bolts/Graphics",
     .allowed({"480p", "720p", "1080p", "1440p", "4K"});
 
 namespace renut::gpu {
+
+void ForgetBoundTargetsLocked();  // sasrt-nx (2026-10-20): render/draw.cpp
 
 namespace {
 
@@ -191,7 +194,7 @@ void RetireTarget(HostSurface &surface) {
         RetireTarget(*u->surface);
     }
   }
-  if (surface.depth && surface.handed)
+  if (surface.handed)  // kameo-nx (2026-11-03): colour targets too (banjo_deko3d_color_handover)
     DepthHandOverBeforeRetireLocked(&surface);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
   FreeDepthViews(surface.handover_views);
   surface.stencil_used = false;
@@ -225,6 +228,7 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   surface.size_word = desc.Size;
   surface.info_word = desc.SurfaceInfo;
   surface.format_word = desc.Format;
+  surface.color_info_word = desc.ColorInfo;  // halo3-nx
   surface.width = std::max(d3d::SurfaceWidth(surface.size_word), min_width);
   surface.height = std::max(d3d::SurfaceHeight(surface.size_word), min_height);
   surface.scale = scale;
@@ -232,6 +236,8 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   const uint32_t host_width = surface.scale.Size(surface.width);
   const uint32_t host_height = surface.scale.Size(surface.height);
   surface.depth = d3d::IsDepthFormat(surface.format_word);
+  surface.sasrt_fixed16 = !surface.depth && (((u32(desc.ColorInfo) >> 16) & 0xF) == 4u ||
+                                             ((u32(desc.ColorInfo) >> 16) & 0xF) == 5u);  // sasrt-nx (2026-10-20)
   surface.samples = SampleCount(surface.info_word);
   // banjo-nx (2026-10-21, banjo_renut_portrait_msaa_samples, NOT exact, the user's call): the small targets the game makes
   // with MSAA (the dialogue portrait's 96 x 96 box, 4x; colour and depth alike, so a framebuffer's attachments still
@@ -291,6 +297,18 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   RGPU_DEBUG("Surface {:08X}: {}x{} (x{:.3g} scale) {} format {} x{} samples", surface.guest_va,
              surface.width, surface.height, surface.scale.Factor(), surface.depth ? "depth" : "color",
              u32(surface.format), u32(surface.samples));
+  // sasrt-nx (2026-10-20, sasrt_renut_deko3d_clear_new): a new colour target starts at 0 on deko3d too.
+  if (IsDeko3D() && !surface.depth && banjo::renut_gpu::Deko3DClearNewOn()) {
+    if (plume::RenderCommandList *cmd = Video::CommandListLocked()) {
+      HostSurface *self = &surface;
+      if (plume::RenderFramebuffer *fb = GetFramebufferLocked(&self, 1, nullptr)) {
+        TransitionSurfaceLocked(self, plume::RenderTextureLayout::COLOR_WRITE);
+        cmd->setFramebuffer(fb);
+        cmd->clearColor(0, plume::RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+        ForgetBoundTargetsLocked();  // the draw binds its own targets again
+      }
+    }
+  }
   return true;
 }
 
@@ -643,6 +661,44 @@ void ColorAliasesLocked(const HostSurface *surface, std::vector<HostSurface *> &
   }
 }
 
+// vivapinata-nx (2026-11-04, e242c74b; see surfaces.h).
+void ColorEdramWipedLocked(const HostSurface *surface, const plume::RenderRect &rect, std::vector<HostSurface *> &out) {
+  out.clear();
+  if (!surface || surface->depth)
+    return;
+  // TargetKey: the base tile in the low 12 bits, the samples at bit 26 (0: 1, 1: 2, 2: 4), the view in the low 32 bits.
+  uint64_t own = 0;
+  bool found = false;
+  for (const auto &[key, target] : g_targets) {
+    if (target.get() == surface) {
+      own = key;
+      found = true;
+      break;
+    }
+  }
+  if (!found)
+    return;
+  // A tile is 80x16 samples: at 2 samples a pixel is 80x8 pixels, at 4 samples 40x8. Whole tiles of the clear, at 32 bits a sample:
+  // a 64-bit target takes twice the tiles, and is left alone unless these cover it as 32-bit ones would.
+  const auto tile_columns = [](int32_t width, uint64_t key) {
+    return uint32_t(width) * (((key >> 26) & 3) >= 2 ? 2u : 1u) / 80u;
+  };
+  const auto tile_rows = [](int32_t height, uint64_t key) {
+    return uint32_t(height) * (((key >> 26) & 3) >= 1 ? 2u : 1u) / 16u;
+  };
+  const uint32_t cleared = tile_columns(rect.right - rect.left, own) * tile_rows(rect.bottom - rect.top, own);
+  constexpr uint64_t kViewMask = 0xFFFFFFFFull;
+  for (const auto &[key, target] : g_targets) {
+    if (!target || target.get() == surface || !target->texture || target->depth || (key & 0xFFF) != (own & 0xFFF) ||
+        (key & kViewMask) == (own & kViewMask))
+      continue;
+    const uint32_t columns = (uint32_t(target->width) * (((key >> 26) & 3) >= 2 ? 2u : 1u) + 79u) / 80u;
+    const uint32_t rows = (uint32_t(target->height) * (((key >> 26) & 3) >= 1 ? 2u : 1u) + 15u) / 16u;
+    if (columns * rows <= cleared)
+      out.push_back(target.get());
+  }
+}
+
 HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc);
 
 HostSurface *GetHostSurfaceLocked(u32 surface_va) {
@@ -663,6 +719,7 @@ HostSurface *GetHostSurfaceLocked(u32 surface_va) {
     m.surface->size_word = desc->Size;
     m.surface->info_word = desc->SurfaceInfo;
     m.surface->format_word = desc->Format;
+    m.surface->color_info_word = desc->ColorInfo;  // halo3-nx
     // banjo-nx (2026-10-21, internal resolution): the composite's target after the composite: its UI target.
     if (g_ui.redirect && m.surface == g_ui.scene)
       return g_ui.surface.get();
@@ -829,6 +886,7 @@ HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
     slot->size_word = desc->Size;
     slot->info_word = desc->SurfaceInfo;
     slot->format_word = desc->Format;
+    slot->color_info_word = desc->ColorInfo;  // halo3-nx
     if (slot->width >= min_width && slot->height >= min_height && slot->scale == scale)
       return slot.get();
     // A larger surface over the view, or a larger tiling: grow it, keeping
@@ -855,8 +913,8 @@ HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
 }
 
 // rr6-nx (2026-11-02, rr6_depth_covers_colour): RB_SURFACE_INFO's pitch is the same for every target and a depth surface's
-// own size is only D3D's bookkeeping, so the console draws a 1440x800 colour target over a depth surface made 1280x720 (this
-// game's race). A host framebuffer can't: Direct3D 12 cuts the draws to the depth's size (black bars on the right and at the
+// own size is only D3D's bookkeeping, so the console draws a 1440x800 colour target over a depth surface made 1280x720 (Ridge
+// Racer 6's race). A host framebuffer can't: Direct3D 12 cuts the draws to the depth's size (black bars on the right and at the
 // bottom) and in Vulkan it is an invalid framebuffer (device lost). The view's target grows once, as for a larger surface over
 // it in GetHostSurfaceSlow, and keeps that size. What it held is lost: the game clears it next.
 HostSurface *GrowDepthToColourLocked(u32 surface_va, HostSurface *depth, uint32_t width, uint32_t height) {
@@ -875,6 +933,39 @@ HostSurface *GrowDepthToColourLocked(u32 surface_va, HostSurface *depth, uint32_
     cmd->discardTexture(depth->texture.get());
   }
   return depth;
+}
+
+uint64_t g_surface_write_seq = 0;  // sasrt-nx (2026-10-20)
+
+HostSurface *DepthRestoreSourceLocked(const HostSurface *depth) {
+  if (!depth || !depth->depth || depth->samples != plume::RenderSampleCount::COUNT_1)
+    return nullptr;
+  uint64_t own = 0;
+  bool found = false;
+  for (const auto &[key, target] : g_targets) {
+    if (target.get() == depth) {
+      own = key;
+      found = true;
+      break;
+    }
+  }
+  if (!found)
+    return nullptr;
+  // TargetKey: the EDRAM base in bits 0-11, the pitch in 12-25.
+  constexpr uint64_t kBaseAndPitch = 0x3FFFFFFull;
+  HostSurface *best = nullptr;
+  for (const auto &[key, target] : g_targets) {
+    HostSurface *c = target.get();
+    if (!c || c->depth || !c->texture || (key & kBaseAndPitch) != (own & kBaseAndPitch) ||
+        c->samples != plume::RenderSampleCount::COUNT_1 || c->scale != depth->scale ||
+        (c->format != plume::RenderFormat::R8G8B8A8_UNORM && c->format != plume::RenderFormat::B8G8R8A8_UNORM))
+      continue;
+    if (c->write_seq <= depth->write_seq || c->write_seq <= depth->restored_from_seq)
+      continue;
+    if (!best || c->write_seq > best->write_seq)
+      best = c;
+  }
+  return best;
 }
 
 HostSurface *SurfaceByGenerationLocked(uint64_t generation) {
@@ -968,12 +1059,14 @@ void TransitionSurfaceLocked(HostSurface *surface, plume::RenderTextureLayout la
   plume::RenderCommandList *cmd = Video::CommandListLocked();
   if (!cmd)
     return;
-  cmd->barriers(layout == plume::RenderTextureLayout::COPY_SOURCE ||
-                        layout == plume::RenderTextureLayout::COPY_DEST ||
-                        layout == plume::RenderTextureLayout::RESOLVE_SOURCE ||
-                        layout == plume::RenderTextureLayout::RESOLVE_DEST
-                    ? plume::RenderBarrierStage::COPY
-                    : plume::RenderBarrierStage::GRAPHICS,
+  // sasrt-nx (2026-11-04, sasrt_deko3d_copy_wait): see TransitionTextureLocked (textures.cpp).
+  const auto copy_layout = [](plume::RenderTextureLayout l) {
+    return l == plume::RenderTextureLayout::COPY_SOURCE || l == plume::RenderTextureLayout::COPY_DEST ||
+           l == plume::RenderTextureLayout::RESOLVE_SOURCE || l == plume::RenderTextureLayout::RESOLVE_DEST;
+  };
+  const bool from_copy = IsDeko3D() && banjo::renut_gpu::Deko3DCopyWaitOn() && copy_layout(surface->layout);
+  cmd->barriers(copy_layout(layout) || from_copy ? plume::RenderBarrierStage::COPY
+                                                 : plume::RenderBarrierStage::GRAPHICS,
                 plume::RenderTextureBarrier(surface->texture.get(), layout));
   surface->layout = layout;
 }
@@ -998,8 +1091,11 @@ void SwapDepthImageLocked(HostSurface &surface, DepthImage &image) {
 bool MakeDepthImageLocked(const HostSurface &surface, DepthImage &image) {
   plume::RenderDevice *device = Video::Device();
   const uint32_t w = surface.scale.Size(surface.width), h = surface.scale.Size(surface.height);
+  // kameo-nx (2026-11-03, banjo_deko3d_color_handover): a colour target's image is made as GetHostSurfaceLocked makes it.
   image.texture = device->createTexture(
-      plume::RenderTextureDesc::DepthTarget(w, h, surface.format, plume::RenderMultisampling(surface.samples)));
+      surface.depth
+          ? plume::RenderTextureDesc::DepthTarget(w, h, surface.format, plume::RenderMultisampling(surface.samples))
+          : plume::RenderTextureDesc::ColorTarget(w, h, surface.format, plume::RenderMultisampling(surface.samples)));
   if (!TextureCreated(image.texture.get())) {
     image.texture.reset();
     ReportDeviceLost(device);
@@ -1019,7 +1115,10 @@ bool MakeDepthImageLocked(const HostSurface &surface, DepthImage &image) {
 void RetireDepthImageLocked(DepthImage &image) {
   // The framebuffers a surface made over this image (cached by its generation).
   for (size_t i = 0; i < g_framebuffers.size();) {
-    if (g_framebuffers[i].key.depth && g_framebuffers[i].key.depth_generation == image.generation) {
+    bool over_image = g_framebuffers[i].key.depth && g_framebuffers[i].key.depth_generation == image.generation;
+    for (uint32_t c = 0; c < d3d::kMaxRenderTargets; ++c)  // kameo-nx (2026-11-03): a colour target's image
+      over_image = over_image || (g_framebuffers[i].key.colors[c] && g_framebuffers[i].key.color_generations[c] == image.generation);
+    if (over_image) {
       Video::RetireLocked(std::move(g_framebuffers[i].framebuffer));
       g_framebuffers[i] = std::move(g_framebuffers.back());
       g_framebuffers.pop_back();

@@ -48,8 +48,18 @@ void renutFrameLimit() {
     const std::string &v = REXCVAR_GET(frame_cap);
     return v.empty() || v == "Off" ? 0 : std::atoi(v.c_str());
   }();
-  if (fps <= 0)
+  // pacman-nx (2026-11-03, pacman_vblank_display_sync, futari-nx's): with no frame cap the display's refresh starts the
+  // game's next frame (display_sync.h). The game's speed follows its frames.
+  if (fps <= 0) {
+    static const bool pacing = banjo::display_sync::FramePacingOn();
+    if (pacing)
+      banjo::display_sync::WaitForFrameStart();
     return;
+  }
+  // sa2-nx (2026-10-28, sa2_renut_queue_drain): this release a refresh later, once, when the display thread asks.
+  static const bool drain = banjo::display_sync::QueueDrainOn();
+  const bool hold = drain && banjo::display_sync::TakeHold();
+  constexpr uint64_t kRefreshNs = 16'666'667ull;
   banjo::display_sync::Start();
   static clock::time_point next = clock::now();
   static uint64_t previous_release = 0;
@@ -69,9 +79,11 @@ void renutFrameLimit() {
     }
   };
   bool anchored = false;
-  const uint64_t release = banjo::display_sync::NextRelease(
+  uint64_t release = banjo::display_sync::NextRelease(
       uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()), previous_release,
       uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(frame).count()), &anchored);
+  if (release && hold)
+    release += kRefreshNs;
   if (release) {
     previous_release = release;
     next = clock::time_point(std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(release)));

@@ -208,7 +208,9 @@ namespace plume {
         UNKNOWN,
         NONE,
         FRONT,
-        BACK
+        BACK,
+        // kameo-nx (2026-11-04): both faces, as PA_SU_SC_MODE_CNTL can ask. The vertex shader still runs. D3D12 has none.
+        FRONT_AND_BACK
     };
 
     enum class RenderFrontFace {

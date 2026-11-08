@@ -27,6 +27,10 @@ HEADER = """# rr6-nx (Ridge Racer 6 on the Switch, Renut's renderer on deko3d): 
 SHIPPED = {
     'banjo_renderer': '"renut"',
     'renut_gpu_backend': '"deko3d"',
+    # rr6-nx (2026-11-08, the ultimate renderer): sasrt-nx's decompress of a compressed depth target at every unbind cost
+    # 0.46 ms of GPU a frame in the race on the console (perf10_depthresolve_off against perf4); its lazy form
+    # (ultimate_deko3d_depth_resolve_lazy, on) costs nothing here (perfL3: 37,220 left for later, 0 needed), so the key
+    # stays as the base ships it: correct for any screen that reads depth.
     # The game's MSAA, no dynamic resolution. 720 lines handheld and docked, the Xbox 360's own: pixel-identical is the
     # default here, and Katamari's 1080 lines docked was the user's decision for that game. configs/renut_1080_docked.toml
     # is one key away, for the user to decide on.

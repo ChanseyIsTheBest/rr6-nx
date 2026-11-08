@@ -3120,6 +3120,7 @@ namespace plume {
 
         switch (desc.cullMode) {
         case RenderCullMode::NONE:
+        case RenderCullMode::FRONT_AND_BACK:  // kameo-nx (2026-11-04): D3D12 has none
             psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
             break;
         case RenderCullMode::FRONT:

@@ -126,6 +126,9 @@ REXCVAR_DECLARE(bool, banjo_hand_memcpy);       // src/cpu/banjo_hot_guest.cpp (
 REXCVAR_DECLARE(bool, banjo_hand_memset);       // src/cpu/banjo_hot_guest.cpp
 REXCVAR_DECLARE(bool, banjo_hand_constants);    // src/cpu/banjo_hot_guest.cpp
 REXCVAR_DECLARE(bool, banjo_hand_state_flush);  // src/cpu/banjo_hot_guest.cpp
+REXCVAR_DECLARE(bool, rr6_hand_matrix_multiply);   // src/cpu/banjo_hot_guest.cpp (rr6-nx, 2026-11-08)
+REXCVAR_DECLARE(bool, rr6_hand_matrix_transpose);  // src/cpu/banjo_hot_guest.cpp
+REXCVAR_DECLARE(bool, rr6_hand_vector_transform);  // src/cpu/banjo_hot_guest.cpp
 REXCVAR_DECLARE(bool, banjo_gpu_texcoords_unswapped);  // masseffect_native_draws.cpp (from sa2-nx)
 REXCVAR_DECLARE(bool, banjo_gpu_no_texture_signs);  // masseffect_native_draws.cpp (from sa2-nx)
 REXCVAR_DECLARE(bool, banjo_gpu_texture_signs_per_slot);  // masseffect_native_draws.cpp
@@ -394,6 +397,9 @@ void LogEnhancements() {
       {"banjo_hand_memset", EnhancementGroup::kCpu, REXCVAR_GET(banjo_hand_memset)},
       {"banjo_hand_constants", EnhancementGroup::kCpu, REXCVAR_GET(banjo_hand_constants)},
       {"banjo_hand_state_flush", EnhancementGroup::kCpu, REXCVAR_GET(banjo_hand_state_flush)},
+      {"rr6_hand_matrix_multiply", EnhancementGroup::kCpu, REXCVAR_GET(rr6_hand_matrix_multiply)},
+      {"rr6_hand_matrix_transpose", EnhancementGroup::kCpu, REXCVAR_GET(rr6_hand_matrix_transpose)},
+      {"rr6_hand_vector_transform", EnhancementGroup::kCpu, REXCVAR_GET(rr6_hand_vector_transform)},
       {"banjo_gpu_push_once", EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_push_once)},
       {"banjo_gpu_pass_narrow_end", EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_pass_narrow_end)},
       {"banjo_gpu_blend_skip", EnhancementGroup::kNonCpu, REXCVAR_GET(banjo_gpu_blend_skip)},

@@ -584,9 +584,9 @@ std::vector<std::string> Init(int argc, char** argv) {
   CLI::App app{"", ""};
   app.allow_extras();
 
-  // rr6-nx (2026-11-03, from pacman-nx): only the cvars the command line names. CLI11 checks each new option against
-  // every one before it, and each machine-made hot copy has a cvar, so this loop's cost is quadratic in their count and
-  // it held the console's main thread at every start. A homebrew launch names none of them; tomls load separately.
+  // pacman-nx (2026-11-03, 72c28ced): only the cvars the command line names. CLI11 checks each new option against every
+  // one before it, and each machine-made hot copy has a cvar: with 5,649 copies this loop held the console's main thread
+  // for about 90 s at every start, and a homebrew launch names none of them.
   std::unordered_set<std::string_view> named;
   for (int i = 1; i < argc; ++i) {
     if (!argv || !argv[i]) continue;

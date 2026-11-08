@@ -14,7 +14,9 @@
  */
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -48,6 +50,11 @@ REXCVAR_DEFINE_BOOL(banjo_renut_shared_host_shaders, true, "Banjo/Enhancements",
                     "shader (N&B makes a shader object per mesh, many alive at once with the same shader: each unpacked "
                     "and parsed its GLSL on the render thread, kept its own copy of it and compiled its own variants). "
                     "false: one host shader an object, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_recorded_binds, true, "Banjo/Renut",
+                    "halo3-nx (2026-11-03, from sasrt-nx's sasrt_renut_recorded_binds): each draw keeps the "
+                    "D3DVertexShader_Bind its shader had when the game made the draw. Halo 3 records its draws at load, "
+                    "so at a replay the last bind queued may be another mesh's layout. Off: the last bind queued")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace {
@@ -450,16 +457,150 @@ void DestroyShaderRecord(ShaderRecord *shader) {
   DestroyRecord(shader);
 }
 
+// halo3-nx (2026-11-03, banjo_renut_recorded_binds): a shader's binds, each kept once, by id (index + 1).
+namespace {
+struct RecordedBinding {
+  u32 shader_va = 0;
+  std::shared_ptr<VertexDeclarationRecord> declaration;
+  u32 strides[d3d::kMaxStreams] = {};
+};
+std::mutex g_bindings_mutex;
+std::deque<RecordedBinding> g_bindings;
+std::unordered_map<u32, std::vector<u32>> g_shader_bindings;
+std::unordered_map<u32, u32> g_last_binding;
+
+u32 InternBinding(u32 shader_va, const VertexDeclarationRecord &declaration, const u32 (&strides)[d3d::kMaxStreams]) {
+  std::lock_guard lock(g_bindings_mutex);
+  std::vector<u32> &ids = g_shader_bindings[shader_va];
+  for (const u32 id : ids) {
+    const RecordedBinding &b = g_bindings[id - 1];
+    if (std::memcmp(b.strides, strides, sizeof(strides)) == 0 &&
+        b.declaration->elements.size() == declaration.elements.size() &&
+        std::memcmp(b.declaration->elements.data(), declaration.elements.data(),
+                    declaration.elements.size() * sizeof(GuestVertexElement)) == 0) {
+      g_last_binding[shader_va] = id;
+      return id;
+    }
+  }
+  RecordedBinding &b = g_bindings.emplace_back();
+  b.shader_va = shader_va;
+  b.declaration = std::make_shared<VertexDeclarationRecord>(declaration);
+  std::memcpy(b.strides, strides, sizeof(strides));
+  const u32 id = u32(g_bindings.size());
+  ids.push_back(id);
+  g_last_binding[shader_va] = id;
+  static uint32_t rebinds = 0;
+  if (ids.size() > 1 && (++rebinds <= 16 || rebinds % 1000 == 0))
+    RGPU_INFO("Vertex shader {:08X} bound with layout {} of its own (declaration {:08X}, stride {}; {} such binds so far)",
+              shader_va, ids.size(), declaration.self_va, strides[0], rebinds);
+  return id;
+}
+}  // namespace
+
+u32 LastBindingOf(u32 shader_va) {
+  static const bool on = REXCVAR_GET(banjo_renut_recorded_binds);
+  if (!on || !shader_va)
+    return 0;
+  std::lock_guard lock(g_bindings_mutex);
+  const auto it = g_last_binding.find(shader_va);
+  return it != g_last_binding.end() ? it->second : 0;
+}
+
+void ApplyBindingLocked(u32 id) {
+  const RecordedBinding *b;
+  {
+    std::lock_guard lock(g_bindings_mutex);
+    b = &g_bindings[id - 1];  // (a deque: its elements stay where they are)
+  }
+  auto *shader = FindShaderLocked(b->shader_va, RecordKind::VertexShader);
+  if (!shader || shader->applied_binding == id)
+    return;
+  // banjo-nx (2026-10-27, render thread night): the fast path and its stream memo may hold the declaration this replaces
+  // and read these strides: dropped (a bind after the first draws; N&B binds at creation).
+  InvalidateFastDrawForRecordLocked(shader);
+  shader->bound_declaration = b->declaration;
+  for (const GuestVertexElement &element : b->declaration->elements) {
+    const u32 stream = element.Stream;
+    if (stream < d3d::kMaxStreams)
+      shader->bound_strides[stream] = b->strides[stream];
+  }
+  shader->applied_binding = id;
+}
+
 } // namespace renut::gpu
 
 namespace {
+
+// kameo-nx (2026-11-03, banjo_renut_fetch3d_on_2d): the slots the microcode reads through tfetch3D. The fetch constant says
+// what the data is, the instruction which table the recompiled shader reads, and they can differ. Field positions are
+// XenosRecomp's shader_code.h; the walk over the control flow is that of Kameo: RePowered's ScanShaderConstantRange
+// (src/gpu/shaders/ucode_scan.cpp, MaxDeadBear and BiRabittoh, MIT).
+u32 Fetch3DMask(const u8 *container) {
+  const auto *header = reinterpret_cast<const d3d::ShaderContainer *>(container);
+  const u32 virtual_size = header->virtualSize;
+  const u32 physical_size = header->physicalSize;
+  // A version 0x0E container (XenosRecomp's container_0e.h) has the microcode as its whole physical part; 0x11 names where
+  // it starts.
+  u32 physical_offset = 0;
+  if ((u32(header->flags) & 0xFFFFFF00u) != 0x102A0E00u) {
+    const u32 shader_offset = header->shaderOffset;
+    if (shader_offset + 4 > virtual_size)
+      return 0;
+    physical_offset = *reinterpret_cast<const be_u32 *>(container + shader_offset);
+  }
+  if (physical_offset >= physical_size)
+    return 0;
+  const auto *code = reinterpret_cast<const be_u32 *>(container + virtual_size + physical_offset);
+  const u32 dwords = (physical_size - physical_offset) / 4;
+  u32 mask = 0;
+  u32 control_flow_end = dwords;  // the instructions start at the lowest address an exec names
+  for (u32 at = 0; at + 3 <= control_flow_end; at += 3) {
+    const u32 c0 = code[at], c1 = code[at + 1], c2 = code[at + 2];
+    const u32 pair[2][2] = {{c0, c1 & 0xFFFF}, {(c1 >> 16) | (c2 << 16), c2 >> 16}};
+    for (const auto &cf : pair) {
+      const u32 opcode = (cf[1] >> 12) & 0xF;
+      if (!((opcode >= 1 && opcode <= 6) || opcode == 13 || opcode == 14))
+        continue;
+      const u32 address = cf[0] & 0xFFF;
+      if (!address)
+        continue;
+      control_flow_end = std::min(control_flow_end, address * 3);
+      const u32 count = (cf[0] >> 12) & 7;
+      u32 sequence = (cf[0] >> 16) & 0xFFF;
+      for (u32 i = 0; i < count; ++i, sequence >>= 2) {
+        const u32 instruction = (address + i) * 3;
+        if (instruction + 3 > dwords)
+          return mask;
+        if (!(sequence & 1))
+          continue;
+        const u32 w0 = code[instruction], w2 = code[instruction + 2];
+        if ((w0 & 0x1F) == 1 && ((w2 >> 14) & 3) == 2)  // TextureFetch, TextureDimension::Texture3D
+          mask |= 1u << ((w0 >> 20) & 31);
+      }
+    }
+  }
+  return mask;
+}
+
+// vivapinata-nx (2026-11-03, the white bird): the export mode in a vertex shader's header (XenosRecomp's Shader::field8, the word the
+// console's Direct3D puts in SQ_PROGRAM_CNTL: the emulated GPU saw 0x17010009 for a header's 0x07010009). 7 is multipass.
+// renut-ultimate: a 0x11 container only (a 0x0E one's header is laid out otherwise: no export mode read there).
+bool ContainerIsExportOnly(const uint8_t *container) {
+  const auto *header = reinterpret_cast<const d3d::ShaderContainer *>(container);
+  if ((u32(header->flags) & 0xFFFFFF00u) != 0x102A1100u)
+    return false;
+  const u32 word_offset = u32(header->shaderOffset) + 8;
+  if (word_offset + 4 > u32(header->virtualSize))
+    return false;
+  return ((u32(*reinterpret_cast<const be_u32 *>(container + word_offset)) >> 24) & 7) == 7;
+}
 
 u32 CreateShaderRecord(const be_u32 *function, bool pixel) {
   if (!function)
     return 0;
   const auto *container = reinterpret_cast<const uint8_t *>(function);
   const auto *header = reinterpret_cast<const d3d::ShaderContainer *>(container);
-  // feedingfrenzy-nx (2026-10-26): version 0x0E too (XDK 2135's compiler); the translator reads it through
+  // kameo-nx (2026-11-02, from feedingfrenzy-nx): version 0x0E too (XDK 2135 and 2571); the translator reads it through
   // XenosRecomp/container_0e.h, and only the sizes are read here.
   if ((u32(header->flags) & 0xFFFFFF00u) != 0x102A1100u && (u32(header->flags) & 0xFFFFFF00u) != 0x102A0E00u) {
     RGPU_ERROR("Create{}Shader: not a shader container (flags {:08X})", pixel ? "Pixel" : "Vertex",
@@ -477,6 +618,8 @@ u32 CreateShaderRecord(const be_u32 *function, bool pixel) {
 
   shader->hash = HashShaderContainer(container);
   shader->entry = FindShaderEntry(shader->hash);
+  shader->fetch_3d_mask = Fetch3DMask(container);  // kameo-nx (2026-11-03)
+  shader->export_only = !pixel && ContainerIsExportOnly(container);  // vivapinata-nx (2026-11-03)
   if (!shader->entry)
     CaptureMissingShader(container, pixel, shader->hash);
   NoteShaderSortKey(shader->self_va, shader->hash, ShaderSortableByHash(shader->hash, shader->entry, pixel));  // 2026-10-27
@@ -498,7 +641,7 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
   const u32 flags = header->flags;
   const u32 virtual_size = header->virtualSize;
   const u32 physical_size = header->physicalSize;
-  if ((flags & 0xFFFFFF00u) != 0x102A1100u || ((flags & 1) != 0) == pixel ||
+  if (((flags & 0xFFFFFF00u) != 0x102A1100u && (flags & 0xFFFFFF00u) != 0x102A0E00u) || ((flags & 1) != 0) == pixel ||  // kameo-nx
       virtual_size < sizeof(d3d::ShaderContainer) || virtual_size > 0x10000 ||
       physical_size == 0 || physical_size > 0x100000) {
     RGPU_ERROR("XGRegister{}Shader {:08X}: no shader container at {:08X} (flags {:08X})",
@@ -510,6 +653,7 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
   std::memcpy(container.data() + virtual_size, physical, physical_size);
   const uint64_t hash = HashShaderContainer(container.data());
   const RecordKind kind = pixel ? RecordKind::PixelShader : RecordKind::VertexShader;
+  const bool export_only = !pixel && ContainerIsExportOnly(container.data());  // vivapinata-nx (2026-11-03)
   // Captured here, where its container is at hand, only when the cache lacks it.
   const ShaderCacheEntry *const sort_entry = FindShaderEntry(hash);
   if (!sort_entry)
@@ -517,7 +661,7 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
   NoteShaderSortKey(shader_va, hash, ShaderSortableByHash(hash, sort_entry, pixel));  // banjo-nx (2026-10-27)
 
   // In order with the draws that use it (render thread).
-  render_thread::Queue([shader_va, pixel, hash, kind] {
+  render_thread::Queue([shader_va, pixel, hash, kind, fetch_3d_mask = Fetch3DMask(container.data()), export_only] {
     auto &shader = g_guest_shaders[shader_va];
     if (shader && shader->hash == hash && shader->kind == kind)
       return;
@@ -534,6 +678,8 @@ void RegisterGuestShader(u32 shader_va, u32 physical_va, bool pixel) {
     shader->self_va = shader_va;
     shader->hash = hash;
     shader->entry = FindShaderEntry(hash);
+    shader->fetch_3d_mask = fetch_3d_mask;  // kameo-nx (2026-11-03)
+    shader->export_only = export_only;  // vivapinata-nx (2026-11-03)
     PipelineShaderLoaded(shader->entry);
   });
 }
@@ -635,27 +781,17 @@ void D3DVertexShader_Bind_hook(u32 shader_va, u32 declaration_va, mapped_u32 str
       FindRecord<VertexDeclarationRecord>(declaration_va, RecordKind::VertexDeclaration);
   if (!declaration)
     return;
-  auto bound = std::make_shared<VertexDeclarationRecord>(*declaration);
-  std::vector<std::pair<u32, u32>> strides;  // stream, stride
+  u32 strides[d3d::kMaxStreams] = {};
   if (stream_strides) {
     const auto *guest_strides = static_cast<const be_u32 *>(stream_strides);
     for (const GuestVertexElement &element : declaration->elements) {
       const u32 stream = element.Stream;
       if (stream < d3d::kMaxStreams)
-        strides.emplace_back(stream, u32(guest_strides[stream]));
+        strides[stream] = u32(guest_strides[stream]);
     }
   }
-  render_thread::Queue([shader_va, bound, strides = std::move(strides)] {
-    auto *shader = FindShaderLocked(shader_va, RecordKind::VertexShader);
-    if (!shader)
-      return;
-    // banjo-nx (2026-10-27, render thread night): the fast path and its stream memo may hold the declaration this
-    // replaces (freed here) and read these strides: dropped (a bind after the first draws; N&B binds at creation).
-    InvalidateFastDrawForRecordLocked(shader);  // banjo-nx (2026-10-28): its declaration goes (held via the shader)
-    shader->bound_declaration = std::make_unique<VertexDeclarationRecord>(*bound);
-    for (const auto &[stream, stride] : strides)
-      shader->bound_strides[stream] = stride;
-  });
+  const u32 binding = InternBinding(shader_va, *declaration, strides);
+  render_thread::Queue([binding] { ApplyBindingLocked(binding); });
 }
 
 } // namespace

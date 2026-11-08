@@ -37,6 +37,11 @@ if(REXGLUE_PLATFORM_SWITCH AND NOT BANJO_SWITCH_OUTLINE_ATOMICS)
     add_compile_options(-mno-outline-atomics)
 endif()
 
+# renut-ultimate (2026-11-07): the SDK's libraries in each Switch build folder (sdk/CMakeLists.txt), so they can be built
+# with each folder's LTO and PGO options (BANJO_SWITCH_SDK_OPT below).
+if(REXGLUE_PLATFORM_SWITCH)
+    set(REXGLUE_OUTPUT_IN_BUILD ON CACHE BOOL "The SDK's libraries and tools in this build folder")
+endif()
 include(generated/rexglue.cmake)
 
 # banjo-nx (from sa2-nx): the optimised codegen. The build re-runs the generator by itself whenever an input in
@@ -457,6 +462,14 @@ if(REXGLUE_PLATFORM_SWITCH)
     set_property(CACHE BANJO_PGO PROPERTY STRINGS "" generate use)
     set(BANJO_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Folder of the PGO profile (.gcda files)")
     set(_banjo_opt_targets renut_recomp renut banjo_renut_gpu plume)
+    # renut-ultimate (2026-11-07): the SDK runtime (kernel calls, threads, the audio driver) and FFmpeg (XMA decoding) too,
+    # their C and C++ only: about 8 % of busy CPU in the console profile of 3 Nov. They were out only because every build
+    # folder shared the SDK's libraries (REXGLUE_OUTPUT_IN_BUILD above).
+    option(BANJO_SWITCH_SDK_OPT "The SDK runtime and FFmpeg in the Switch LTO and PGO (renut-ultimate)" ON)
+    set(_banjo_sdk_opt_targets)
+    if(BANJO_SWITCH_SDK_OPT AND REXGLUE_OUTPUT_IN_BUILD)
+        set(_banjo_sdk_opt_targets rexruntime libavcodec libavutil)
+    endif()
     if(BANJO_SWITCH_LTO)
         set(_banjo_lto_compile -flto -fno-fat-lto-objects)
         set(_banjo_lto_link -flto=${BANJO_SWITCH_LTO_JOBS} -flto-partition=balanced -ffp-contract=off
@@ -468,6 +481,12 @@ if(REXGLUE_PLATFORM_SWITCH)
         foreach(target ${_banjo_opt_targets})
             if(TARGET ${target})
                 target_compile_options(${target} PRIVATE ${_banjo_lto_compile})
+                target_compile_definitions(${target} PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
+            endif()
+        endforeach()
+        foreach(target ${_banjo_sdk_opt_targets})  # renut-ultimate (2026-11-07)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${_banjo_lto_compile}>")
                 target_compile_definitions(${target} PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
             endif()
         endforeach()
@@ -509,6 +528,11 @@ if(REXGLUE_PLATFORM_SWITCH)
         foreach(target ${_banjo_opt_targets})
             if(TARGET ${target})
                 target_compile_options(${target} PRIVATE ${_banjo_pgo})
+            endif()
+        endforeach()
+        foreach(target ${_banjo_sdk_opt_targets})  # renut-ultimate (2026-11-07)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:${_banjo_pgo}>")
             endif()
         endforeach()
         target_link_options(renut PRIVATE ${_banjo_pgo})
@@ -600,7 +624,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(EXISTS "${RENUT_ICON}")
         set(RENUT_ICON_ARG ICON "${RENUT_ICON}")
     endif()
-    # katamari-nx (2026-11-02, the user's request): version 1.0.0, author ChanseyIsTheBest, the user's icon (the cover art).
+    # katamari-nx (2026-11-02, the user's request): author ChanseyIsTheBest, the user's icon (the cover art).
+    # 2026-11-05: version 1.0.1, the game's memory and the NRO's code on 2 MB blocks, and the boot's cvars.
     rexglue_switch_add_nro(renut
         NAME "Ridge Racer 6"
         AUTHOR "ChanseyIsTheBest"

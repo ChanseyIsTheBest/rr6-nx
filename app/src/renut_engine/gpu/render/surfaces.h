@@ -56,6 +56,17 @@ struct HostSurface {
   u32 size_word = 0;
   u32 info_word = 0;
   u32 format_word = 0;
+  u32 color_info_word = 0;  // halo3-nx (838ea8c587): RB_COLOR_INFO, the guest format (gamma) and colour exponent bias
+  bool sasrt_fixed16 = false;  // sasrt-nx (2026-10-20): a 16-bit fixed-point colour target (k_16_16, k_16_16_16_16)
+  // sasrt-nx (2026-10-20, the EDRAM depth restore): g_surface_write_seq at this surface's last write, and for a depth surface
+  // the colour surface's write it was last restored from (RestoreDepthFromColorLocked).
+  uint64_t write_seq = 0;
+  uint64_t restored_from_seq = 0;
+  // halo3-nx (2026-11-03): when it was last bound to draw to, and what of another format's target over the same EDRAM view it
+  // holds (SyncColorViewLocked).
+  uint64_t bound_serial = 0;
+  const HostSurface *synced_view = nullptr;
+  uint64_t synced_writes = 0;
 
   // In guest pixels; the host target is 'scale' times that on each axis
   // (ResolutionScale when it was built).
@@ -96,6 +107,11 @@ struct HostSurface {
   bool clear_depth_known = false, clear_stencil_known = false;
   float clear_depth = 0.0f;
   uint32_t clear_stencil = 0;
+  // vivapinata-nx (2026-11-04, the white fog at the cuts, ColorEdramWipedLocked): a clear through another layout wiped this
+  // target's EDRAM on the console. Only a resolve can tell: one before anything writes here clears first (render/draw.cpp).
+  bool edram_wiped = false;
+  uint64_t edram_wiped_generation = 0, edram_wiped_writes = 0;
+  float edram_wiped_color[4] = {};
 
   // gpu_profile labels of draws with it as the first target: color only,
   // color with depth, depth only. Made on first use.
@@ -144,6 +160,13 @@ bool ConsoleDocked();
 // banjo-nx (2026-10-21): the internal heights of handheld and docked mode as the shaders read them (SharedConstants
 // pad_1352[1], v[84].w: handheld | docked << 16; render_scale.h codes 4 and 6).
 uint32_t InternalHeightsWord();
+// rr6-nx (2026-11-02, rr6_depth_covers_colour): the depth target at least 'width' x 'height' (surfaces.cpp).
+HostSurface *GrowDepthToColourLocked(u32 surface_va, HostSurface *depth, uint32_t width, uint32_t height);
+// sasrt-nx (2026-10-20, the EDRAM depth restore): the order of surface writes (HostSurface::write_seq), and the single-sample
+// 32-bit colour target over the EDRAM base and pitch of depth target 'depth' written after both its own last write and the
+// write it was last restored from, or nullptr.
+extern uint64_t g_surface_write_seq;
+HostSurface *DepthRestoreSourceLocked(const HostSurface *depth);
 
 // The host target for the D3DSurface at 'surface_va', created or rebuilt as
 // needed. nullptr for 0 or when the target cannot be created.
@@ -163,6 +186,10 @@ HostSurface *FindHostSurfaceLocked(u32 surface_va);
 // pitch, samples and scale), in another host format: on the console one
 // memory, so what a clear writes through one is what the others then hold.
 void ColorAliasesLocked(const HostSurface *surface, std::vector<HostSurface *> &out);
+
+// vivapinata-nx (2026-11-04, the white fog at the cuts): the other color targets at the same EDRAM base in another layout (samples,
+// pitch) whose every tile a clear of 'rect' (guest pixels) of 'surface' covers. On the console that memory then holds the clear.
+void ColorEdramWipedLocked(const HostSurface *surface, const plume::RenderRect &rect, std::vector<HostSurface *> &out);
 
 // Predicated tiling (D3DDevice_BeginTiling .. EndTiling): the game draws the
 // frame into surfaces the size of one EDRAM tile, and the GPU replays the

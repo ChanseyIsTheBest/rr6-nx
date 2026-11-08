@@ -1,5 +1,5 @@
 #include "shader.h"
-#include "container_0e.h"
+#include "container_0e.h"  // kameo-nx / feedingfrenzy-nx: version 0x0E containers
 #include "shader_recompiler.h"
 #include "dxc_compiler.h"
 #ifdef RENUT_RECOMP
@@ -9,6 +9,7 @@
 // banjo-nx: rewritten shaders (BANJO_HLSL_OVERRIDE) that fell back to their own text.
 static std::atomic<size_t> banjoOverrideFallbacks{0};
 static std::atomic<size_t> banjoKillShaders{0}, banjoDepthShaders{0};  // banjo-nx (banjo_gpu_depth_only)
+static std::atomic<size_t> indexedLiteralShaders{0};  // vivapinata-nx: shaders reading a literal array of their own through a0 or aL
 #endif
 
 #include <mutex>
@@ -136,8 +137,8 @@ int main(int argc, char** argv)
                 auto shaderContainer = reinterpret_cast<const ShaderContainer*>(fileData.get() + i);
                 size_t dataSize = shaderContainer->virtualSize + shaderContainer->physicalSize;
 
-                // feedingfrenzy-nx (2026-10-26): a version 0x0E container (XDK 2571; rr6-nx: this game's, XDK 2135) is keyed by its
-                // own hash and translated from its 0x11 form (container_0e.h).
+                // feedingfrenzy-nx (2026-10-26; kameo-nx's form): a version 0x0E container (XDK 2135, 2571) is keyed by its own hash
+                // and translated from its 0x11 form (container_0e.h).
                 if (container_0e::IsContainer0E(fileData.get() + i, fileSize - i))
                 {
                     const uint8_t* original = fileData.get() + i;
@@ -165,7 +166,6 @@ int main(int argc, char** argv)
                     i += originalSize;
                     continue;
                 }
-
                 if ((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100 &&
                     dataSize <= (fileSize - i) &&
                     shaderContainer->field1C == 0 &&
@@ -220,10 +220,12 @@ int main(int argc, char** argv)
 
                 thread_local ShaderRecompiler recompiler;
                 recompiler = {};
-                // rr6-nx (2026-11-03, rr6_user_clip_plane): the vertex shaders drawn with a user clip plane on. Ridge
-                // Racer 6's reflection map: 979A583A3A5665B8, 087881A1C449B0D6 (the renderer logs every one it draws
-                // with a plane on, "user clip plane"; one not listed here is not clipped).
-                recompiler.userClipPlane = hash == 0x979A583A3A5665B8ull || hash == 0x087881A1C449B0D6ull;
+#ifdef RENUT_RECOMP
+                // renut-ultimate (from rr6-nx and vivapinata-nx, which listed the vertex shaders drawn with a plane): every vertex
+                // shader writes the user clip plane's distance; the draw gives a zero plane when it has none (render/draw.cpp
+                // UserClipPlane). The host geometry shaders pass it through (shaders/host/*_gs.hlsl), so every vertex shader has it.
+                recompiler.userClipPlane = true;
+#endif
                 recompiler.recompile(shader.data, include);
 
                 shader.specConstantsMask = recompiler.specConstantsMask;
@@ -235,9 +237,25 @@ int main(int argc, char** argv)
                 std::copy(std::begin(recompiler.floatConstants), std::end(recompiler.floatConstants),
                     std::begin(shader.floatConstants));
                 shader.cbufLiterals = recompiler.cbufLiterals;  // banjo-nx
+                if (!recompiler.indexedLiteralBases.empty())
+                {
+                    ++indexedLiteralShaders;
+                    std::string regs;
+                    for (const auto base : recompiler.indexedLiteralBases)
+                        regs += fmt::format(" c{}", base);
+                    fmt::print(stderr, "indexed literals {}_{:016X}: from{}\n", recompiler.isPixelShader ? "ps" : "vs", hash, regs);
+                }
                 shader.shaderFlags = recompiler.shaderFlags;    // banjo-nx (banjo_gpu_depth_only)
                 if (!recompiler.fetchCensus.empty())  // rr6-nx (2026-11-03): one line a shader
                     fmt::print(stderr, "fetch census {}_{:016X}:{}\n", recompiler.isPixelShader ? "ps" : "vs", hash, recompiler.fetchCensus);
+                if (recompiler.hasCubeOp && !recompiler.hasCubeFetch)  // vivapinata-nx (2026-11-03)
+                    fmt::print(stderr, "{}\n", fmt::format("cube values {}_{:016X}", recompiler.isPixelShader ? "ps" : "vs", hash));
+                if (!recompiler.fetchFilterCensus.empty())  // vivapinata-nx (2026-11-03): one line a shader, all at once
+                    fmt::print(stderr, "{}\n", fmt::format("fetch filters {}_{:016X}:{}", recompiler.isPixelShader ? "ps" : "vs", hash,
+                        recompiler.fetchFilterCensus));
+                if (!recompiler.fetchLodCensus.empty())  // vivapinata-nx (2026-11-03)
+                    fmt::print(stderr, "{}\n", fmt::format("fetch lod {}_{:016X}:{}", recompiler.isPixelShader ? "ps" : "vs", hash,
+                        recompiler.fetchLodCensus));
                 if (recompiler.isPixelShader)
                 {
                     // banjo-nx (banjo_gpu_depth_only): the flags against the shader's own text (a kill is its only
@@ -405,6 +423,8 @@ int main(int argc, char** argv)
                      banjoOverrideFallbacks.load());
         fmt::println("banjo-nx: {} pixel shaders kill pixels, {} write depth (banjo_gpu_depth_only keeps them)",
                      banjoKillShaders.load(), banjoDepthShaders.load());
+        fmt::println("vivapinata-nx: {} shaders read a literal array through a0 or aL: those literals go to the constant buffer",
+                     indexedLiteralShaders.load());
 #endif
         fmt::println("Creating shader cache...");
 

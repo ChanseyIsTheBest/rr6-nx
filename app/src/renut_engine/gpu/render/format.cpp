@@ -5,6 +5,7 @@
 
 #include "renut_engine/gpu/backend/backend.h"      // banjo-nx (2026-10-19): IsDeko3D
 #include "renut_engine/gpu/banjo_renut_tuning.h"  // banjo-nx (2026-10-19): Depth24On
+#include "renut_engine/gpu/ultimate.h"  // renut-ultimate: Fixed16FloatOn
 
 #include <cstring>
 
@@ -20,10 +21,12 @@ plume::RenderFormat ColorTargetFormat(GpuColorFormat format) {
   case GpuColorFormat::Fmt2_10_10_10_Float:
   case GpuColorFormat::Fmt16_16_16_16_Float:
     return plume::RenderFormat::R16G16B16A16_FLOAT;
+  // sasrt-nx (2026-10-20, sasrt_renut_fixed16_float): Xenos' 16-bit fixed-point targets span -32..32; FP16 holds that
+  // range, SNORM clipped it at 1.
   case GpuColorFormat::Fmt16_16:
-    return plume::RenderFormat::R16G16_SNORM;
+    return banjo::renut_gpu::Fixed16FloatOn() ? plume::RenderFormat::R16G16_FLOAT : plume::RenderFormat::R16G16_SNORM;
   case GpuColorFormat::Fmt16_16_16_16:
-    return plume::RenderFormat::R16G16B16A16_SNORM;
+    return banjo::renut_gpu::Fixed16FloatOn() ? plume::RenderFormat::R16G16B16A16_FLOAT : plume::RenderFormat::R16G16B16A16_SNORM;
   case GpuColorFormat::Fmt16_16_Float:
     return plume::RenderFormat::R16G16_FLOAT;
   case GpuColorFormat::Fmt32_Float:
@@ -194,6 +197,11 @@ TextureFormatInfo GetTextureFormatInfo(GpuTextureFormat format, bool is_signed) 
     return bc(F::BC3_UNORM, 16);
   case T::FmtDXT5A:
     return bc(F::BC4_UNORM, 8);
+  case T::FmtDXT3A: {  // vivapinata-nx (2026-11-02): Viva Pinata's 512x512 masks; no host format holds it alone
+    TextureFormatInfo info{F::R8_UNORM, C::DXT3A, 4, 8, 4 * 4, false};
+    info.decoded_blocks = true;
+    return info;
+  }
   case T::FmtDXN:
     return bc(F::BC5_UNORM, 16);
   case T::FmtCTX1: {
@@ -318,6 +326,7 @@ void ConvertTexels(TexelConversion conversion, const uint8_t *src, uint8_t *dst,
     }
     break;
   case TexelConversion::CTX1:
+  case TexelConversion::DXT3A:
   case TexelConversion::Unsupported:
     break;
   }
@@ -325,6 +334,19 @@ void ConvertTexels(TexelConversion conversion, const uint8_t *src, uint8_t *dst,
 
 void DecodeBlockRow(TexelConversion conversion, const uint8_t *src, uint8_t *dst, uint32_t count,
                     uint32_t dst_row_pitch) {
+  if (conversion == TexelConversion::DXT3A) {
+    // vivapinata-nx (2026-11-02): DXT3's alpha block: after the fetch's 8in16 swap, as BC2 reads it on the host, four
+    // little-endian rows of 16 bits, texel x in bits 4x. A value v is v * 17 in 8 bits.
+    for (uint32_t b = 0; b < count; ++b, src += 8) {
+      for (uint32_t y = 0; y < 4; ++y) {
+        const uint32_t row = uint32_t(src[y * 2]) | (uint32_t(src[y * 2 + 1]) << 8);
+        uint8_t *out = dst + size_t(y) * dst_row_pitch + size_t(b) * 4;
+        for (uint32_t x = 0; x < 4; ++x)
+          out[x] = uint8_t(((row >> (4 * x)) & 15) * 17);
+      }
+    }
+    return;
+  }
   if (conversion != TexelConversion::CTX1)
     return;
   // CTX1, as the game's own encoder writes it (EncodeBlockCTX1, 0x828AC7A8):

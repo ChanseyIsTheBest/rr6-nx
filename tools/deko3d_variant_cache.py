@@ -110,9 +110,13 @@ def read_cache(path):
 # samples, 4 blend controls, 9 more u32 fields (offset 108 on), bool_mask[8], bool_values[8], blend_skip, output_trim;
 # version 4 (2026-10-18) adds alpha_func at 180 (constant 903 + 1, banjo_deko3d_alpha_spec; version 3 had padding there)
 # and a reserved word.
-LIST_KEY_SIZES = {3: 184, 4: 192}
+# version 5 (banjo-nx 2026-10-31, here 2026-11-03: banjo_gpu_fetch_spec) adds fetch_types[4] at 192 (constants 920-923, each
+# + 1) and tess_kind at 208 (constant 904 + 1 for a tessellated draw), and a padding word.
+LIST_KEY_SIZES = {3: 184, 4: 192, 5: 216, 6: 264}  # sasrt-nx (2026-11-08): 6, sasrt_words[12] at 216
+OFF_SASRT_WORDS = 216
 LIST_KEY_SIZE = 184
 OFF_BOOL_MASK, OFF_BOOL_VALUES, OFF_BLEND_SKIP, OFF_OUTPUT_TRIM, OFF_ALPHA_FUNC = 108, 140, 172, 176, 180
+OFF_FETCH_TYPES, OFF_TESS_KIND = 192, 208
 OFF_PER_INSTANCE, OFF_RECT_LIST, OFF_POINT_SPRITE = 96, 100, 104
 OFF_DEPTH_CONTROL = 76  # banjo-nx (2026-10-19): RB_DEPTHCONTROL (constant 909, banjo_deko3d_early_z)
 OFF_STENCIL_REF_MASK = 80  # 2026-10-20: ref, read mask, write mask (bits 16-23)
@@ -196,6 +200,11 @@ def stage_spec(prefix, spec, vs_text, ps_text, ps_present=True):
         zero = vs_zero_mask(vs_text) & location_mask(ps_text, LOC_IN_RE)
         if zero:
             out[906] = zero
+    # vivapinata-nx (2026-11-03, deko3d_glsl_opt.py vskill): both stages' 914, when the vertex shader kills vertices and the
+    # pipeline has a pixel shader and no geometry shader.
+    if (vs_text is not None and ps_text is not None and not spec.get(FLAG_GS, 0) and
+            'SPIRV_CROSS_CONSTANT_ID_914' in vs_text):
+        out[914] = 1
     return out
 
 
@@ -206,6 +215,27 @@ def stage_spec(prefix, spec, vs_text, ps_text, ps_present=True):
 ALPHA_GUESS = (8, 7, 5)
 
 
+# sasrt-nx (2026-11-08, the third GPU round): the pixel shaders sasrt_gpu_gpr_cap(_filter) compile with constant 910 = 1
+GPR_CAP_PS = {'364C9BF8579CE602', 'F646B7A8A3A7218B', '92D1F7E40EBB8E86', '9041AFF62011FC58'}
+
+
+def sasrt_guess(hashes, spec):
+    """sasrt-nx (2026-11-08, --sasrt-guess): a listed pipeline (from a list made before the third round's key words) as a
+    race draw keys it now: the vertex epilogue's word 5 (constant 932: no screen-space draw, no depth remap, both items
+    on) and the register cap of the listed pixel shaders (910 = 1). The draws' own words for their 3D fetches, memory
+    fetches and exports are not guessed (their values are the draw's)."""
+    g = dict(spec)
+    if hashes[0] != '0' * 16 and 932 not in g:
+        g[932] = 5
+    if hashes[1] in GPR_CAP_PS:
+        g[910] = 1
+    # sasrt-nx (2026-11-08, the fourth round): the export window from the constant buffer (944; only the memexport vertex
+    # shaders declare it, the others get no define)
+    if hashes[0] != '0' * 16 and 944 not in g:
+        g[944] = 1
+    return g
+
+
 def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
     """blend_skip_on: keep the keys' blend skip (constant 900); off (Renut's renderer since package 30,
     banjo_renut_blend_skip) the pipelines are built without it, whatever the list recorded. alpha_guess: the
@@ -213,7 +243,7 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
     data = open(path, 'rb').read()
     magic, version, key_size, streams = struct.unpack_from('<4sIII', data, 0)
     if magic != b'RNPL' or LIST_KEY_SIZES.get(version) != key_size:
-        sys.exit(f'deko3d_variant_cache: {path}: not a version 3 or 4 pipeline list ({magic}, {version}, {key_size})')
+        sys.exit(f'deko3d_variant_cache: {path}: not a version 3, 4 or 5 pipeline list ({magic}, {version}, {key_size})')
     at = 16
     out = []
     while at + 4 <= len(data):
@@ -226,6 +256,15 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         values = struct.unpack_from('<8I', data, at + OFF_BOOL_VALUES)
         blend_skip, output_trim = struct.unpack_from('<II', data, at + OFF_BLEND_SKIP)
         alpha_func = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC)[0] if version >= 4 else 0
+        fetch_types = struct.unpack_from('<4I', data, at + OFF_FETCH_TYPES) if version >= 5 else (0, 0, 0, 0)
+        tess_kind = struct.unpack_from('<I', data, at + OFF_TESS_KIND)[0] if version >= 5 else 0
+        sw = struct.unpack_from('<12I', data, at + OFF_SASRT_WORDS) if version >= 6 else (0,) * 12  # sasrt-nx
+        # sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches): the key's word after tess_kind (fetch_pad), constant 926
+        plain = struct.unpack_from('<I', data, at + OFF_TESS_KIND + 4)[0] if version >= 5 else 0
+        # sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): the key's reserved word (after alpha_func), bit 3 clear: the draw
+        # had no user clip plane, constant 929 = 0 (every list made before the key: no SASRT draw has a plane)
+        reserved = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC + 4)[0] if version >= 4 else 0
+        no_clip = vs != 0 and not (reserved & 8)
         per_instance, rect_list, point_sprite = struct.unpack_from('<III', data, at + OFF_PER_INSTANCE)
         depth_control, stencil_ref_mask = struct.unpack_from('<II', data, at + OFF_DEPTH_CONTROL)
         at += size
@@ -238,20 +277,73 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         spec = dict(tail)
         if alpha_func:
             spec[903] = alpha_func
+        if tess_kind:
+            spec[904] = tess_kind
+        for k in range(4):
+            if fetch_types[k]:
+                spec[920 + k] = fetch_types[k]
+        # sasrt-nx (2026-11-08, the third GPU round; render/draw.cpp SasrtSpecWordsOf): the vertex epilogue (932), the
+        # memory fetches' byte order (937-939), the pixel shader's 3D fetches (934-936)
+        if sw[0] and vs:
+            spec[932] = sw[0]
+        if sw[4] and vs:
+            spec[937], spec[938], spec[939] = sw[4], sw[5], sw[6]
+        for k in range(1, 4):
+            if sw[k] and ps:
+                spec[933 + k] = sw[k]
+        if sw[7] & 3 and ps:  # sasrt-nx (2026-11-08): sasrt_gpu_gpr_cap(_filter), constant 910
+            spec[910] = 1
+        if sw[7] & 4 and vs:  # sasrt-nx (2026-11-08): sasrt_gpu_export_window_ubo, constant 944
+            spec[944] = 1
+        if sw[8] and vs:  # sasrt-nx (2026-11-08): sasrt_gpu_export_format_spec, constants 940-943
+            for k in range(4):
+                spec[940 + k] = sw[8 + k]
+        if plain and ps:
+            spec[926] = plain
+        if no_clip:
+            spec[929] = 0
         for w in range(8):
             for b in range(32):
                 if mask[w] >> b & 1:
                     spec[1000 + w * 32 + b] = values[w] >> b & 1
         hashes = (f'{vs:016X}', f'{ps:016X}')
         out.append((hashes, spec))
-        if any(mask) or alpha_func:
+        if no_clip:
+            # sasrt-nx (2026-11-08): the same pipeline with sasrt_gpu_clip_spec off (its A/B's off half, the round-off
+            # configs): the vertex shader keeps its clip distance
+            out.append((hashes, {k: v for k, v in spec.items() if k != 929}))
+        if any(mask) or alpha_func or tess_kind or any(fetch_types) or plain or no_clip or any(sw):
             out.append((hashes, tail))  # the generic pipeline a specialised key draws with until it is built
+        made = [spec]
         if not alpha_func and ps:
             for guess in alpha_guess:
                 guessed = dict(spec)
                 guessed[903] = guess
                 out.append((hashes, guessed))
+                made.append(guessed)
+        # rr6-nx (2026-11-08): a list made before the plain-fetch key records 0 there. A draw whose fetch constants
+        # have no signs, gamma or exponent adjust gets 926 = its pixel shader's textureFetchMask without bit 31
+        # (render/draw.cpp PlainFetchMask), so that variant is made too for each (--plain-guess, from the shader table).
+        guess_mask = PLAIN_GUESS.get(ps) if ps and not plain else None
+        if guess_mask:
+            for s in made:
+                out.append((hashes, {**s, 926: guess_mask}))
     return out
+
+
+# rr6-nx (2026-11-08): pixel shader hash -> textureFetchMask & 0x7FFFFFFF, from the NRO's shader table (--plain-guess).
+PLAIN_GUESS = {}
+
+
+def load_plain_guess(table):
+    """shader_cache_switch.cpp's entries: { hash, dxilOffset, dxilSize, spirvOffset, spirvSize, specConstantsMask,
+    vertexFetchMemoryMask, textureFetchMask, ... } (render/../shaders/shader_cache.h)."""
+    for m in re.finditer(r'\{ 0x([0-9A-Fa-f]+), (?:[0-9]+, ){4}(?:0x[0-9A-Fa-f]+|[0-9]+), (?:0x[0-9A-Fa-f]+|[0-9]+), '
+                         r'(0x[0-9A-Fa-f]+|[0-9]+),', open(table, encoding='utf-8').read()):
+        mask = int(m.group(2), 0) & 0x7FFFFFFF
+        if mask:
+            PLAIN_GUESS[int(m.group(1), 16)] = mask
+    return len(PLAIN_GUESS)
 
 
 def config_specs(prefix, defaults, sspec):
@@ -271,6 +363,10 @@ def config_specs(prefix, defaults, sspec):
     # A/B pack that measures both in one run (banjo_renut_ab_targets "15,16").
     if prefix == 'ps' and any(cid == 911 for cid, _ in defaults):
         sspecs += [{**s, 911: 1} for s in list(sspecs) if 908 not in s]
+    # sasrt-nx (2026-11-08, sasrt_smaa_replaces_fxaa): the FXAA pass as a copy (constant 930 = 1) too, for the pixel
+    # shader that has it (on in sasrt_switch.toml; the variant without it for the key's off configs)
+    if prefix == 'ps' and any(cid == 930 for cid, _ in defaults):
+        sspecs += [{**s, 930: 1} for s in list(sspecs)]
     # banjo_deko3d_skin_once on (constant 913 = 1, 2026-10-20, an A/B) too, for the vertex shaders that have it
     if prefix == 'vs' and any(cid == 913 for cid, _ in defaults):
         sspecs += [{**s, 913: 1} for s in list(sspecs)]
@@ -288,7 +384,14 @@ def main():
     ap.add_argument('--glsl', default=os.path.join(ROOT, 'out', 'deko3d_shaders', 'glsl_opt'))
     ap.add_argument('--out', default=os.path.join(ROOT, 'out', 'deko3d_shaders', 'deko3d_shaders.bin'))
     ap.add_argument('--merge', default=None, help='an existing cache whose entries are kept')
+    ap.add_argument('--plain-guess', default=None,
+                    help="rr6-nx (2026-11-08): the NRO's shader table (app/out/renut_switch*/shader_cache_switch.cpp): "
+                         "each list pixel shader's variant with every fetch plain (constant 926), for lists made before "
+                         "the plain-fetch key")
     ap.add_argument('--dry-run', action='store_true', help='count the variants (and the merged cache entries among them)')
+    ap.add_argument('--sasrt-guess', action='store_true',
+                    help='sasrt-nx (2026-11-08): each listed pipeline also with the third round\'s guessable key words '
+                         '(constant 932 = 5, the register cap of the listed pixel shaders): lists made before them')
     ap.add_argument('--prune', action='store_true',
                     help='keep only the variants of these lists (a merged cache gives its compiled code, not its other '
                          'entries): for a package')
@@ -330,8 +433,12 @@ def main():
     memo_new = {}
 
     pipelines = []
+    if a.plain_guess:  # rr6-nx (2026-11-08)
+        print(f'deko3d_variant_cache: plain-fetch guesses for {load_plain_guess(a.plain_guess)} pixel shaders')
     for path in a.list:
         pipelines += read_list(path, a.blend_skip, tuple(int(x) for x in a.alpha_guess.split(',') if x))
+    if a.sasrt_guess:  # sasrt-nx (2026-11-08): the third round's key words as race draws have them (sasrt_guess)
+        pipelines += [(h, sasrt_guess(h, sp)) for h, sp in list(pipelines)]
     for path in a.variants:
         for line in open(path, encoding='utf-8', errors='replace'):
             parts = line.split()

@@ -158,6 +158,7 @@ enum class TexelConversion : u8 {
   R10G11B11,     // Fmt10_11_11: R 10, G 11, B 11 bits, UNORM, to RGBA16 UNORM
   Depth24,       // Fmt24_8 / Fmt24_8_Float: depth in the high 24 bits, to R32_FLOAT
   CTX1,          // 4x4 blocks of two-component (normal map) data, decoded to R8G8
+  DXT3A,         // vivapinata-nx: 4x4 blocks of 4-bit values (DXT3's alpha block alone), decoded to R8
 };
 
 struct TextureFormatInfo {

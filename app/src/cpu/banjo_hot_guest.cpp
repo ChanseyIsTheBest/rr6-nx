@@ -131,16 +131,42 @@ REXCVAR_DEFINE_BOOL(banjo_hand_xaudio_mix, true, "Banjo/Enhancements",
                     "(one for the range); checked by the guard of the router's hook")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// rr6-nx (2026-11-08): Ridge Racer 6's own natives, three routines of its matrix library (hot/banjo_hand_natives.h, the
+// end). banjo_hand_memcpy above serves its C runtime memcpy. No guest address in these strings: tools/localize_native.py
+// reads every address an app source's code names (strings included, comments not) as a hooked function, and a hooked
+// function gets no copy (the first build with addresses here lost the copies of the camera and rotation functions).
+REXCVAR_DEFINE_BOOL(rr6_hand_matrix_multiply, true, "Banjo/Enhancements",
+                    "Hand-written native of the game's 4x4 matrix product (inside the drawing thread's camera and "
+                    "rotation copies): the operands' red-zone copies still made, but the vectors taken from the "
+                    "operands instead of reloaded from those copies (a store the A57 cannot forward); the same "
+                    "statements otherwise. Checked by the guards of the hooks that contain it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_hand_matrix_transpose, true, "Banjo/Enhancements",
+                    "Hand-written native of the game's 4x4 matrix transpose: its red-zone copy made, the rows taken "
+                    "from the operand instead of reloaded; checked by the guards of the hooks that contain it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(rr6_hand_vector_transform, true, "Banjo/Enhancements",
+                    "Hand-written native of the game's vector-by-matrix product: its red-zone copy made, the matrix "
+                    "taken from the operand instead of reloaded; checked by the guards of the hooks that contain it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace banjo::hand {
 
 uint8_t g_state[kNatives] = {};
 
 namespace {
-constexpr const char* kNames[kNatives] = {"none"};
-constexpr const char* kKeys[kNatives] = {"none"};
-// rr6-nx: no hand-written native yet (hot/hand.txt: only from a console profile). Each one adds its enum value,
-// its name, its key and its case here.
-bool Own(uint32_t) { return false; }
+// rr6-nx (2026-11-08): the first four (hot/hand.txt, from the console profile of 2026-11-05). Each one adds its enum
+// value, its name, its key and its case here.
+constexpr const char* kNames[kNatives] = {"memcpy", "matrix product", "matrix transpose", "vector by matrix"};
+constexpr const char* kKeys[kNatives] = {"banjo_hand_memcpy", "rr6_hand_matrix_multiply", "rr6_hand_matrix_transpose",
+                                         "rr6_hand_vector_transform"};
+bool Own(uint32_t which) {
+  return which == kMemcpy         ? bool(REXCVAR_GET(banjo_hand_memcpy))
+         : which == kMatMul       ? bool(REXCVAR_GET(rr6_hand_matrix_multiply))
+         : which == kMatTranspose ? bool(REXCVAR_GET(rr6_hand_matrix_transpose))
+         : which == kVecMat       ? bool(REXCVAR_GET(rr6_hand_vector_transform))
+                                  : false;
+}
 // banjo_hot_count: calls by size, bucket 0 = size 0, bucket k = sizes [2^(k-1), 2^k).
 std::atomic<uint64_t> g_sizes[kNatives][34];
 }  // namespace
@@ -679,7 +705,9 @@ void Report() {
   }
   // rr6-nx (2026-11-03): with banjo_cpu_verify, every copy's counts, for tools/verified_copies.py: the summary's totals
   // cannot say which copies were compared. Written whole and renamed, so a run that ends here leaves the last full one.
-  if (REXCVAR_GET(banjo_cpu_verify)) {
+  // rr6-nx (2026-11-08): also with the guard's sampling on (banjo_hot_guard_calls): a verify run's slower menus put
+  // the scripted route out of step before the race, so the race's copies are checked in that mode.
+  if (REXCVAR_GET(banjo_cpu_verify) || REXCVAR_GET(banjo_hot_guard_calls) > 0) {
     const auto logs = rex::filesystem::GetExecutableFolder() / "logs";
     const auto path = logs / "rr6_hot_counts.txt", temp = logs / "rr6_hot_counts.tmp";
     if (FILE* f = std::fopen(temp.string().c_str(), "w")) {

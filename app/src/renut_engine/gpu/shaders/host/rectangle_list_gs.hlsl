@@ -10,7 +10,7 @@
 // across the diagonal from it.
 //
 // The vertex layout is what XenosRecomp (RENUT_RECOMP) writes for every vertex
-// shader and pixel shader: the position, then the 23 interpolators in this
+// shader and pixel shader: the position, then the 25 interpolators in this
 // order, then the point sprite coordinate and size (see point_sprite_gs.hlsl).
 // SPIR-V matches stages by location, which follows the order.
 
@@ -22,9 +22,12 @@ struct Vertex
     float4 normal[3] : NORMAL0;
     float4 tangent : TANGENT0;
     float4 binormal : BINORMAL0;
-    float4 fog : FOG0;  // rr6-nx (2026-11-04): see point_sprite_gs.hlsl
+    float4 fog : FOG0;  // kameo-nx (2026-11-04): see point_sprite_gs.hlsl
+    float4 position2 : POSITION2;  // renut-ultimate: see point_sprite_gs.hlsl
     float2 pointCoord : POINTCOORD;
     float pointSize : POINTSIZE;
+    // renut-ultimate (the user clip plane, every vertex shader writes it): passed through, so the GPU clips the sprite with it.
+    float clipDistance : SV_ClipDistance0;
 };
 
 // a + b - c for every output: the corner across the diagonal a-b from c.
@@ -41,8 +44,10 @@ Vertex Opposite(Vertex a, Vertex b, Vertex c)
     d.tangent = a.tangent + b.tangent - c.tangent;
     d.binormal = a.binormal + b.binormal - c.binormal;
     d.fog = a.fog + b.fog - c.fog;
+    d.position2 = a.position2 + b.position2 - c.position2;
     d.pointCoord = a.pointCoord + b.pointCoord - c.pointCoord;
     d.pointSize = a.pointSize + b.pointSize - c.pointSize;
+    d.clipDistance = a.clipDistance + b.clipDistance - c.clipDistance;  // renut-ultimate
     return d;
 }
 

@@ -15,6 +15,7 @@
 #include <xxhash.h>
 
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
 
 #include "renut_engine/gpu/backend/backend.h"
 #include "renut_engine/gpu/backend/gpu_profile.h"
@@ -480,7 +481,17 @@ bool Upload(HostTexture &t, const TextureFetch &fetch, bool defer_read) {
       // part there. D3D12 wants block-aligned footprints, cut by the box.
       const bool vulkan = UsesVulkanBindings();  // banjo-nx: deko3d copies as Vulkan does (the level's extent)
       const uint32_t row_texels = row_pitch / t.info.host_block_bytes * bs;
-      if (vulkan && d > 1 && copy_h != blocks_h * bs) {
+      if (is_3d_data && t.stacked) {
+        // sasrt-nx (2026-10-20, sasrt_renut_deko3d_volume_as_array): each depth slice of the volume into its own layer.
+        for (uint32_t z = 0; z < d; ++z) {
+          cmd->copyTextureRegion(
+              plume::RenderTextureCopyLocation::Subresource(t.texture.get(), level, z),
+              plume::RenderTextureCopyLocation::PlacedFootprint(
+                  staging.ref.ref, t.info.host, copy_w, copy_h, 1, row_texels,
+                  staging.ref.offset + uint64_t(z) * slice_pitch),
+              0, 0, 0, nullptr);
+        }
+      } else if (vulkan && d > 1 && copy_h != blocks_h * bs) {
         // The footprint's height is also its rows per depth slice there, which
         // the staging has blocks_h * bs of: one depth slice at a time.
         for (uint32_t z = 0; z < d; ++z) {
@@ -556,6 +567,11 @@ bool Create(HostTexture &t, const TextureFetch &fetch, bool render_target,
     t.mip_levels += t.extra_levels;
   }
   t.stacked = fetch.Dimension() == TextureDimension::Tex2D && fetch.Stacked();
+  // sasrt-nx (2026-10-20, sasrt_renut_deko3d_volume_as_array): one level only, as a volume's depth halves with each
+  // level and an array's layers do not; two slices at least, as a 2D array view takes two layers (StackedLayers).
+  if (IsDeko3D() && !render_target && fetch.Dimension() == TextureDimension::Tex3D && t.mip_levels == 1 &&
+      t.depth >= 2 && banjo::renut_gpu::Deko3DVolumeAsArrayOn())
+    t.stacked = true;
   switch (t.dimension) {
   case TextureDimension::Tex3D:
     if (t.stacked) {
@@ -672,6 +688,16 @@ void Retire(HostTexture &t) {
 bool SameData(const u32 a[6], const u32 b[6]) {
   constexpr u32 kDimensionMask = 0x600u;  // fetch dword 5 bits 9-10
   return a[1] == b[1] && a[2] == b[2] && (a[5] & kDimensionMask) == (b[5] & kDimensionMask);
+}
+
+// sasrt-nx (2026-10-21, sasrt_renut_texture_keep_on_signs): two descriptions that differ only in the component signs (dword 0
+// bits 2-9), both or neither all signed (the only part of the signs Create uses: AllSigned).
+bool SignsOnly(const u32 a[6], const u32 b[6]) {
+  constexpr u32 kSigns = 0x3FCu;
+  if (((a[0] ^ b[0]) & ~kSigns) != 0 || std::memcmp(a + 1, b + 1, 5 * sizeof(u32)) != 0)
+    return false;
+  const auto all_signed = [](u32 w) { return (w & kSigns) == 0x154u; };  // TextureSign::Signed (1) in all four
+  return all_signed(a[0]) == all_signed(b[0]) && banjo::renut_gpu::TextureKeepOnSignsOn();
 }
 
 // The resolve destination another header wrote this texture's memory through,
@@ -1104,7 +1130,15 @@ void TransitionTextureLocked(HostTexture *texture, plume::RenderTextureLayout la
   const bool copy = layout == plume::RenderTextureLayout::COPY_DEST ||
                     layout == plume::RenderTextureLayout::COPY_SOURCE ||
                     layout == plume::RenderTextureLayout::RESOLVE_DEST;
-  cmd->barriers(copy ? plume::RenderBarrierStage::COPY : plume::RenderBarrierStage::GRAPHICS,
+  // sasrt-nx (2026-11-04, sasrt_deko3d_copy_wait): leaving a copy layout on deko3d is a copy-stage move too: plume
+  // then emits DkBarrier_Full, the only barrier that waits for the copy engine (a fragment barrier drains the 3D
+  // engine only, and the draw could sample a texture the engine was still writing).
+  const bool from_copy = IsDeko3D() && banjo::renut_gpu::Deko3DCopyWaitOn() &&
+                         (texture->layout == plume::RenderTextureLayout::COPY_DEST ||
+                          texture->layout == plume::RenderTextureLayout::COPY_SOURCE ||
+                          texture->layout == plume::RenderTextureLayout::RESOLVE_DEST ||
+                          texture->layout == plume::RenderTextureLayout::RESOLVE_SOURCE);
+  cmd->barriers(copy || from_copy ? plume::RenderBarrierStage::COPY : plume::RenderBarrierStage::GRAPHICS,
                 plume::RenderTextureBarrier(texture->texture.get(), layout));
   texture->layout = layout;
 }
@@ -1113,12 +1147,30 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   TextureBinding binding;
   binding.dimension = HostDimension(device_fetch);
   binding.slot = NullSlot(binding.dimension);
-  if (!texture_va)
+  if (!texture_va) {
+    // sasrt-nx (2026-10-20, sasrt_renut_texture_fetch_only): a fetch constant set without SetTexture: its own texture,
+    // keyed by its base address. renut-ultimate: bit 1 marks the key (a header's address has neither low bit; kameo-nx's
+    // stacked views below use bit 0), bit 0 a stacked fetch (FillTextures' SampleAsStacked marks the device's copy).
+    if (!device_fetch.IsTexture() || !banjo::renut_gpu::TextureFetchOnlyOn())
+      return binding;
+    // renut-ultimate (audit, 2026-11-07): bits 2-11 a hash of the data the fetch describes, so one page sampled as two
+    // textures keeps both (with one key, each change between them made the texture again).
+    u32 key_desc[6];
+    MaskedDesc(device_fetch, key_desc);
+    u32 key_hash = 0;
+    for (const u32 word : key_desc)
+      key_hash = (key_hash ^ word) * 0x9E3779B1u;
+    texture_va = 2u | (device_fetch.Stacked() ? 1u : 0u) | (key_hash >> 22) << 2 | u32(device_fetch.BasePage()) << 12;
+  }
+  const auto *header = (texture_va & 2u) ? nullptr : GuestPtr<const d3d::BaseTexture>(texture_va);
+  if (!header && !(texture_va & 2u))
     return binding;
-  const auto *header = GuestPtr<const d3d::BaseTexture>(texture_va);
-  if (!header)
-    return binding;
-  TextureFetch fetch = TextureFetch::FromHeader(header->Format);
+  TextureFetch fetch = header ? TextureFetch::FromHeader(header->Format) : device_fetch;
+  // kameo-nx (2026-11-03, banjo_renut_fetch3d_on_2d): FillTextures marks a 2D fetch stacked for a shader that reads it through
+  // tfetch3D: a host texture of its own (a header can be sampled both ways), reached by the 3D table's stacked path.
+  const bool as_stacked = device_fetch.Stacked() && !fetch.Stacked() && fetch.IsTexture();
+  if (as_stacked)
+    fetch.dword[1] |= 1u << 10;
   // SetTexture copied the header into the device's fetch constant. A header
   // that no longer matches it was a temporary the game has overwritten since
   // (a command buffer runs after its recording thread's stack moved on); the
@@ -1204,12 +1256,12 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
     binding.lod_scale = resolved->extra_levels ? resolved->scale : RenderScale{};
     return binding;
   }
-  auto &slot = TextureSlot(texture_va);
+  auto &slot = TextureSlot(as_stacked ? texture_va | 1 : texture_va);  // kameo-nx (2026-11-03)
   // A resolve destination sampled through a fetch constant that differs from
   // its header only in fields that leave the data alone (the mip range, say)
   // keeps what the resolve wrote.
   if (slot && std::memcmp(slot->desc, desc, sizeof(desc)) != 0 &&
-      !(slot->gpu_written && SameData(slot->desc, desc))) {
+      !(slot->gpu_written && SameData(slot->desc, desc)) && !SignsOnly(slot->desc, desc)) {  // sasrt-nx: SignsOnly
     // banjo-nx (2026-10-18, the one-frame colour flashes): a texture only the GPU has the content of, thrown away for a
     // fetch constant that reads the memory otherwise; the new one is filled from guest memory, which the resolve never
     // wrote (zero: green through the game's colour encoding on deko3d; stale on Vulkan).
@@ -1367,10 +1419,12 @@ bool RefreshBindingLocked(u32 texture_va, const TextureFetch &device_fetch, cons
     return true;
   // The fetch BindTextureLocked takes: the header's, or the device's where the header no longer describes the same
   // data or (banjo_renut_device_swizzle) differs in dwords 0, 3 or 5 (its logs and counters left out).
-  const auto *header = GuestPtr<const d3d::BaseTexture>(texture_va);
-  if (!header)
+  // renut-ultimate (audit, 2026-11-07): a slot bound by its fetch constant alone (sasrt_renut_texture_fetch_only, address
+  // 0) checks its content from the device's fetch, as its bind does.
+  const auto *header = texture_va ? GuestPtr<const d3d::BaseTexture>(texture_va) : nullptr;
+  if (!header && (texture_va || !banjo::renut_gpu::TextureFetchOnlyOn()))
     return false;
-  TextureFetch fetch = TextureFetch::FromHeader(header->Format);
+  TextureFetch fetch = header ? TextureFetch::FromHeader(header->Format) : device_fetch;
   if (!fetch.IsTexture() || fetch.BasePage() != device_fetch.BasePage())
     fetch = device_fetch;
   if (!fetch.IsTexture())
@@ -1886,8 +1940,11 @@ uint32_t SamplerSlotUncached(const TextureFetch &fetch, RenderScale lod_scale) {
     return it->second;
 
   auto &s = State();
+  // vivapinata-nx (2026-11-03): a family of kSamplerVariants consecutive slots: the fetch constant's sampler, then the same with
+  // the filters a texture fetch can name over it (XenosRecomp adds the number to the sampler word): 1 linear, 2 point, 3 point
+  // with point mips, 4 linear with point mips. Nothing on the draw path changes: the word stays the fetch constant's.
   uint32_t slot = UINT32_MAX;
-  for (uint32_t i = kFirstDynamicSamplerSlot; i < kSamplerDescriptorCount; ++i) {
+  for (uint32_t i = kFirstDynamicSamplerSlot; i + kSamplerVariants <= kSamplerDescriptorCount; i += kSamplerVariants) {
     if (!s.sampler_slot_used[i]) {
       slot = i;
       break;
@@ -1906,6 +1963,23 @@ uint32_t SamplerSlotUncached(const TextureFetch &fetch, RenderScale lod_scale) {
     return kLinearClampSamplerSlot;
   s.sampler_slot_used[slot] = true;
   s.sampler_set->setSampler(slot, sampler.get());
+  for (uint32_t v = 1; v < kSamplerVariants; ++v) {
+    plume::RenderSamplerDesc d = desc;
+    const bool linear = v == 1 || v == 4;
+    d.magFilter = d.minFilter = linear ? plume::RenderFilter::LINEAR : plume::RenderFilter::NEAREST;
+    if (v >= 3)
+      d.mipmapMode = plume::RenderMipmapMode::NEAREST;
+    if (!linear) {
+      d.anisotropyEnabled = false;
+      d.maxAnisotropy = 1;
+      if (lod_scale.Factor() > 1.0f)
+        d.maxLOD = 0.0f;  // as above: a point fetch stays at the guest texel it hits
+    }
+    auto variant = s.device->createSampler(d);
+    s.sampler_set->setSampler(slot + v, variant ? variant.get() : sampler.get());
+    if (variant)
+      g_sampler_objects.push_back(std::move(variant));
+  }
   g_sampler_objects.push_back(std::move(sampler));
   g_samplers.emplace(key, slot);
   return slot;

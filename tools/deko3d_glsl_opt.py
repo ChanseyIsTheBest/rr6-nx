@@ -1190,6 +1190,141 @@ def pass_earlyz(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# pass: plainfetch — a fetch's sign, gamma and exponent code dropped where the draw's fetch words have none
+# (sasrt-nx, 2026-11-08, the GPU round after the move to the ultimate base: sasrt_gpu_plain_fetches, constant 926)
+
+PLAINFETCH_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_926\n#define SPIRV_CROSS_CONSTANT_ID_926 0u\n#endif\n'
+                   'const uint g_sasrtPlainFetch = SPIRV_CROSS_CONSTANT_ID_926;\n')
+_PF_COND = r'(?:!\(\((_\d+) \| (_\d+)\) != 0u\)|(_\d+))'
+_PF_BLOCK = re.compile(r'bool (_\d+);\s*if \(' + _PF_COND + r'\)\s*\{\s*\1 = (_\d+) != 0;\s*\}\s*else\s*\{\s*\1 = true;\s*\}')
+_PF_NOT = r'bool {v} = !\(\((_\d+) \| (_\d+)\) != 0u\);'
+_PF_SIGNS = r'uint {v} = \(g_UboShared\.v\[(\d+)u\]\.([xyzw]) >> 16u\) & 15u;'
+_PF_GAMMA = r'uint {v} = \(g_UboShared\.v\[(\d+)u\]\.([xyzw]) >> 13u\) & 7u;'
+_PF_EXP = r'int {v} = int\(g_UboShared\.v\[(\d+)u\]\.([xyzw]) << 6u\) >> 26;'
+
+
+def _pf_byte(m):
+    return int(m.group(1)) * 16 + 'xyzw'.index(m.group(2)) * 4
+
+
+def pass_plainfetch(text):
+    """Renut's texture fetches apply Xenos' per-fetch-constant signs and gamma (SharedConstants.sampler_indices bits
+    13-19: v[24 + r / 4]) and the exponent adjust (texture_indices bits 20-25: v[r / 4] for a 2D fetch) to the texel in
+    a block that runs only when the fetch constant has any; for every other fetch the block is skipped and the texel is
+    used as it is. The block is a uniform branch, but its temporaries count in the shader's registers (the race's
+    G-buffer shader 33 GPRs with them, 28 without; the final pass 42 and 31). Constant 926, bit r: the draw's words for
+    fetch constant r have none of the three (render/draw.cpp SasrtPlainFetchMask), so the block's condition is false at
+    compile time and uam drops it. Its default 0 leaves every block as it was. Same pixels: the condition was false for
+    that draw anyway."""
+    if 'SPIRV_CROSS_CONSTANT_ID_926' in text or '>> 16u) & 15u;' not in text:
+        return text
+    edits = []
+    for m in _PF_BLOCK.finditer(text):
+        b, x, y, p, e = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        if p:
+            mn = re.search(_PF_NOT.format(v=re.escape(p)), text)
+            if not mn:
+                continue
+            x, y = mn.group(1), mn.group(2)
+        ms = re.search(_PF_SIGNS.format(v=re.escape(x)), text)
+        mg = re.search(_PF_GAMMA.format(v=re.escape(y)), text)
+        me = re.search(_PF_EXP.format(v=re.escape(e)), text)
+        if not (ms and mg and me):
+            continue
+        sb, gb, eb = _pf_byte(ms), _pf_byte(mg), _pf_byte(me)
+        r = (sb - 384) // 4
+        # the words of one fetch constant r: sampler_indices[r] (bytes 384-511) for both, texture_indices[d][r] (d the
+        # fetch's dimension, bytes 0-383) for the exponent
+        if sb != gb or not 384 <= sb < 512 or eb >= 384 or eb % 128 != 4 * r:
+            continue
+        edits.append((m.end(), f'\n    {b} = {b} && ((g_sasrtPlainFetch >> {r}u) & 1u) == 0u;'))
+    if not edits:
+        return text
+    for at, code in reversed(edits):
+        text = text[:at] + code + text[at:]
+    return insert_globals(text, PLAINFETCH_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: onex — a draw at 1x (targets and every sampled texture): the texture scale codes and the pixel position's scale
+# fold (sasrt-nx, 2026-11-08, the GPU round: sasrt_gpu_one_x, constant 926 bit 31)
+
+ONEX_CODE_RE = re.compile(r'^(\s*uint (_\d+) = )(\(g_UboShared\.v\[\d+u\]\.[xyzw] >> 26u\) & 7u);$', re.M)
+
+
+def pass_onex(text):
+    """banjo-nx's scale1 and fragscale (left out of the default package since the internal resolutions) as a draw's
+    choice: constant 926's bit 31 (render/draw.cpp SasrtPlainFetchMask: the draw's targets are 1x and the scale code of
+    every texture word its pixel shader samples is 0; a pixel shader never samples fetch constant 31, so the bit is free)
+    makes each texture word's scale code 0 (the seven-way select of the scale factor after it then folds to 1.0) and
+    the pixel position's resolution scale (SharedConstants.resolution_scale) 1.0, which they are for that draw: the
+    selects, the reciprocal and the multiplies go. Its default 0 leaves them as they were."""
+    if 'SPIRV_CROSS_CONSTANT_ID_926' in text and 'g_sasrtOneX' in text:
+        return text
+    has_code = ONEX_CODE_RE.search(text) is not None
+    span = main_span(text)
+    has_scale = bool(span) and SCALE_WORD in text[span[0]:span[1]]
+    if not has_code and not has_scale:
+        return text
+    text = ONEX_CODE_RE.sub(lambda m: f'{m.group(1)}g_sasrtOneX ? 0u : ({m.group(3)});', text)
+    if has_scale:
+        a, b = main_span(text)
+        text = text[:a] + text[a:b].replace(SCALE_WORD, f'(g_sasrtOneX ? 1.0 : {SCALE_WORD})') + text[b:]
+    onex = 'const bool g_sasrtOneX = (g_sasrtPlainFetch >> 31u) != 0u;\n'
+    anchor = 'const uint g_sasrtPlainFetch = SPIRV_CROSS_CONSTANT_ID_926;\n'
+    if anchor in text:  # the plainfetch pass's declaration: after it
+        return text.replace(anchor, anchor + onex, 1)
+    return insert_globals(text, PLAINFETCH_DECL + onex)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: facesign — the Xenos face register's sign test without its reciprocal (sasrt-nx, 2026-11-08, the GPU round:
+# sasrt_gpu_face_sign, constant 928, 1 by default)
+
+FACESIGN_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_928\n#define SPIRV_CROSS_CONSTANT_ID_928 1u\n#endif\n'
+                 'const uint g_sasrtFaceSign = SPIRV_CROSS_CONSTANT_ID_928;\n')
+_FS_TAIL = re.compile(r'\.x, (_\d+), (_\d+)\) >= 0\.0')
+FLT_MAX_WORD = 'uintBitsToFloat(g_UboShared.v[83u].w)'
+
+
+def pass_facesign(text):
+    """Renut's shaders give the Xenos face register's sign as `clamp(1.0 / Y, -FLT_MAX, FLT_MAX) >= 0.0`, Y the pixel
+    position (gl_FragCoord / the resolution scale, less half a pixel and the tile origin) times +1 or -1 by
+    gl_FrontFacing: a reciprocal (a quarter-rate MUFU on Maxwell), two clamps and a compare a pixel, for one sign. For
+    any Y that is not NaN the answer is Y's sign bit clear (1 / +0 is +inf, 1 / -0 is -inf, and the clamp keeps the
+    sign); Y is never NaN (the position, the scale and the origin are finite, the scale above 0). Constant 928 (1 by
+    default; 0 when sasrt_gpu_face_sign is off, render/pipeline.cpp) picks the sign bit; 0 the expression as it was."""
+    if 'gl_FrontFacing' not in text or 'clamp(1.0 / (' not in text or 'SPIRV_CROSS_CONSTANT_ID_928' in text:
+        return text
+    hi_vars = set(re.findall(r'float (_\d+) = ' + re.escape(FLT_MAX_WORD) + ';', text))
+    lo_vars = {lo: hi for lo, hi in re.findall(r'float (_\d+) = -(_\d+);', text) if hi in hi_vars}
+    out, i, changed = [], 0, False
+    key = 'clamp(1.0 / ('
+    while True:
+        j = text.find(key, i)
+        if j < 0:
+            break
+        open_idx = j + len('clamp(1.0 / ')
+        close = matching(text, open_idx, '(', ')')
+        m = _FS_TAIL.match(text, close + 1) if close > 0 else None
+        expr = text[open_idx:close + 1] if close > 0 else ''
+        if (m and 'gl_FrontFacing' in expr and 'gl_FragCoord' in expr and lo_vars.get(m.group(1)) == m.group(2)):
+            lo, hi = m.group(1), m.group(2)
+            out.append(text[i:j])
+            out.append(f'((g_sasrtFaceSign != 0u) ? ((floatBitsToUint({expr}.x) >> 31u) == 0u) : '
+                       f'(clamp(1.0 / {expr}.x, {lo}, {hi}) >= 0.0))')
+            i = m.end()
+            changed = True
+        else:
+            out.append(text[i:j + 1])
+            i = j + 1
+    if not changed:
+        return text
+    out.append(text[i:])
+    return insert_globals(''.join(out), FACESIGN_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # pass: gpr32 — the listed shaders get constant 910: compiled with 32 GPRs at most when it is 1
 
 GPR32_LIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gpr32_shaders.txt')
@@ -2166,12 +2301,415 @@ def pass_skinonce(text, name=None):
     return insert_before_main(text, SKIN_DECL)
 
 
+FETCH_WORDS = ['g_UboShared.v[%du].w' % (66 + k) for k in range(4)]
+
+
+def pass_fetchspec(text):
+    """banjo-nx (banjo_gpu_fetch_spec, 2026-10-31; vivapinata-nx 2026-11-03): the type words of the first four bound fetches
+    (SharedConstants.bound_fetch[k][3], rows 66-69: the format in bits 0-5, signed in bit 8, integer in bit 9) as
+    specialization constants 920-923, each the word + 1 (0: read at run time). render/pipeline.cpp gives them to a
+    tessellated draw's pipeline from its key (render/draw.cpp FetchSpecWords, the draw's own words): the generic fetch's
+    switch over fifteen formats becomes one format's decode."""
+    if FETCH_WORDS[0] not in text or 'g_DkAddressWindow' not in text:
+        return text
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    decl = ''
+    for k, word in enumerate(FETCH_WORDS):
+        if word not in body:
+            continue
+        body = body.replace(word, 'DK_FETCH_TYPE%d' % k)
+        c = 920 + k
+        decl += (f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
+                 f'const uint g_banjoFetchType{k} = SPIRV_CROSS_CONSTANT_ID_{c};\n'
+                 f'#define DK_FETCH_TYPE{k} ((g_banjoFetchType{k} != 0u) ? (g_banjoFetchType{k} - 1u) : {word})\n')
+    return insert_before_main(text[:a] + body + text[b:], decl)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: plainfetch — a fetch's sign, gamma and exponent code dropped where the draw's fetch words have none
+# (sasrt-nx, 2026-11-08, the GPU round after the move to the ultimate base: sasrt_gpu_plain_fetches, constant 926;
+# rr6-nx's copy of the same day: its console run with the ultimate renderer drew 4 ms a frame more on the GPU, the
+# pixel shaders about 120 instructions heavier per fetch. The mask: render/draw.cpp PlainFetchMask)
+
+PLAINFETCH_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_926\n#define SPIRV_CROSS_CONSTANT_ID_926 0u\n#endif\n'
+                   'const uint g_sasrtPlainFetch = SPIRV_CROSS_CONSTANT_ID_926;\n')
+_PF_COND = r'(?:!\(\((_\d+) \| (_\d+)\) != 0u\)|(_\d+))'
+_PF_BLOCK = re.compile(r'bool (_\d+);\s*if \(' + _PF_COND + r'\)\s*\{\s*\1 = (_\d+) != 0;\s*\}\s*else\s*\{\s*\1 = true;\s*\}')
+_PF_NOT = r'bool {v} = !\(\((_\d+) \| (_\d+)\) != 0u\);'
+_PF_SIGNS = r'uint {v} = \(g_UboShared\.v\[(\d+)u\]\.([xyzw]) >> 16u\) & 15u;'
+_PF_GAMMA = r'uint {v} = \(g_UboShared\.v\[(\d+)u\]\.([xyzw]) >> 13u\) & 7u;'
+_PF_EXP = r'int {v} = int\(g_UboShared\.v\[(\d+)u\]\.([xyzw]) << 6u\) >> 26;'
+
+
+def _pf_byte(m):
+    return int(m.group(1)) * 16 + 'xyzw'.index(m.group(2)) * 4
+
+
+def pass_plainfetch(text):
+    """Renut's texture fetches apply Xenos' per-fetch-constant signs and gamma (SharedConstants.sampler_indices bits
+    13-19: v[24 + r / 4]) and the exponent adjust (texture_indices bits 20-25: v[r / 4] for a 2D fetch) to the texel in
+    a block that runs only when the fetch constant has any; for every other fetch the block is skipped and the texel is
+    used as it is. The block is a uniform branch, but its temporaries count in the shader's registers (the race's
+    G-buffer shader 33 GPRs with them, 28 without; the final pass 42 and 31). Constant 926, bit r: the draw's words for
+    fetch constant r have none of the three (render/draw.cpp PlainFetchMask), so the block's condition is false at
+    compile time and uam drops it. Its default 0 leaves every block as it was. Same pixels: the condition was false for
+    that draw anyway."""
+    if 'SPIRV_CROSS_CONSTANT_ID_926' in text or '>> 16u) & 15u;' not in text:
+        return text
+    edits = []
+    for m in _PF_BLOCK.finditer(text):
+        b, x, y, p, e = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        if p:
+            mn = re.search(_PF_NOT.format(v=re.escape(p)), text)
+            if not mn:
+                continue
+            x, y = mn.group(1), mn.group(2)
+        ms = re.search(_PF_SIGNS.format(v=re.escape(x)), text)
+        mg = re.search(_PF_GAMMA.format(v=re.escape(y)), text)
+        me = re.search(_PF_EXP.format(v=re.escape(e)), text)
+        if not (ms and mg and me):
+            continue
+        sb, gb, eb = _pf_byte(ms), _pf_byte(mg), _pf_byte(me)
+        r = (sb - 384) // 4
+        # the words of one fetch constant r: sampler_indices[r] (bytes 384-511) for both, texture_indices[d][r] (d the
+        # fetch's dimension, bytes 0-383) for the exponent
+        if sb != gb or not 384 <= sb < 512 or eb >= 384 or eb % 128 != 4 * r:
+            continue
+        edits.append((m.end(), f'\n    {b} = {b} && ((g_sasrtPlainFetch >> {r}u) & 1u) == 0u;'))
+    if not edits:
+        return text
+    for at, code in reversed(edits):
+        text = text[:at] + code + text[at:]
+    return insert_globals(text, PLAINFETCH_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: vskill — a vertex kill as the GPU does it: only a primitive whose vertices are all killed goes (constant 914)
+# vivapinata-nx (2026-11-03, 6eecb25a), ported into renut-ultimate.
+
+VSKILL_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_914\n#define SPIRV_CROSS_CONSTANT_ID_914 0u\n#endif\n'
+               'const uint g_banjoVsKillAnd = SPIRV_CROSS_CONSTANT_ID_914;\n')
+VSKILL_NAN_RE = re.compile(r'^(\s*)gl_Position = (mix\((\w+), vec4\(uintBitsToFloat\(0x7fc00000u /\* nan \*/\)\), '
+                           r'bvec4\((\w+)\)\));$', re.M)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: expwin - sasrt-nx (2026-11-08, sasrt_gpu_export_window_ubo; the fourth GPU round, the 33 ms goal): Renut's
+# memexport writes each exported value into the first of the draw's four export windows that holds its address, a loop
+# over `uvec4 _N[4] = uvec4[](g_UboShared.v[61u], ... v[64u])` indexed by the loop counter. A local array indexed at run
+# time lives in local memory: SASRT's skinning export shader (three exports a vertex) kept 192 bytes a thread there, and
+# its draws cost ~180 ns a vertex on the console (8.5 ms a race frame, measured by drawing every export twice). With
+# constant 944 = 1 each use `_N[i]` reads the constant buffer itself, `g_UboShared.v[61u + min(i, 3u)]`: the same four
+# words (i < 4 wherever the loop reads them; the min only bounds an index the loop never makes), no local memory.
+# 944 = 0 (default) expands every use back to `_N[i]` and keeps the array: the code is the same as without this pass.
+EXPWIN_RE = re.compile(r'^([ \t]*)uvec4 (_\d+)\[4\] = uvec4\[\]\(g_UboShared\.v\[(\d+)u\], g_UboShared\.v\[(\d+)u\], '
+                       r'g_UboShared\.v\[(\d+)u\], g_UboShared\.v\[(\d+)u\]\);$', re.M)
+EXPWIN_DECL = '#ifndef SPIRV_CROSS_CONSTANT_ID_944\n#define SPIRV_CROSS_CONSTANT_ID_944 0u\n#endif\n'
+
+
+def pass_expwin(text):
+    if 'SPIRV_CROSS_CONSTANT_ID_944' in text or 'uvec4[](g_UboShared.v[' not in text:
+        return text
+    done = 0
+    for m in list(EXPWIN_RE.finditer(text)):
+        indent, name = m.group(1), m.group(2)
+        regs = [int(m.group(k)) for k in range(3, 7)]
+        if regs != list(range(regs[0], regs[0] + 4)):
+            continue
+        uses = re.findall(r'(?<![\w.])' + re.escape(name) + r'\b', text)
+        indexed = re.findall(r'(?<![\w.])' + re.escape(name) + r'\[_\d+\]', text)
+        if len(uses) != len(indexed) + 1:  # the declaration, then only `_N[_M]` reads
+            continue
+        decl = m.group(0)
+        if text.count(decl) != 1:
+            continue
+        text = text.replace(decl, f'#if SPIRV_CROSS_CONSTANT_ID_944 != 0u\n'
+                                  f'#define DKW{name}(i) g_UboShared.v[{regs[0]}u + min((i), 3u)]\n'
+                                  f'#else\n{decl}\n#define DKW{name}(i) {name}[i]\n#endif')
+        text = re.sub(r'(?<![\w.])' + re.escape(name) + r'\[(_\d+)\]', f'DKW{name}(\\1)', text)
+        done += 1
+    return insert_globals(text, EXPWIN_DECL) if done else text
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: expparts - sasrt-nx (2026-11-09, sasrt_gpu_exp_export_parts; the fourth GPU round): an EXPERIMENT that changes
+# pixels, to find what makes a memexport vertex shader cost ~150 ns a vertex on the console. Constant 945 (0 by default:
+# the code exactly as before): bit 0 its export stores skipped (the values still computed), bit 1 its bone-row loads from
+# the address window replaced by a constant-buffer word, bit 2 its vertex inputs replaced by zero, bit 3 no export
+# store at all (the export work then compiles away), bit 4 the position (2, 2, 2, 1): outside the view volume.
+EXPPARTS_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_945\n#define SPIRV_CROSS_CONSTANT_ID_945 0u\n#endif\n'
+                 'const uint g_sasrtExpParts = SPIRV_CROSS_CONSTANT_ID_945;\n')
+EXPPARTS_STORE_RE = re.compile(r'^(\s*)(g_DkMemExport\._m0\[.+\]) = (_\d+);$', re.M)
+EXPPARTS_IN_RE = re.compile(r'^layout\(location = \d+\) in (\w+) (in_var_\w+);$', re.M)
+
+
+def pass_expparts(text):
+    if 'SPIRV_CROSS_CONSTANT_ID_945' in text or 'g_DkMemExport._m0[' not in text:
+        return text
+    text = EXPPARTS_STORE_RE.sub(lambda m: f'{m.group(1)}if ((g_sasrtExpParts & 8u) == 0u && ((g_sasrtExpParts & 1u) == 0u || '
+                                           f'{m.group(3)} == 2654435769u)) {{ {m.group(2)} = {m.group(3)}; }}', text)
+    key = 'g_DkAddressWindow4._m0['
+    out, at = [], 0
+    while True:
+        k = text.find(key, at)
+        if k < 0:
+            out.append(text[at:])
+            break
+        depth, j = 1, k + len(key)
+        while depth:
+            depth += {'[': 1, ']': -1}.get(text[j], 0)
+            j += 1
+        out.append(text[at:k])
+        out.append(f'(((g_sasrtExpParts & 2u) != 0u) ? g_UboShared.v[1u] : {text[k:j]})')
+        at = j
+    text = ''.join(out)
+    text = re.sub(r'^(\s*)gl_Position = (_\d+);$', lambda m: f'{m.group(1)}gl_Position = ((g_sasrtExpParts & 16u) != 0u) ? '
+                  f'vec4(2.0, 2.0, 2.0, 1.0) : {m.group(2)};', text, flags=re.M)
+    ins = EXPPARTS_IN_RE.findall(text)
+    span = main_span(text)
+    if ins and span:
+        a, b = span
+        body = text[a:b]
+        for ty, name in ins:
+            body = re.sub(r'(?<![\w.])' + name + r'\b', 'dkx_' + name, body)
+        decl = ''.join(f'\n    {ty} dkx_{name} = ((g_sasrtExpParts & 4u) != 0u) ? {ty}(0.0) : {name};' for ty, name in ins)
+        body = decl + body  # main_span's body starts after main's brace
+        text = text[:a] + body + text[b:]
+    return insert_globals(text, EXPPARTS_DECL)
+
+
+def pass_vskill(text):
+    """vivapinata-nx (2026-11-03): the XDK's vertex kill (oPts.z) drops a primitive only when all its vertices are killed
+    (PA_CL_CLIP_CNTL.vtx_kill_or off; the SDK's translators do the same). XenosRecomp's SPIR-V has only the NaN position,
+    which drops any primitive with one killed vertex: Viva Pinata's ground layers kill vertices where a layer is absent, so
+    each layer lost a row of cells at its border and ended in hard steps, unlike D3D12's cull distance. deko3d has neither
+    cull distances nor a clip distance enable, so with constant 914 = 1 the vertex shader keeps its position and passes
+    its kill flag at location 30 (renut-ultimate: 26 in vivapinata-nx, where the point size is now: the 25 interpolators
+    are 0-24, then the point coordinate and size), and the pixel shader discards as its first statement where the flag interpolates to 1:
+    only inside a primitive with all three killed. render/pipeline.cpp gives both stages 914 when the vertex shader
+    declares it and the pipeline has a pixel shader; otherwise (0, depth-only draws) the NaN as before. The location's
+    line has a leading space: it is not one of the varyings that constants 905 and 906 cover. This pass comes last:
+    the earlier ones' discard tests must not see this one's."""
+    span = main_span(text)
+    if not span:
+        return text
+    if 'gl_Position' in text:
+        if not VSKILL_NAN_RE.search(text):
+            return text
+
+        def write(m):
+            i = m.group(1)
+            return (f'{i}if (g_banjoVsKillAnd != 0u)\n{i}{{\n{i}    gl_Position = {m.group(3)};\n'
+                    f'{i}    dk_kill_v = {m.group(4)} ? 1.0 : 0.0;\n{i}}}\n{i}else\n{i}{{\n'
+                    f'{i}    gl_Position = {m.group(2)};\n{i}}}')
+        text = VSKILL_NAN_RE.sub(write, text)
+        return insert_before_main(text, VSKILL_DECL + ' layout(location = 30) out float dk_kill_v;\n')
+    m = re.search(r'\nvoid main\(\)\n\{\n', text)
+    if not m:
+        return text
+    text = (text[:m.end()] + '    if (g_banjoVsKillAnd != 0u)\n    {\n        if (dk_kill_v >= 0.9999)\n        {\n'
+            '            discard;\n        }\n    }\n' + text[m.end():])
+    return insert_before_main(text, VSKILL_DECL + ' layout(location = 30) in float dk_kill_v;\n')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: vsepi — the vertex shaders' epilogue tests as constants of the draw (sasrt-nx, 2026-11-08, the third GPU round:
+# sasrt_gpu_vs_screen_space_spec, sasrt_gpu_vs_depth_remap_spec, constant 932)
+
+VSEPI_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_932\n#define SPIRV_CROSS_CONSTANT_ID_932 0u\n#endif\n'
+              'const uint g_sasrtVsEpi = SPIRV_CROSS_CONSTANT_ID_932;\n')
+VSEPI_SCREEN = 'if (g_UboShared.v[60u].z != 0u)'
+VSEPI_REMAP_VAR = re.compile(r'float (_\d+) = uintBitsToFloat\(g_UboShared\.v\[94u\]\.x\);')
+
+
+def pass_vsepi(text):
+    """Every vertex shader ends with Renut's screen-space branch (SharedConstants.screen_space, v[60].z: positions in
+    pixels, mapped to clip space by the shader with the scale and offset it then reads) and the depth remap branch
+    (depth_remap[0], v[94].x, never set on deko3d). Constant 932 (render/draw.cpp SasrtSpecWordsOf): bit 0 set, bit 1 is
+    the screen-space test's answer; bit 2 set, bit 3 the remap test's. Its default 0 leaves both tests as they were.
+    The draw's own answer: same pixels."""
+    if 'SPIRV_CROSS_CONSTANT_ID_932' in text or text.count(VSEPI_SCREEN) != 1:
+        return text
+    text = text.replace(VSEPI_SCREEN, 'if (((g_sasrtVsEpi & 1u) != 0u) ? ((g_sasrtVsEpi & 2u) != 0u) : '
+                                      '(g_UboShared.v[60u].z != 0u))')
+    m = VSEPI_REMAP_VAR.search(text)
+    if m:
+        test = f'if ({m.group(1)} != 0.0)'
+        if text.count(test) == 1:
+            text = text.replace(test, f'if (((g_sasrtVsEpi & 4u) != 0u) ? ((g_sasrtVsEpi & 8u) != 0u) : '
+                                      f'({m.group(1)} != 0.0))')
+    return insert_globals(text, VSEPI_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: stack3d — a 3D fetch's stacked / layer filter / Z wrap tests as constants of the draw (sasrt-nx, 2026-11-08, the
+# third GPU round: sasrt_gpu_stacked_3d_spec, sasrt_gpu_stacked_filter_spec, constants 934-936)
+
+STACK3D_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_934\n#define SPIRV_CROSS_CONSTANT_ID_934 0u\n#endif\n'
+                'const uint g_sasrtStack3d = SPIRV_CROSS_CONSTANT_ID_934;\n'
+                '#ifndef SPIRV_CROSS_CONSTANT_ID_935\n#define SPIRV_CROSS_CONSTANT_ID_935 0u\n#endif\n'
+                'const uint g_sasrtStackLinear = SPIRV_CROSS_CONSTANT_ID_935;\n'
+                '#ifndef SPIRV_CROSS_CONSTANT_ID_936\n#define SPIRV_CROSS_CONSTANT_ID_936 0u\n#endif\n'
+                'const uint g_sasrtStackWrap = SPIRV_CROSS_CONSTANT_ID_936;\n')
+STACK3D_TEST = re.compile(r'\(g_UboShared\.v\[(\d+)u\]\.([xyzw]) & (2147483648u|1073741824u|536870912u)\) != 0u')
+STACK3D_CONST = {'2147483648u': 'g_sasrtStack3d', '1073741824u': 'g_sasrtStackLinear', '536870912u': 'g_sasrtStackWrap'}
+
+
+def pass_stack3d(text):
+    """Renut's 3D fetch (tfetchStacked) tests the draw's 3D texture word (SharedConstants.texture_indices[1][r]: bytes
+    128-255, v[8]-v[15]) at run time: bit 31 a stacked texture (a 2D array: two fetches and a blend between layers, with
+    its layer count queried) or a volume texture, bit 30 the filter between layers, bit 29 the Z wrap. Constants 934,
+    935, 936 (render/draw.cpp SasrtSpecWordsOf): bit 31 set, bit r is that bit of fetch constant r's word for the draw;
+    the test becomes that constant and uam drops the path not taken. Their default 0 leaves the tests as they were.
+    The draw's own answer: same pixels."""
+    if 'SPIRV_CROSS_CONSTANT_ID_934' in text:
+        return text
+
+    def sub(m):
+        byte = int(m.group(1)) * 16 + 'xyzw'.index(m.group(2)) * 4
+        if not 128 <= byte < 256:
+            return m.group(0)
+        r = (byte - 128) // 4
+        c = STACK3D_CONST[m.group(3)]
+        return f'((({c} >> 31u) != 0u) ? ((({c} >> {r}u) & 1u) != 0u) : ({m.group(0)}))'
+
+    new = STACK3D_TEST.sub(sub, text)
+    if new == text:
+        return text
+    return insert_globals(new, STACK3D_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: fetchendian — a vertex fetch by address's byte order as constants of the draw (sasrt-nx, 2026-11-08, the third
+# GPU round: sasrt_gpu_fetch_endian_spec, constants 937-939). Renut's translator output: any port's.
+
+FETCHENDIAN_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_937\n#define SPIRV_CROSS_CONSTANT_ID_937 0u\n#endif\n'
+                    'const uint g_sasrtEndianSet = SPIRV_CROSS_CONSTANT_ID_937;\n'
+                    '#ifndef SPIRV_CROSS_CONSTANT_ID_938\n#define SPIRV_CROSS_CONSTANT_ID_938 0u\n#endif\n'
+                    'const uint g_sasrtEndianLo = SPIRV_CROSS_CONSTANT_ID_938;\n'
+                    '#ifndef SPIRV_CROSS_CONSTANT_ID_939\n#define SPIRV_CROSS_CONSTANT_ID_939 0u\n#endif\n'
+                    'const uint g_sasrtEndianHi = SPIRV_CROSS_CONSTANT_ID_939;\n')
+FETCHENDIAN_RE = re.compile(r'\b(uint _\d+ = )(g_UboShared\.v\[(\d+)u\]\.([xyzw]) & 3u);')
+
+
+def pass_fetchendian(text):
+    """Renut's vfetchMemory reads a fetch slot's word (SharedConstants.vertex_fetch_slots[64 + i], bytes 832-959: its copy
+    offset, and its byte order in bits 0-1) and swaps each fetched word all four ways, picking one by the order at run
+    time: the race's skinning exports fetch 64 words a vertex so. Constant 937 (render/draw.cpp SasrtSpecWordsOf): bit i
+    set: slot 64 + i's order is two bits of 938 (i < 16) or 939; the order becomes that constant and uam keeps one swap a
+    word. Its default 0 leaves the order read at run time. The draw's own order: same values."""
+    if 'SPIRV_CROSS_CONSTANT_ID_937' in text or 'g_DkAddressWindow' not in text:
+        return text
+
+    def sub(m):
+        byte = int(m.group(3)) * 16 + 'xyzw'.index(m.group(4)) * 4
+        if not 832 <= byte < 960:
+            return m.group(0)
+        i = (byte - 832) // 4
+        word = 'g_sasrtEndianLo' if i < 16 else 'g_sasrtEndianHi'
+        return (f'{m.group(1)}(((g_sasrtEndianSet >> {i}u) & 1u) != 0u) ? (({word} >> {2 * (i % 16)}u) & 3u) : '
+                f'({m.group(2)});')
+
+    new = FETCHENDIAN_RE.sub(sub, text)
+    if new == text:
+        return text
+    return insert_globals(new, FETCHENDIAN_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: expfmt — a memexport's address register's z word (its format) as constants of the draw (sasrt-nx, 2026-11-08, the
+# third GPU round: sasrt_gpu_export_format_spec, constants 940-943). Renut's translator output: any port's.
+
+EXPFMT_DECL = ''.join(f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
+                      f'const uint {n} = SPIRV_CROSS_CONSTANT_ID_{c};\n'
+                      for c, n in ((940, 'g_sasrtExpSet'), (941, 'g_sasrtExpZ0'), (942, 'g_sasrtExpZ1'),
+                                   (943, 'g_sasrtExpZ2')))
+EXPFMT_RE = re.compile(r'vec4 (_\d+) = \(_\d+(?:\.[xyzw]+)? \* vec4\(0\.0, 1\.0, 0\.0, 0\.0\)\) \+ '
+                       r'g_UboVertex\.v\[(\d+)u\]\.xyzw;')
+
+
+def pass_expfmt(text):
+    """Renut's memexport: the export address register eA is a float constant c<N> plus the index (`vec4 _A = (i * vec4(0,
+    1, 0, 0)) + c<N>`), and every eM write packs its value by the format in eA.z (`floatBitsToUint(_A.z)`: bits 8-13, the
+    number flags 16-18) through a switch over the formats and a loop over the components with arrays indexed at run time
+    (local memory). Constant 940 (render/draw.cpp SasrtSpecWordsOf): bit N set: c<N>'s z word for the draw (as its
+    constant buffer has it; zero or a normal float) is 941, 942 or 943 by N's order among the set bits, and that word
+    replaces the read of eA.z: the same bits, since eA.z = i * 0 + c<N>.z is c<N>.z exactly for a finite index i (an
+    export happens only for an index in its window), and uam folds the pack to the draw's format. Its default 0 leaves
+    eA.z read at run time."""
+    if 'SPIRV_CROSS_CONSTANT_ID_940' in text or 'vec4(0.0, 1.0, 0.0, 0.0)) + g_UboVertex.v[' not in text:
+        return text
+    regs = {m.group(1): int(m.group(2)) for m in EXPFMT_RE.finditer(text) if int(m.group(2)) < 31}
+    if not regs:
+        return text
+
+    def sub(m):
+        n = regs.get(m.group(1))
+        if n is None:
+            return m.group(0)
+        rank = f'bitCount(g_sasrtExpSet & {(1 << n) - 1}u)'
+        pick = f'(({rank} == 0) ? g_sasrtExpZ0 : (({rank} == 1) ? g_sasrtExpZ1 : g_sasrtExpZ2))'
+        return f'((((g_sasrtExpSet >> {n}u) & 1u) != 0u) ? {pick} : {m.group(0)})'
+
+    new = re.sub(r'floatBitsToUint\((_\d+)\.z\)', sub, text)
+    if new == text:
+        return text
+    return insert_globals(new, EXPFMT_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: nofxaa — sasrt-nx (2026-11-08, sasrt_smaa_replaces_fxaa, the user's request): the game's FXAA pass (pixel shader
+# 6C215354C35798B8, 1152x544, between the composite and the final 1280x720 pass) as a copy of its centre sample under
+# constant 930 (0 by default: FXAA as before); banjo-nx's SMAA then runs on its target (banjo_renut_smaa_after_ps).
+
+NOFXAA_PS = {'6C215354C35798B8'}
+NOFXAA_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_930\n#define SPIRV_CROSS_CONSTANT_ID_930 0u\n#endif\n'
+               'const uint g_sasrtNoFxaa = SPIRV_CROSS_CONSTANT_ID_930;\n')
+NOFXAA_OUT = '    vec4 _1234 = mix(_1230, _1231, bvec4(!_509));'
+
+
+def pass_nofxaa(text, name=None):
+    """FXAA 360's result is its centre sample (_277: the fetch with its sign / exponent code) where it finds no edge,
+    the blend of its edge samples where it does (_1234); with 930 = 1 the result is the centre sample everywhere, and
+    uam drops the edge search. Only for the shader it was read from (the variable names are that shader's)."""
+    if not name or name.upper() not in NOFXAA_PS or text.count(NOFXAA_OUT) != 1 or 'vec4 _277;' not in text:
+        return text
+    text = text.replace(NOFXAA_OUT, '    vec4 _1234 = (g_sasrtNoFxaa != 0u) ? _277 : mix(_1230, _1231, bvec4(!_509));')
+    return insert_before_main(text, NOFXAA_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: clipspec — sasrt-nx (2026-11-08, sasrt_gpu_clip_spec; the second GPU round): the vertex shader's user clip
+# distance under constant 929 (1 by default: written, as before)
+
+CLIPSPEC_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_929\n#define SPIRV_CROSS_CONSTANT_ID_929 1u\n#endif\n'
+                 'const uint g_sasrtUserClip = SPIRV_CROSS_CONSTANT_ID_929;\n')
+CLIPSPEC_RE = re.compile(r'^(\s*)(gl_ClipDistance\[0u?\]\s*=[^;]*;)$', re.M)
+
+
+def pass_clipspec(text):
+    """Every vertex shader writes gl_ClipDistance[0] = dot(position, user clip plane 0) (rr6-nx / vivapinata-nx: the
+    plane, or zeros: a distance of 0 clips nothing). Under `g_sasrtUserClip != 0u`, constant 929: render/pipeline.cpp
+    gives 0 to the pipelines of draws without a plane (PipelineKey::reserved bit 3 clear), and plume_deko3d switches the
+    hardware clip slot off for those (SET_USER_CLIP_ENABLE 0): no dot product and no clip test a vertex. A distance never
+    read, or read back, is left alone."""
+    if len(re.findall(r'\bgl_ClipDistance\b', text)) != 2 or len(CLIPSPEC_RE.findall(text)) != 1:
+        return text  # the declaration and one write, or a form not handled
+    text = CLIPSPEC_RE.sub(lambda m: f'{m.group(1)}if (g_sasrtUserClip != 0u) {{ {m.group(2)} }}', text)
+    return insert_before_main(text, CLIPSPEC_DECL)
+
+
 PASSES = [
     ('scalecodes', pass_scalecodes),
     ('scale1', pass_scale1),
     ('fragscale', pass_fragscale),
     ('alpha', pass_alpha),
     ('tess', pass_tess),
+    ('fetchspec', pass_fetchspec),
     ('bonerow', pass_bonerow),
     ('vszero', pass_vszero),
     ('vsout', pass_vsout),
@@ -2196,13 +2734,26 @@ PASSES = [
     ('bonesel', pass_bonesel),
     ('aw4', pass_aw4),
     ('skinonce', pass_skinonce),
+    ('plainfetch', pass_plainfetch),  # sasrt-nx (2026-11-08): the GPU round, constant 926
+    ('onex', pass_onex),  # sasrt-nx (2026-11-08): the GPU round, constant 926 bit 31
+    ('facesign', pass_facesign),  # sasrt-nx (2026-11-08): the GPU round, constant 928
+    ('clipspec', pass_clipspec),  # sasrt-nx (2026-11-08): the second GPU round, constant 929
+    ('nofxaa', pass_nofxaa),  # sasrt-nx (2026-11-08): sasrt_smaa_replaces_fxaa, constant 930
+    ('vsepi', pass_vsepi),  # sasrt-nx (2026-11-08): the third GPU round, constant 932
+    ('stack3d', pass_stack3d),  # sasrt-nx (2026-11-08): the third GPU round, constants 934-936
+    ('fetchendian', pass_fetchendian),  # sasrt-nx (2026-11-08): the third GPU round, constants 937-939
+    ('expfmt', pass_expfmt),  # sasrt-nx (2026-11-08): the third GPU round, constants 940-943
+    ('vskill', pass_vskill),  # vivapinata-nx (2026-11-03): last
+    ('expwin', pass_expwin),  # sasrt-nx (2026-11-08): the fourth GPU round, constant 944
+    ('expparts', pass_expparts),  # sasrt-nx (2026-11-09): an EXPERIMENT, constant 945 (0: as before)
 ]
 # banjo-nx (2026-10-21): scaled targets (648p / 900p): scale1 and fragscale (1x only) are not in the default.
 DEFAULT = ','.join(name for name, _ in PASSES if name not in ('scale1', 'fragscale'))
 
 
 # The passes for one stage only.
-STAGE_OF = {'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
+STAGE_OF = {'plainfetch': 'frag', 'onex': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
+            'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
 
 
 def optimise(text, passes=DEFAULT, stage=None, name=None):
@@ -2213,7 +2764,7 @@ def optimise(text, passes=DEFAULT, stage=None, name=None):
         stage = 'vert' if re.search(r'\bgl_Position\b', text) else 'frag'
     for pname, fn in PASSES:
         if pname in names and STAGE_OF.get(pname, stage) == stage:
-            text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce) else fn(text)
+            text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce, pass_nofxaa) else fn(text)
     return text
 
 

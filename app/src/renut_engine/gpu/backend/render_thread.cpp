@@ -20,6 +20,7 @@
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/backend/video.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/display_sync.h"  // sa2-nx (2026-10-28): LateInputGuardUs
 
 #include <rex/cvar.h>
 
@@ -115,6 +116,10 @@ size_t WakeBatch() {
 }
 std::vector<Item> g_queue;
 std::once_flag g_start_once;
+// bangaio-nx (2026-10-29, v6): set once Start's call_once has run (relaxed: Push then takes g_mutex, under which Start
+// set g_running). Push checks it first: std::call_once was a pthread_once call at every queued draw on the game thread
+// (0.6 % of it in the v4 console storm).
+std::atomic<bool> g_started{false};
 std::thread::id g_thread_id;
 bool g_running = false;   // the thread takes work
 bool g_stopping = false;  // Stop: finish what is queued, then end
@@ -241,6 +246,7 @@ void Start() {
     banjo::renut_gpu::StartLongLivedThread(Run, 1024 * 1024);
     RGPU_INFO("Render thread started");
   });
+  g_started.store(true, std::memory_order_relaxed);
 }
 
 // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_wake_batch): before a thread waits for the render thread, the draws queued without a
@@ -252,7 +258,8 @@ void WakeForWaitLocked() {
 
 void Push(std::function<void()> work, bool locked, const void *prefetch0 = nullptr,
           const void *prefetch1 = nullptr, bool draw = false) {
-  Start();
+  if (!g_started.load(std::memory_order_relaxed)) [[unlikely]]
+    Start();  // bangaio-nx (2026-10-29, v6): only until it has run (g_started)
   {
     std::unique_lock lock(g_mutex);
     // (Work queued by the render thread's own work runs after it.)
@@ -391,7 +398,11 @@ uint32_t LateInputDelay() {
     least = std::min(least, s);
   const uint64_t interval = g_frame_interval_us.load(std::memory_order_relaxed);
   const uint64_t ceiling = std::min(kLateInputCeilingUs, interval * 4 / 5);
-  const uint64_t delay = least > kLateInputMarginUs ? std::min(least - kLateInputMarginUs, ceiling) : 0;
+  // sa2-nx (2026-10-28, sa2_renut_queue_drain, after ketsui-nx's display guard): with double buffering, 1 ms more margin
+  // at each image late at its refresh (0.25 ms back after 180 in time), so a delayed read cannot push the frames back
+  // into the late queue; 0 otherwise.
+  const uint64_t margin = kLateInputMarginUs + banjo::display_sync::LateInputGuardUs();
+  const uint64_t delay = least > margin ? std::min(least - margin, ceiling) : 0;
   g_applied_delay_us.store(uint32_t(delay), std::memory_order_relaxed);
   g_delay_total_us.fetch_add(delay, std::memory_order_relaxed);
   g_delay_frames.fetch_add(1, std::memory_order_relaxed);

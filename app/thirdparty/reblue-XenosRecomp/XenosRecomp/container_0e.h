@@ -46,18 +46,19 @@ inline bool IsContainer0E(const uint8_t *p, size_t available) {
          defs < virt && consts < virt && info >= 0x18 && info < virt;
 }
 
-// The register field of a 0x0E literal: (register + 48) << 4. Feeding Frenzy's two vertex shaders have one literal,
-// field 0x12F0, and their microcode reads it as c255 (`oPos.xy = position + c255.x`, the half-pixel -0.5 offset):
-// 0x12F0 >> 4 = 303 = 255 + 48. One sample; a container whose literal does not decode to 0..255 is rejected.
-// rr6-nx (2026-11-02): a pixel shader's literals decode to 256..511 by the same formula (this game's field 0x22F0: 0x22F - 48 = 511,
-// c255 of the pixel shader's bank), which is what the 0x11 layout's register holds; below 256 is the vertex bank.
-inline uint32_t LiteralRegister(uint32_t field, bool pixel) {
-  const uint32_t reg = (field >> 4) - 48u;
-  return reg + (pixel && reg < 256u ? 256u : 0u);
+// kameo-nx (2026-11-02): a 0x0E definition is {u16 offset, u16 count}: the byte offset from the device's constants (device
+// + 0x480) and a count of WORDS, as D3DDevice_SetPixelShader (Kameo's sub_820CA330) copies them (`rlwinm r30,r11,2`,
+// memcpy to r28 + offset). So float registers are (offset - 0x300) / 16, 0-255 vertex and 256-511 pixel (0x12F0 is c255,
+// 0x1300 the pixel shaders' c0, Renut's register numbers), and integer constants start at 0x2320.
+constexpr uint32_t kIntConstants = 0x2320;
+inline bool LiteralIsFloat(uint32_t field) {
+  return (field & 0xFu) == 0 && field >= 0x300u && field < 0x2300u;
 }
-
-inline bool LiteralRegisterValid(uint32_t field) {
-  return (field & 0xFu) == 0 && (field >> 4) >= 48u && (field >> 4) - 48u <= 511u;
+inline bool LiteralIsInt(uint32_t field) {
+  return field >= kIntConstants && field < 0x23A0u && (field & 3u) == 0;
+}
+inline uint32_t LiteralRegister(uint32_t field) {
+  return (field - 0x300u) >> 4;
 }
 
 inline std::vector<uint8_t> Convert(const uint8_t *src) {
@@ -71,7 +72,12 @@ inline std::vector<uint8_t> Convert(const uint8_t *src) {
   struct Literal {
     uint32_t reg, count, offset;
   };
+  struct IntLiteral {
+    uint32_t field;
+    std::vector<uint32_t> values;
+  };
   std::vector<Literal> literals;
+  std::vector<IntLiteral> int_literals;
   if (defs) {
     const uint32_t size = Rd(src, defs + 16);
     size_t o = defs + 20 + 4;  // past the header and the word before the first literal
@@ -80,21 +86,31 @@ inline std::vector<uint8_t> Convert(const uint8_t *src) {
       const uint32_t head = Rd(src, o);
       if (!head)
         break;
-      const uint32_t count = head & 0xFFFFu;
-      const uint32_t words = (count + 3) / 4 * 4;
-      if (!LiteralRegisterValid(head >> 16))
-        std::fprintf(stderr, "container_0e: literal register field %04X does not decode (see LiteralRegister)\n",
-                     head >> 16);
-      Literal l{LiteralRegister(head >> 16, !vertex), count, uint32_t(physical.size())};
-      for (uint32_t k = 0; k < words; ++k) {
-        const uint32_t value = o + 4 + 4 * k + 4 <= virt ? Rd(src, o + 4 + 4 * k) : 0;
-        physical.push_back(uint8_t(value >> 24));
-        physical.push_back(uint8_t(value >> 16));
-        physical.push_back(uint8_t(value >> 8));
-        physical.push_back(uint8_t(value));
+      const uint32_t field = head >> 16;
+      const uint32_t words = head & 0xFFFFu;
+      if (LiteralIsFloat(field) && (words & 3u) == 0) {
+        // renut-ultimate (2026-11-08, found by rr6-nx's merge): the 0x11 table's float4 definition counts WORDS, as 0x0E's
+        // does: the translator reads (count + 3) / 4 registers (shader_recompiler.cpp). words / 4 here kept only the first
+        // register of a literal of several (Ridge Racer 6's c253-c255 of 22D0/12: c254 and c255 read the game's registers,
+        // its race drawn black).
+        Literal l{LiteralRegister(field), words, uint32_t(physical.size())};
+        for (uint32_t k = 0; k < words; ++k) {
+          const uint32_t value = o + 4 + 4 * k + 4 <= virt ? Rd(src, o + 4 + 4 * k) : 0;
+          physical.push_back(uint8_t(value >> 24));
+          physical.push_back(uint8_t(value >> 16));
+          physical.push_back(uint8_t(value >> 8));
+          physical.push_back(uint8_t(value));
+        }
+        literals.push_back(l);
+      } else if (LiteralIsInt(field)) {
+        IntLiteral l{field, {}};
+        for (uint32_t k = 0; k < words; ++k)
+          l.values.push_back(o + 4 + 4 * k + 4 <= virt ? Rd(src, o + 4 + 4 * k) : 0);
+        int_literals.push_back(std::move(l));
+      } else {
+        std::fprintf(stderr, "container_0e: literal at %04X (%u words) is not a float or integer constant\n", field, words);
       }
-      literals.push_back(l);
-      o += 4 + 4 * words;
+      o += 4 + 4 * size_t(words);
     }
   }
 
@@ -103,13 +119,12 @@ inline std::vector<uint8_t> Convert(const uint8_t *src) {
   std::vector<uint8_t> out(0x24 + (virt - 0x18));
   std::memcpy(out.data() + 0x24, src + 0x18, virt - 0x18);
   uint32_t new_defs = 0;
-  if (!literals.empty()) {
+  if (!literals.empty() || !int_literals.empty()) {
     new_defs = uint32_t(out.size());
     Wr(out, new_defs + 0, Rd(src, defs + 0));
     Wr(out, new_defs + 4, Rd(src, defs + 4));
     Wr(out, new_defs + 8, Rd(src, defs + 8));
     Wr(out, new_defs + 12, Rd(src, defs + 12));
-    Wr(out, new_defs + 16, uint32_t(literals.size() * 8 + 4));
     size_t o = new_defs + 20;
     for (const auto &l : literals) {
       Wr(out, o, (l.reg << 16) | (l.count & 0xFFFFu));
@@ -117,8 +132,20 @@ inline std::vector<uint8_t> Convert(const uint8_t *src) {
       o += 8;
     }
     Wr(out, o, 0);  // end of the float4 literals
-    Wr(out, o + 4, 0);  // no int4 literals
-    Wr(out, o + 8, 0);  // no bool literals
+    o += 4;
+    for (const auto &l : int_literals) {  // one (register, count) word, then the values (shader_recompiler.cpp)
+      Wr(out, o, (l.field << 16) | uint32_t(l.values.size()));
+      o += 4;
+      for (uint32_t value : l.values) {
+        Wr(out, o, value);
+        o += 4;
+      }
+    }
+    Wr(out, o, 0);  // end of the int4 literals
+    o += 4;
+    Wr(out, o, 0);  // no bool literals
+    o += 4;
+    Wr(out, new_defs + 16, uint32_t(o - (new_defs + 20)));
   }
   const uint32_t new_info = uint32_t(out.size());
   Wr(out, new_info + 0, 0);     // physicalOffset: the microcode starts the physical part

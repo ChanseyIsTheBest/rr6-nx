@@ -46,6 +46,29 @@ REXCVAR_DEFINE_BOOL(banjo_renut_capture_batches, true, "Banjo/Enhancements",
                     "the pool, and the render thread gives them back, 32 at a time instead of one lock of the pool's "
                     "per draw on each thread. Off: one at a time")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// bangaio-nx (2026-10-29): see CapturePool::Keeps.
+REXCVAR_DEFINE_BOOL(banjo_renut_small_captures, true, "Banjo/Enhancements",
+                    "Renut's renderer (banjo_renut_capture_pool): a delta is written into the chain's own scratch and "
+                    "copied into its capture at its size (about 250 bytes), instead of into the capture's 12.9 KB "
+                    "storage (zero-filled when the capture was made), and the pool keeps up to 8,192 captures or 32 MB "
+                    "instead of 2,048. Bangai-O's missile storms queue ~4,250 draws a frame: past 2,048 the pool deleted "
+                    "and made again ~2,200 captures a frame. Same data. In-run A/B target 82 (70 in bangaio-nx)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// bangaio-nx (2026-10-29): see DeltaRuns.
+REXCVAR_DEFINE_BOOL(banjo_renut_delta_masks, true, "Banjo/Enhancements",
+                    "Renut's renderer on the Switch (banjo_renut_snapshot_deltas): the game thread finds a draw's "
+                    "changed device chunks with one NEON reduction per four chunks of a run (the 40 compared chunks are "
+                    "three runs), then visits only those (1.1 a draw), instead of a reduction, a move to a register and "
+                    "a branch per chunk (65 % of CaptureDelta, 18 % of the game thread in the v4 console storm). The "
+                    "same chunks. In-run A/B target 81 (73 in bangaio-nx)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// bangaio-nx (2026-10-29, v6): see PrefetchDeltaLines.
+REXCVAR_DEFINE_BOOL(banjo_renut_delta_prefetch, true, "Banjo/Enhancements",
+                    "Renut's renderer (banjo_renut_snapshot_deltas): a queued draw first asks for the device and shadow "
+                    "lines its delta compares (80 lines), so that their cache misses overlap each other and the draw's "
+                    "other work instead of stalling the compare (CaptureDelta's samples were its loads in the v5 console "
+                    "storm). A hint only: the same data. In-run A/B target 84 (74 in bangaio-nx)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_snapshot_deltas_narrow, true, "Banjo/Enhancements",
                     "Renut's renderer (banjo_renut_snapshot_deltas): the game thread compares only the device chunks the "
                     "render thread reads (39 of 71 in N&B, 40 of 77 in SA2: not the dirty masks, ring pointers and call tables before the fetch "
@@ -96,6 +119,7 @@ struct DrawCapture {
   SnapshotKind snapshot = SnapshotKind::Whole;  // banjo-nx (2026-10-20, from sa2-nx)
   std::vector<u8> verify;  // banjo-nx (from sa2-nx): the whole device as well (banjo_renut_snapshot_deltas_verify)
   DrawCall call;
+  u32 binding = 0;  // halo3-nx (2026-11-03, banjo_renut_recorded_binds): the shader's bind at the draw (LastBindingOf)
   // banjo-nx (2026-10-19, CPU proposal 23): a queued clear's or resolve's arguments. They come from the same pool as
   // the draws' captures: each made three heap allocations on the game thread (its arguments, a device snapshot, a
   // closure too large for std::function's own storage), freed on the render thread through the one malloc lock.
@@ -108,6 +132,7 @@ struct DrawCapture {
   u32 dest_texture_va = 0, dest_level = 0, dest_slice = 0;
   i32 dest_x = 0, dest_y = 0;
   d3d::TextureFetchConstant dest_format{};
+  u32 held = 0;  // bangaio-nx (2026-10-29): the bytes it holds, set when it goes back to the pool (CapturePool::Give)
 };
 
 // banjo-nx (banjo_renut_capture_pool): a draw's capture comes from a pool and goes back to it once the render thread
@@ -119,9 +144,16 @@ struct DrawCapture {
 // by the render thread (Give), on two cores: its cache line went back and forth about 1,800 times a City Escape frame.
 // Each thread now keeps a few captures of its own and goes to the pool kBatch at a time.
 bool CaptureBatchesOn();
+bool SmallCapturesOn();
 
 class CapturePool {
 public:
+  // bangaio-nx (2026-10-29): room for the most the pool keeps, so that no push under the lock reallocates.
+  CapturePool() {
+    free_.reserve(kMaxFreeSmall);
+    free_held_.reserve(kMaxFreeSmall);
+  }
+
   // banjo-nx (2026-10-20, from sa2-nx): 'chain_locked' when the caller holds g_delta.mutex (the chain's draws): its batch is a plain
   // list that lock guards. Thread-local lists cost a call a use here (this toolchain's TLS goes through
   // __aarch64_read_tp: 0.8 % of the render thread in the second console run).
@@ -133,10 +165,20 @@ public:
         const size_t n = std::min(kBatch, free_.size());
         taken.assign(free_.end() - std::ptrdiff_t(n), free_.end());
         free_.resize(free_.size() - n);
+        DropHeldLocked(n);
       }
       if (!taken.empty()) {
         DrawCapture *capture = taken.back();
         taken.pop_back();
+        // bangaio-nx (2026-10-29, ARM): the next draw's capture, last written by the render thread on another core, is
+        // fetched for writing while the game runs to that draw (its first lines read in CaptureDelta were a miss each
+        // draw in the v4 console profile).
+        if (!taken.empty()) {
+          const char *next = reinterpret_cast<const char *>(taken.back());
+          __builtin_prefetch(next, 1);
+          __builtin_prefetch(next + 64, 1);
+          __builtin_prefetch(next + 128, 1);
+        }
         return capture;
       }
       return new DrawCapture();
@@ -146,6 +188,7 @@ public:
       if (!free_.empty()) {
         DrawCapture *capture = free_.back();
         free_.pop_back();
+        DropHeldLocked(1);
         return capture;
       }
     }
@@ -153,41 +196,82 @@ public:
   }
   // banjo-nx (2026-10-20, from sa2-nx): 'render_thread' from the render thread's items (only that thread then touches its batch; a
   // queue run inline at shutdown has the render thread gone).
+  // bangaio-nx (2026-10-29): the captures the pool does not keep are deleted after its lock is let go (the frees take
+  // the malloc lock, which the game thread's allocations wait on).
   void Give(DrawCapture *capture, bool render_thread = false) {
     if (!capture)
       return;
     if (banjo::renut_gpu::CapturePoolOn()) {
       capture->vertices.clear();
       capture->indices.clear();
+      capture->held = HeldBytes(*capture);  // its lines are this thread's now: not read again under the lock
       if (CaptureBatchesOn() && render_thread) {
         std::vector<DrawCapture *> &given = render_given_;
         given.push_back(capture);
         if (given.size() < kBatch)
           return;
-        std::lock_guard lock(mutex_);
-        for (DrawCapture *c : given) {
-          if (free_.size() < kMaxFree)
-            free_.push_back(c);
-          else
-            delete c;
+        const bool small = SmallCapturesOn();  // its guard and the A/B word read once, not under the lock a capture
+        {
+          std::lock_guard lock(mutex_);
+          for (DrawCapture *&c : given) {
+            if (KeepLocked(c, small))
+              c = nullptr;
+          }
         }
+        for (DrawCapture *c : given)
+          delete c;
         given.clear();
         return;
       }
-      std::lock_guard lock(mutex_);
-      if (free_.size() < kMaxFree) {
-        free_.push_back(capture);
-        return;
+      const bool small = SmallCapturesOn();
+      {
+        std::lock_guard lock(mutex_);
+        if (KeepLocked(capture, small))
+          return;
       }
     }
     delete capture;
   }
 
 private:
-  static constexpr size_t kMaxFree = 2048;  // more than a frame's draws in flight
+  // bangaio-nx (2026-10-29, banjo_renut_small_captures, A/B 82 here): the console's missile storm queued ~4,250 draws a frame.
+  // At 2,048 the pool deleted the rest when the render thread gave them back, and the game thread made ~2,200 again a
+  // frame: each a malloc, and a 12.9 KB zero-fill of its delta storage, under the one malloc lock that the render
+  // thread's frees took too. CaptureDelta now copies a delta into its capture at its size, so a capture keeps a few
+  // hundred bytes, and the pool keeps up to kMaxFreeSmall. Whole copies (rebases, clears, resolves, deltas off) keep
+  // 12.9 KB each: the byte cap holds them to about as many as before (32 MB: 2,048 of those were 26 MB).
+  static constexpr size_t kMaxFree = 2048;        // more than a frame's draws in flight (banjo-nx: ~2,000 a frame)
+  static constexpr size_t kMaxFreeSmall = 8192;   // bangaio-nx: twice the storm's
+  static constexpr size_t kMaxHeldBytes = size_t(32) << 20;
   static constexpr size_t kBatch = 32;      // banjo-nx (from sa2-nx): captures a thread takes or gives back at once
+
+  static u32 HeldBytes(const DrawCapture &c) {
+    return u32(sizeof(DrawCapture) + c.state.capacity() + c.vertices.capacity() + c.indices.capacity() +
+               c.verify.capacity());
+  }
+  // Under mutex_; 'small': SmallCapturesOn().
+  bool KeepLocked(DrawCapture *c, bool small) {
+    if (small ? free_.size() >= kMaxFreeSmall || held_ + c->held > kMaxHeldBytes : free_.size() >= kMaxFree)
+      return false;
+    free_.push_back(c);
+    free_held_.push_back(c->held);
+    held_ += c->held;
+    return true;
+  }
+  // Under mutex_: the last n captures' bytes, which left free_, from free_held_ (contiguous, so no capture is read).
+  void DropHeldLocked(size_t n) {
+    const size_t end = free_held_.size();
+    size_t bytes = 0;
+    for (size_t i = end - n; i < end; ++i)
+      bytes += free_held_[i];
+    free_held_.resize(end - n);
+    held_ -= bytes;
+  }
+
   std::mutex mutex_;
   std::vector<DrawCapture *> free_;
+  std::vector<u32> free_held_;  // bangaio-nx (2026-10-29): free_'s captures' bytes, in the same order
+  size_t held_ = 0;             // their sum
   std::vector<DrawCapture *> chain_taken_;   // banjo-nx (from sa2-nx): under g_delta.mutex
   std::vector<DrawCapture *> render_given_;  // banjo-nx (from sa2-nx): the render thread's
 };
@@ -268,7 +352,58 @@ constexpr DeltaChunkList MakeDeltaChunkList(bool narrow) {
 }
 constexpr DeltaChunkList kDeltaAllChunks = MakeDeltaChunkList(false);
 constexpr DeltaChunkList kDeltaReadChunks = MakeDeltaChunkList(true);
-static_assert(kDeltaReadChunks.count == 39);  // N&B (SA2 40)
+static_assert(kDeltaReadChunks.count == 39);  // N&B (SA2 40; bangaio-nx's XDK 20209: 40)
+
+// bangaio-nx (2026-10-29, banjo_renut_delta_masks, A/B 81 here, 73 in bangaio-nx): a chunk list as runs of whole chunks at consecutive
+// offsets, and each short chunk (the tail's last, 24 bytes in XDK 20209) as a run of its own. CaptureDelta asks
+// Lines64DifferMask which chunks of a run differ (line_compare.h: one NEON reduction per four chunks and no branch per
+// chunk), then visits the set bits in order: the chunks the per-chunk loop found, in its order. The narrow list is
+// three runs (12, 12 and 15 chunks) and the short chunk.
+struct DeltaRun {
+  u8 first = 0;  // chunk index
+  u8 count = 0;  // chunks (at most 32: Lines64DifferMask's)
+  bool short_chunk = false;
+};
+struct DeltaRuns {
+  u32 count = 0;
+  DeltaRun run[16] = {};
+};
+constexpr DeltaRuns MakeDeltaRuns(const DeltaChunkList &l) {
+  DeltaRuns r{};
+  for (u32 k = 0; k < l.count; ++k) {
+    const u32 i = l.index[k];
+    const bool whole = DeltaChunkSize(i) == kDeltaUnitBytes;
+    if (whole && r.count) {
+      DeltaRun &last = r.run[r.count - 1];
+      if (!last.short_chunk && last.count < 32 && last.first + last.count == i &&
+          DeltaChunkOffset(i) == DeltaChunkOffset(last.first) + last.count * kDeltaUnitBytes) {
+        ++last.count;
+        continue;
+      }
+    }
+    r.run[r.count++] = DeltaRun{u8(i), u8(1), !whole};
+  }
+  return r;
+}
+// A short chunk (fewer than 64 bytes): 8 bytes at a time, inline (memcmp with a size known only at run time was a call).
+inline bool ShortChunkDiffers(const u8 *a, const u8 *b, u32 size) {
+  uint64_t diff = 0;
+  u32 k = 0;
+  for (; k + 8 <= size; k += 8) {
+    uint64_t x, y;
+    std::memcpy(&x, a + k, 8);
+    std::memcpy(&y, b + k, 8);
+    diff |= x ^ y;
+  }
+  for (; k < size; ++k)
+    diff |= u8(a[k] ^ b[k]);
+  return diff != 0;
+}
+constexpr DeltaRuns kDeltaAllRuns = MakeDeltaRuns(kDeltaAllChunks);
+constexpr DeltaRuns kDeltaReadRuns = MakeDeltaRuns(kDeltaReadChunks);
+// renut-ultimate: bangaio-nx asserted its XDK's layout (4 runs, the last the short chunk); the runs are made from whatever the
+// chunk lists are, so only their number is bounded here.
+static_assert(kDeltaReadRuns.count <= 16 && kDeltaAllRuns.count <= 16);
 // Whether device byte 'at' is one the render thread reads (the verify mode compares those).
 constexpr bool DeltaByteRead(u32 at) {
   return !(at < kDeltaUnreadEnd || (at >= kDeltaPrivateUnreadBegin && at < kDeltaPrivateUnreadEnd));
@@ -314,6 +449,9 @@ struct DeltaChain {
   uint64_t deltas = 0, rebases = 0, bytes = 0, chunks = 0, groups = 0;  // the 10 s report's
   uint64_t whole = 0;  // banjo-nx (from sa2-nx): whole captures outside the chain (Begin*Vertices draws), under the lock too
   alignas(64) u8 shadow[d3d::kDeviceSnapshotSize];  // the device at its last draw (the chunks)
+  // bangaio-nx (2026-10-29, banjo_renut_small_captures): each delta is written here, then copied into its capture at its
+  // size. The same lines every draw: they stay in the game thread's cache.
+  alignas(64) u8 scratch[kDeltaMaxBytes];
 };
 DeltaChain g_delta;
 
@@ -338,17 +476,25 @@ bool ChainConstantsOn() {
   static const bool on = DeltasOn() && REXCVAR_GET(banjo_renut_snapshot_deltas_constants);
   return on;
 }
+// bangaio-nx (2026-10-29, ARM): these read the latched switches (banjo_renut_tuning.h, plain loads), not function
+// statics: each static's guard was a load-acquire at every draw on the game thread (the v4 console profile).
 bool CaptureBatchesOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_capture_batches);
-  return on;
+  return banjo::renut_gpu::Latch().capture_batches;
+}
+bool SmallCapturesOn() {
+  return banjo::renut_gpu::Latch().small_captures && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 82;  // 70 in bangaio-nx
 }
 bool NeonCompareOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_neon_compare);
-  return on;
+  return banjo::renut_gpu::Latch().neon_compare;
 }
 bool DeltasNarrowOn() {
-  static const bool on = REXCVAR_GET(banjo_renut_snapshot_deltas_narrow);
-  return on;
+  return banjo::renut_gpu::Latch().deltas_narrow;
+}
+bool DeltaMasksOn() {  // bangaio-nx (2026-10-29, A/B 81 here)
+  return banjo::renut_gpu::Latch().delta_masks && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 81;  // 73 in bangaio-nx
+}
+bool DeltaPrefetchOn() {  // bangaio-nx (2026-10-29, v6, A/B 74)
+  return banjo::renut_gpu::Latch().delta_prefetch && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 84;  // 74 in bangaio-nx
 }
 // banjo-nx (2026-10-20, from futari-nx): banjo_renut_deferred_chain.
 bool DeferredChainOn() {
@@ -356,8 +502,7 @@ bool DeferredChainOn() {
   return on;
 }
 bool DeltasVerifyOn() {
-  static const bool on = DeltasOn() && REXCVAR_GET(banjo_renut_snapshot_deltas_verify);
-  return on;
+  return banjo::renut_gpu::Latch().deltas_verify;  // bangaio-nx (2026-10-29): latched (with the deltas on)
 }
 
 // The original draw calls consume the device's dirty masks as they write
@@ -471,6 +616,10 @@ void QueueCapture(DrawCapture *capture) {
       call.up_indices = capture->indices.data();
     const u8 *device = DeviceForDraw(*capture);
     banjo::renut_gpu::CountDrawSource(0);
+    if (capture->binding) {  // halo3-nx (2026-11-03): after a replay's, this draw's own
+      ApplyBindingLocked(capture->binding);
+      capture->binding = 0;
+    }
     if (capture->snapshot != SnapshotKind::Whole && ChainConstantsOn()) {
       // banjo-nx (from sa2-nx) (banjo_renut_snapshot_deltas_constants): every constant is the rebuilt device's (no running device).
       const ReplayConstants chain{nullptr, ~uint64_t(0), ~uint64_t(0), &g_chain_vs_dirty, &g_chain_ps_dirty,
@@ -531,26 +680,53 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
     for (auto &mask : device->m_Pending)
       mask = 0;
     std::vector<u8> &out = capture->state;
-    if (out.size() < kDeltaMaxBytes)
+    // bangaio-nx (2026-10-29, banjo_renut_small_captures): into the chain's scratch, copied into the capture at its size
+    // below; off, into the capture's own storage at its greatest size.
+    const bool small = SmallCapturesOn();
+    if (!small && out.size() < kDeltaMaxBytes)
       out.resize(kDeltaMaxBytes);  // once per pooled capture: written below, never cleared
-    u8 *const begin = out.data();
+    u8 *const begin = small ? c.scratch : out.data();
     u8 *to = begin + sizeof(DeltaHeader);
     DeltaHeader h{};
     u32 chunks = 0;
-    const DeltaChunkList &list = DeltasNarrowOn() ? kDeltaReadChunks : kDeltaAllChunks;
-    const bool neon = NeonCompareOn();  // banjo-nx (from sa2-nx) (banjo_renut_neon_compare)
-    for (u32 k = 0; k < list.count; ++k) {
-      const u32 i = list.index[k];
+    // A changed chunk: into the shadow and the delta, and its bit. bangaio-nx (2026-10-29, ARM): a whole chunk with
+    // constant-size copies (inline q-register pairs; a variable size was two memcpy calls).
+    const auto take = [&](u32 i) {
       const u32 at = DeltaChunkOffset(i), size = DeltaChunkSize(i);
-      const bool differs = size == kDeltaUnitBytes ? banjo::renut_gpu::Line64Differs(bytes + at, c.shadow + at, neon)
-                                                   : std::memcmp(bytes + at, c.shadow + at, size) != 0;
-      if (!differs)
-        continue;
-      std::memcpy(c.shadow + at, bytes + at, size);
-      std::memcpy(to, bytes + at, size);
+      if (size == kDeltaUnitBytes) {
+        std::memcpy(c.shadow + at, bytes + at, kDeltaUnitBytes);
+        std::memcpy(to, bytes + at, kDeltaUnitBytes);
+      } else {
+        std::memcpy(c.shadow + at, bytes + at, size);
+        std::memcpy(to, bytes + at, size);
+      }
       to += size;
       h.chunks[i / 64] |= uint64_t(1) << (i % 64);
       ++chunks;
+    };
+    const bool narrow = DeltasNarrowOn();
+    if (DeltaMasksOn()) {
+      // bangaio-nx (2026-10-29, banjo_renut_delta_masks): which chunks of each run differ, then those in order.
+      const DeltaRuns &runs = narrow ? kDeltaReadRuns : kDeltaAllRuns;
+      for (u32 r = 0; r < runs.count; ++r) {
+        const DeltaRun &run = runs.run[r];
+        const u32 at = DeltaChunkOffset(run.first);
+        uint32_t mask = run.short_chunk ? uint32_t(ShortChunkDiffers(bytes + at, c.shadow + at, DeltaChunkSize(run.first)))
+                                        : banjo::renut_gpu::Lines64DifferMask(bytes + at, c.shadow + at, run.count);
+        for (; mask; mask &= mask - 1)
+          take(run.first + u32(std::countr_zero(mask)));
+      }
+    } else {
+      const DeltaChunkList &list = narrow ? kDeltaReadChunks : kDeltaAllChunks;
+      const bool neon = NeonCompareOn();  // banjo-nx (from sa2-nx) (banjo_renut_neon_compare)
+      for (u32 k = 0; k < list.count; ++k) {
+        const u32 i = list.index[k];
+        const u32 at = DeltaChunkOffset(i), size = DeltaChunkSize(i);
+        const bool differs = size == kDeltaUnitBytes ? banjo::renut_gpu::Line64Differs(bytes + at, c.shadow + at, neon)
+                                                     : std::memcmp(bytes + at, c.shadow + at, size) != 0;
+        if (differs)
+          take(i);
+      }
     }
     for (const auto [dirty, base] : {std::pair{vs, kDeltaVertexF}, std::pair{ps, kDeltaPixelF}}) {
       ForEachGroupRun(dirty, [&](u32 first, u32 count) {
@@ -562,6 +738,8 @@ DrawCapture *CaptureDelta(u32 device_va, const DrawCall &call) {
     h.vs = vs;
     h.ps = ps;
     std::memcpy(begin, &h, sizeof(h));
+    if (small)
+      out.assign(begin, to);  // the capture's storage kept (a pooled vector keeps its capacity)
     capture->snapshot = SnapshotKind::Delta;
     ++c.deltas;
     c.bytes += uint64_t(to - begin);
@@ -629,20 +807,45 @@ std::string SnapshotDeltaReport() {
   return line;
 }
 
+// bangaio-nx (2026-10-29, v6, banjo_renut_delta_prefetch): the lines CaptureDelta is about to compare, the device's and
+// the shadow's, asked for at once (prfm: a hint, which cannot fault). The game's own work between two draws pushes them
+// out of the L1, and the compare then waited on them a group at a time.
+void PrefetchDeltaLines(u32 device_va) {
+  const u8 *device = GuestPtr<const u8>(device_va);
+  if (!device)
+    return;
+  const DeltaRuns &runs = DeltasNarrowOn() ? kDeltaReadRuns : kDeltaAllRuns;
+  for (u32 r = 0; r < runs.count; ++r) {
+    const u32 at = DeltaChunkOffset(runs.run[r].first);
+    for (u32 k = 0; k < runs.run[r].count; ++k) {
+      __builtin_prefetch(device + at + k * kDeltaUnitBytes);
+      __builtin_prefetch(g_delta.shadow + at + k * kDeltaUnitBytes);
+    }
+  }
+}
+
 void QueueDraw(u32 device_va, const DrawCall &call, u32 up_vertex_bytes, u32 up_index_bytes) {
+  const bool deltas = DeltasOn();  // bangaio-nx (2026-10-29, ARM): its static's guard read once, not three times
+  if (deltas && DeltaPrefetchOn())
+    PrefetchDeltaLines(device_va);  // bangaio-nx (2026-10-29, v6)
   FlushDeferredVertices(device_va);
   RunReadyCallbacks();
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_snapshot_deltas): made and queued under the chain's lock.
   std::unique_lock<std::mutex> chain;
-  if (DeltasOn())
+  if (deltas)
     chain = std::unique_lock<std::mutex>(g_delta.mutex);
-  DrawCapture *capture = DeltasOn() ? CaptureDelta(device_va, call) : Capture(device_va, call);
+  DrawCapture *capture = deltas ? CaptureDelta(device_va, call) : Capture(device_va, call);
   if (!capture)
     return;
   if (call.up_vertices)
     capture->vertices.assign(call.up_vertices, call.up_vertices + up_vertex_bytes);
   if (call.up_indices)
     capture->indices.assign(call.up_indices, call.up_indices + up_index_bytes);
+  if (const auto *guest_device = GuestPtr<const u8>(device_va)) {
+    u32 vs_word;
+    std::memcpy(&vs_word, guest_device + d3d::kDeviceOffsetVertexShader, 4);
+    capture->binding = LastBindingOf(__builtin_bswap32(vs_word));
+  }
   QueueCapture(capture);
 }
 

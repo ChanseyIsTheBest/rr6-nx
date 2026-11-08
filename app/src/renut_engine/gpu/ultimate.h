@@ -1,0 +1,47 @@
+#pragma once
+// renut-ultimate: the switches of the fixes ported into this base from the other ports (CATALOGUE.md, MERGES.md). Each fix
+// keeps its own switch, on by default, and says where it came from and how it was proven.
+#include <cstdint>
+
+namespace banjo::renut_gpu {
+int Deko3DUserClipEnable();  // banjo_deko3d_user_clip_enable (rr6-nx)
+bool ConstNanFlushOn();  // banjo_renut_const_nan_flush (kameo-nx)
+bool StripMarkersOn();  // rr6_strip_markers (rr6-nx)
+bool FetchOverPointerOn();  // rr6_fetch_over_pointer (rr6-nx)
+bool ResolveClearsBothOn();  // banjo_renut_resolve_clears_both (kameo-nx)
+bool Fetch3DOn2DOn();  // banjo_renut_fetch3d_on_2d (kameo-nx)
+bool CullBothOn();  // banjo_renut_cull_both (kameo-nx)
+bool DepthBiasOn();  // rr6_depth_bias (rr6-nx; kameo-nx's banjo_renut_poly_offset is the same registers)
+bool Deko3DDepthResolveOn();  // sasrt_deko3d_depth_resolve (sasrt-nx)
+bool Deko3DDepthResolveLazyOn();  // ultimate_deko3d_depth_resolve_lazy (renut-ultimate, 2026-11-08)
+bool Deko3DCopyWaitOn();  // sasrt_deko3d_copy_wait (sasrt-nx)
+bool Deko3DClearNewOn();  // sasrt_renut_deko3d_clear_new (sasrt-nx)
+bool Deko3DVolumeAsArrayOn();  // sasrt_renut_deko3d_volume_as_array (sasrt-nx; pacman-nx's banjo_renut_volume_stacked)
+bool VsKillAndOn();  // banjo_deko3d_vs_kill_and (vivapinata-nx): constant 914 of the deko3d shaders
+bool ExportOnlyDrawsOn();  // banjo_renut_export_only_draws (vivapinata-nx)
+bool VertexFiniteOn();  // banjo_renut_vertex_finite (vivapinata-nx)
+bool EdramClearOverlapOn();  // vivapinata_edram_clear_overlap (vivapinata-nx)
+bool DepthCoversColourOn();  // rr6_depth_covers_colour (rr6-nx)
+bool MissingInputW1On();  // keflings_renut_missing_input_w1 (keflings-nx)
+bool LoopConstantsOn();  // halo3_renut_loop_constants (halo3-nx)
+bool UserClipPlaneOn();  // rr6_user_clip_plane (rr6-nx, vivapinata-nx)
+bool TextureSignsOn();     // sasrt_renut_texture_signs (sasrt-nx)
+bool TextureExpAdjustOn(); // sasrt_renut_texture_exp_adjust (sasrt-nx)
+bool TextureIntFormatOn(); // sasrt_renut_texture_int_format (sasrt-nx)
+bool TargetGammaBiasOn();  // halo3_renut_target_gamma_bias (halo3-nx)
+bool Fixed16FloatOn();  // sasrt_renut_fixed16_float (sasrt-nx)
+bool Fixed16ClampOn();  // sasrt_renut_fixed16_clamp (sasrt-nx)
+bool DepthRestoreOn();  // sasrt_renut_depth_restore (sasrt-nx)
+bool ReverseDepthRemapOn();  // sasrt_renut_reverse_depth_remap (sasrt-nx)
+int SplitFrameMb();  // banjo_renut_split_frame_mb (kameo-nx)
+bool TextureKeepOnSignsOn();  // sasrt_renut_texture_keep_on_signs (sasrt-nx)
+bool ConstantF4PendingOn();  // sasrt_renut_constant_f4_pending (sasrt-nx)
+bool ResolveReadbackOn();  // sasrt_renut_resolve_readback (sasrt-nx)
+bool ExportsHeldOn();  // sasrt_renut_exports_held (sasrt-nx)
+bool TextureFetchOnlyOn();  // sasrt_renut_texture_fetch_only (sasrt-nx)
+bool TextureMemoFetchOnlyOn();  // sasrt_renut_texture_memo_fetch_only (sasrt-nx; needs the one above)
+bool TextureMemoFetchOnlyVerifyOn();  // sasrt_renut_texture_memo_fetch_only_verify (sasrt-nx)
+bool ReplayInheritSameOn();  // ultimate_renut_replay_inherit_same (renut-ultimate audit)
+bool HeldExportsGuardOn();  // ultimate_renut_held_exports_guard (renut-ultimate audit)
+bool PlainFetchesOn();  // sasrt_gpu_plain_fetches (sasrt-nx; rr6-nx's port, 2026-11-08)
+}  // namespace banjo::renut_gpu

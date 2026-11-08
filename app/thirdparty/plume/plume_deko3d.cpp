@@ -608,8 +608,10 @@ namespace plume {
             flags |= DkImageFlags_UsageRender;
             // Colour targets compressed; depth too with Deko3DOptions::depthCompression (SwitchWakerHD's defaults left it
             // off as not verified).
-            if (depth ? g_deko3dOptions.depthCompression : g_deko3dOptions.colorCompression)
+            if (depth ? g_deko3dOptions.depthCompression : g_deko3dOptions.colorCompression) {
                 flags |= DkImageFlags_HwCompression;
+                compressed = true;  // sasrt-nx (2026-10-21): Deko3DOptions::depthResolve
+            }
         }
         if (desc.flags & (RenderTextureFlag::UNORDERED_ACCESS | RenderTextureFlag::STORAGE))
             flags |= DkImageFlags_UsageLoadStore;
@@ -828,6 +830,14 @@ namespace plume {
                 z = view.layerCount ? view.layerCount
                                     : (t->desc.arraySize > view.layerOffset ? t->desc.arraySize - view.layerOffset : 1u);
             imageSizes[id] = {w, h, z};
+            if (imageTextures.size() <= id)  // sasrt-nx (2026-11-08, Deko3DOptions::trackedImageInvalidate)
+                imageTextures.resize(id + 1, nullptr);
+            imageTextures[id] = t;
+        }
+        if (t == nullptr || !t->valid) {  // sasrt-nx (2026-11-08): an emptied slot names no texture
+            const uint32_t id = descriptorIndex - imageFirst;
+            if (id < imageTextures.size())
+                imageTextures[id] = nullptr;
         }
         g_deko3dStats.descriptorWrites++;
         device->descriptorEpoch.fetch_add(1, std::memory_order_release);
@@ -1393,9 +1403,9 @@ namespace plume {
         while (q < texb.size()) {
             const size_t comma = texb.find(',', q);
             const std::string item = texb.substr(q, comma == std::string::npos ? std::string::npos : comma - q);
-            unsigned k = 0, t = 0, s = 0;
-            if (sscanf(item.c_str(), "%u:%u:%u", &k, &t, &s) == 3 && k == usage.texBindings.size())
-                usage.texBindings.push_back({uint16_t(t), uint16_t(s)});
+            unsigned k = 0, t = 0, s = 0, v = 0;  // vivapinata-nx: v, the sampler's variant (TexBinding::samplerVariant)
+            if (sscanf(item.c_str(), "%u:%u:%u:%u", &k, &t, &s, &v) >= 3 && k == usage.texBindings.size())
+                usage.texBindings.push_back({uint16_t(t), uint16_t(s), uint32_t(v) << 20});
             if (comma == std::string::npos)
                 break;
             q = comma + 1;
@@ -1464,6 +1474,8 @@ namespace plume {
         // variant's defines only remove code): its draws may give their base vertex to the draw (Renut's whole-buffer
         // draws), the vertex index it does not read being the only thing that differs.
         shader->usage.readsVertexId = shader->stage != DkStage_Vertex || shader->glsl->find("gl_VertexID") != std::string::npos;
+        // vivapinata-nx (2026-11-03, tools/deko3d_glsl_opt.py vskill): a vertex shader with the kill's constant 914.
+        shader->usage.writesVertexKill = shader->stage == DkStage_Vertex && shader->glsl->find("SPIRV_CROSS_CONSTANT_ID_914") != std::string::npos;
         // banjo-nx (2026-10-18): the varying locations it declares ("layout(location = N) in / out" lines).
         // katamari-nx (2026-11-01, rc10's black screen): an interpolation qualifier may come first ("layout(location = N)
         // centroid in", XenosRecomp's inputs the shader's header samples at the centroid); without it, those inputs were
@@ -1689,6 +1701,10 @@ namespace plume {
 
     // banjo-nx (2026-10-21): set on threads that do not draw (Deko3DSetBackgroundThread): the pipeline prebuild.
     static thread_local bool t_backgroundThread = false;
+    // banjo-nx (2026-11-01, Deko3DSetUrgentVariants): the pipeline this thread builds draws much slower with the generic
+    // variant (banjo_gpu_fetch_spec): its variants compiled now, on this thread (a compile it waits for: ahead of the
+    // background ones), not queued in the background.
+    static thread_local bool t_urgentVariants = false;
 
     // banjo-nx (2026-10-23, the user's request, Deko3DOptions::compileWaitBoost): while a drawing thread waits for a
     // compile (the game is stopped), the console in boost mode: CPU 1785 MHz (the system drops the GPU to 76.8 MHz,
@@ -1781,7 +1797,7 @@ namespace plume {
         if (job->ok) {
             if (g_cacheStore)
                 g_cacheStore(key, job->ownDksh);
-            fresh->valid = loadCode(job->ownDksh, fresh->shader, job->request.name.c_str());
+            fresh->valid = loadCode(job->ownDksh, fresh->shader, job->request.name.c_str(), &fresh->vsInputs);
         }
         else {
             g_deko3dStats.shaderCompileFailures++;
@@ -1872,6 +1888,10 @@ namespace plume {
         return waiting;
     }
 
+    bool Deko3DShaderWritesVertexKill(const RenderShader *shader) {
+        return shader != nullptr && static_cast<const Deko3DShader *>(shader)->usage.writesVertexKill;
+    }
+
     bool Deko3DShaderReadsVertexId(const RenderShader *shader) {
         return shader == nullptr || static_cast<const Deko3DShader *>(shader)->usage.readsVertexId;
     }
@@ -1907,9 +1927,34 @@ namespace plume {
     // Shader code: 16 MB blocks, bump allocated (deko3d maps every code block into its one code segment).
     static constexpr uint32_t CodeBlockSize = 16u << 20;
 
-    bool Deko3DDevice::loadCode(const std::vector<uint8_t> &dksh, DkShader &shader, const char *what) {
+    bool Deko3DDevice::loadCode(const std::vector<uint8_t> &dksh, DkShader &shader, const char *what, uint32_t *vsInputs) {
         if (dksh.size() < 64)
             return false;
+        // sasrt-nx (2026-11-08, Deko3DOptions::vsInputMask): a vertex program's input map. The DKSH header has control_sz
+        // at byte 8 and programs_off at 16; the program header its type (0 vertex) and entrypoint; the program starts with
+        // its shader program header (SPH type 1, shader type 1 for a vertex shader), whose words 6-9 map the 32 generic
+        // attributes, 4 bits (x y z w) each: an attribute with none is never read.
+        if (vsInputs) {
+            *vsInputs = ~0u;
+            uint32_t controlSz = 0, programsOff = 0, type = 0, entry = 0;
+            memcpy(&controlSz, dksh.data() + 8, 4);
+            memcpy(&programsOff, dksh.data() + 16, 4);
+            if (uint64_t(programsOff) + 8 <= dksh.size()) {
+                memcpy(&type, dksh.data() + programsOff, 4);
+                memcpy(&entry, dksh.data() + programsOff + 4, 4);
+                const uint64_t sph = uint64_t(controlSz) + entry;
+                uint32_t w[10];
+                if (type == 0 && sph + sizeof(w) <= dksh.size()) {
+                    memcpy(w, dksh.data() + sph, sizeof(w));
+                    if ((w[0] & 0x1F) == 1 && ((w[0] >> 10) & 0xF) == 1) {
+                        uint32_t used = 0;
+                        for (uint32_t a = 0; a < 32; a++)
+                            used |= uint32_t(((w[6 + a / 8] >> ((a % 8) * 4)) & 0xF) != 0) << a;
+                        *vsInputs = used;
+                    }
+                }
+            }
+        }
         {
             // The DKSH header (uam's dksh.h): programs_off at byte 16; the program's per_warp_scratch_sz at byte 20.
             uint32_t programsOff = 0, scratch = 0;
@@ -1937,6 +1982,32 @@ namespace plume {
         auto &cb = codeBlocks.back();
         const uint32_t at = alignUp(cb.second, DK_SHADER_CODE_ALIGNMENT);
         memcpy(static_cast<uint8_t *>(dkMemBlockGetCpuAddr(cb.first)) + at, dksh.data(), size);
+        // sasrt-nx (2026-11-09, Deko3DOptions::expSphStoreBits): an EXPERIMENT on a vertex program's header bits
+        if (g_deko3dOptions.expSphStoreBits) {
+            uint32_t controlSz = 0, programsOff = 0, type = 1, entry = 0, w0 = 0;
+            memcpy(&controlSz, dksh.data() + 8, 4);
+            memcpy(&programsOff, dksh.data() + 16, 4);
+            if (uint64_t(programsOff) + 8 <= size) {
+                memcpy(&type, dksh.data() + programsOff, 4);
+                memcpy(&entry, dksh.data() + programsOff + 4, 4);
+            }
+            const uint64_t sph = uint64_t(controlSz) + entry;
+            if (type == 0 && sph + 4 <= size) {
+                uint8_t *word = static_cast<uint8_t *>(dkMemBlockGetCpuAddr(cb.first)) + at + sph;
+                memcpy(&w0, word, 4);
+                if ((w0 & 0x1F) == 1 && ((w0 >> 10) & 0xF) == 1 && (w0 & (1u << 16))) {
+                    const uint32_t before = w0;
+                    w0 &= ~(1u << 16);
+                    if (g_deko3dOptions.expSphStoreBits & 2u)
+                        w0 &= ~(1u << 26);
+                    memcpy(word, &w0, 4);
+                    static uint32_t logged = 0;
+                    if (logged++ < 8)
+                        logf("[sasrt] EXPERIMENT: vertex program %s header word 0 %08X -> %08X (sasrt_gpu_exp_sph_no_global_store)",
+                             what, before, w0);
+                }
+            }
+        }
         DkShaderMaker m;
         dkShaderMakerDefaults(&m, cb.first, at);
         dkShaderInitialize(&shader, &m);
@@ -1959,11 +2030,16 @@ namespace plume {
     // vertex shader's outputs (905: all written) and the pixel shader's zero inputs (906: read, zero), early depth (909:
     // after the shader). The configuration's (907, 908, 910-913) stay: skin-once (913) writes rows other draws read.
     static bool genericDrops(uint32_t id) {
+        // banjo-nx (2026-10-31): 920-923, the tessellated draws' fetch types (banjo_gpu_fetch_spec): the generic variant
+        // reads them at run time, the same values.
+        // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): 929, the user clip distance (written by default; the draws that set
+        // the clip slot off ignore it).
         return (id >= 1000 && id <= 1255) || id == 900 || id == 901 || id == 903 || id == 904 || id == 905 || id == 906 ||
-               id == 909;
+               id == 909 || (id >= 920 && id <= 923) || id == 929;
     }
 
     void Deko3DSetBackgroundThread(bool background) { t_backgroundThread = background; }
+    void Deko3DSetUrgentVariants(bool urgent) { t_urgentVariants = urgent; }
 
     // At most this many background threads' requests wait at a time (each a few hundred bytes, but the uam thread does
     // about one a second on the console: a pipeline-list prebuild over a cache that lacks them would queue thousands).
@@ -2093,7 +2169,7 @@ namespace plume {
             // until then, but only when that one is at hand (loaded, or in the cache file itself): one that had to
             // compile here would stop the draw for the compile, where reading this variant now costs one card read
             // (the first batch-5 emulator run: a missing generic variant compiled on the render thread for minutes).
-            if (!have && droppable && g_deko3dOptions.asyncVariants && g_deko3dOptions.asyncCacheReads && g_cacheContains &&
+            if (!have && droppable && !t_urgentVariants && g_deko3dOptions.asyncVariants && g_deko3dOptions.asyncCacheReads && g_cacheContains &&
                 g_cacheContains(key)) {
                 std::vector<RenderSpecConstant> kept;
                 for (uint32_t i = 0; i < specConstantsCount; i++) {
@@ -2117,7 +2193,8 @@ namespace plume {
             }
             // banjo-nx (2026-10-21, asyncVariants): compiled on the uam thread in the background (once), the generic
             // variant until then.
-            if (!have && droppable && g_deko3dOptions.asyncVariants) {
+            // banjo-nx (2026-11-01): not for an urgent one (t_urgentVariants): compiled below, on this thread.
+            if (!have && droppable && !t_urgentVariants && g_deko3dOptions.asyncVariants) {
                 pending->key = key;
                 pending->glsl = shader->glsl;
                 pending->defines = defines;
@@ -2144,7 +2221,7 @@ namespace plume {
             }
             auto fresh = std::make_unique<Deko3DShaderVariant>();
             if (have)
-                fresh->valid = loadCode(dksh, fresh->shader, shader->name.c_str());
+                fresh->valid = loadCode(dksh, fresh->shader, shader->name.c_str(), &fresh->vsInputs);
             std::lock_guard<std::mutex> lock(variantMutex);
             auto &slot = variants[key];
             if (!slot)
@@ -2279,6 +2356,13 @@ namespace plume {
         p->type = Deko3DPipeline::Type::Graphics;
         p->device = this;
         p->layout = static_cast<const Deko3DPipelineLayout *>(desc.pipelineLayout);
+        // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): constant 929 = 0 for a vertex shader that has it (pass clipspec).
+        for (uint32_t i = 0; i < desc.specConstantsCount; i++) {
+            const Deko3DShader *vs = static_cast<const Deko3DShader *>(desc.vertexShader);
+            if (desc.specConstants[i].index == 929 && desc.specConstants[i].value == 0 && vs &&
+                std::find(vs->specIds.begin(), vs->specIds.end(), 929u) != vs->specIds.end())
+                p->noUserClip = true;
+        }
         // banjo-nx (2026-10-21, asyncVariants): the epoch before any of its variants is queued, so one done meanwhile
         // still moves it.
         p->pendingEpoch = asyncEpoch.load(std::memory_order_acquire);
@@ -2352,7 +2436,8 @@ namespace plume {
         p->primitive = toDk(desc.primitiveTopology);
 
         dkRasterizerStateDefaults(&p->rasterizer);
-        p->rasterizer.cullMode = desc.cullMode == RenderCullMode::FRONT ? DkFace_Front : desc.cullMode == RenderCullMode::BACK ? DkFace_Back : DkFace_None;
+        p->rasterizer.cullMode = desc.cullMode == RenderCullMode::FRONT ? DkFace_Front : desc.cullMode == RenderCullMode::BACK ? DkFace_Back
+                              : desc.cullMode == RenderCullMode::FRONT_AND_BACK ? DkFace_FrontAndBack : DkFace_None;  // kameo-nx (2026-11-04)
         p->rasterizer.frontFace = desc.frontFace == RenderFrontFace::COUNTER_CLOCKWISE ? DkFrontFace_CCW : DkFrontFace_CW;
         // D3D's (and Vulkan's) provoking vertex is the first one.
         p->rasterizer.provokingVertex = DkProvokingVertex_First;
@@ -2420,6 +2505,16 @@ namespace plume {
         p->depthStencil.stencilBackDepthFailOp = toDk(desc.stencilBackFace.depthFailOp);
         p->depthStencil.stencilBackCompareOp = toDk(desc.stencilBackFace.compareFunction);
         p->stencilEnabled = desc.stencilEnabled;
+        // sasrt-nx (2026-11-08, Deko3DOptions::preciseDepthResolve): conservative (the write mask and the depth test
+        // are not looked at).
+        {
+            const auto keeps = [](const RenderStencilFaceDesc &f) {
+                return f.failOp == RenderStencilOp::KEEP && f.passOp == RenderStencilOp::KEEP &&
+                       f.depthFailOp == RenderStencilOp::KEEP;
+            };
+            p->writesDepthStencil = desc.depthWriteEnabled ||
+                                    (desc.stencilEnabled && (!keeps(desc.stencilFrontFace) || !keeps(desc.stencilBackFace)));
+        }
         p->stencilReadMask = uint8_t(desc.stencilReadMask);
         p->stencilWriteMask = uint8_t(desc.stencilWriteMask);
         p->stencilReference = uint8_t(desc.stencilReference);
@@ -2455,6 +2550,8 @@ namespace plume {
                 break;
             }
         }
+        for (uint32_t a = 0; a < p->attribCount; a++)  // sasrt-nx (2026-11-08, Deko3DOptions::vsInputMask)
+            p->fetchedAttribs |= uint32_t(p->attribs[a].isFixed == 0) << a;
         for (uint32_t s = 0; s < desc.inputSlotsCount; s++) {
             const RenderInputSlot &slot = desc.inputSlots[s];
             if (slot.index >= 16)
@@ -2552,11 +2649,14 @@ namespace plume {
 
     std::unique_ptr<RenderFramebuffer> Deko3DDevice::createFramebuffer(const RenderFramebufferDesc &desc) {
         auto fb = std::make_unique<Deko3DFramebuffer>();
+        static std::atomic<uint64_t> serials{0};  // sasrt-nx (2026-11-08, sameTargetsKept)
+        fb->serial = serials.fetch_add(1, std::memory_order_relaxed) + 1;
         fb->colorCount = std::min<uint32_t>(desc.colorAttachmentsCount, 8);
         for (uint32_t i = 0; i < fb->colorCount; i++) {
             const Deko3DTexture *t = static_cast<const Deko3DTexture *>(desc.colorAttachments[i]);
             const Deko3DTextureView *v = desc.colorAttachmentViews ? static_cast<const Deko3DTextureView *>(desc.colorAttachmentViews[i]) : nullptr;
             fb->colors[i] = v ? v->view : t->defaultView();
+            fb->colorTextures[i] = t;  // sasrt-nx (2026-11-08, trackedReadWait)
             fb->srgb[i] = isSrgbFormat(fb->colors[i].format != DkImageFormat_None ? fb->colors[i].format : t->format);
             if (i == 0) {
                 // The view's level (mip chains rendered level by level).
@@ -2569,6 +2669,8 @@ namespace plume {
             const Deko3DTextureView *v = static_cast<const Deko3DTextureView *>(desc.depthAttachmentView);
             fb->depth = v ? v->view : t->defaultView();
             fb->hasDepth = true;
+            fb->depthCompressed = t->compressed;  // sasrt-nx (2026-10-21)
+            fb->depthTexture = t;  // renut-ultimate (2026-11-08, depthResolveLazy)
             if (fb->colorCount == 0) {
                 fb->width = t->desc.width;
                 fb->height = t->desc.height;

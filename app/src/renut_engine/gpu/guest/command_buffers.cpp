@@ -38,6 +38,7 @@ extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
 #include "renut_engine/gpu/backend/queued.h"
 #include "renut_engine/gpu/backend/render_thread.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
 #include "renut_engine/gpu/render/draw.h"  // banjo-nx (2026-10-20): ChainHint
 #include "renut_engine/gpu/guest/resources.h"  // banjo-nx (2026-10-23): PrefetchShaderLocked
 #include "renut_engine/gpu/render/texture_layout.h"  // banjo-nx (2026-10-27): the slots' extents (GetTextureDataSizes)
@@ -65,6 +66,15 @@ REXCVAR_DEFINE_INT32(banjo_renut_tags_check, 32, "Banjo/Enhancements",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-10-20): sa2-nx's chain reuse (render/draw.cpp, banjo_renut_chain_reuse) for the replayed draws too.
 REXCVAR_DECLARE(bool, banjo_renut_diag_fast_census);  // banjo-nx (2026-10-26): render/draw.cpp
+REXCVAR_DEFINE_BOOL(banjo_renut_replay_inherits, true, "Banjo/Renut",
+                    "halo3-nx (2026-11-03): a replayed draw is the running device with only what its recording set, as "
+                    "on the console: a command buffer holds what was set in it and inherits the rest. Off: each recording's "
+                    "whole device, which suits a game recording on its real device, and drops every draw of one "
+                    "recording on a device of its own (Halo 3's no-hardware device has no targets)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_replay_state, false, "Banjo/Diagnostics",
+                    "Diagnostic (halo3-nx): logs the first replayed draws' device words that differ from the running "
+                    "device's, what each recording overrides");
 REXCVAR_DEFINE_BOOL(banjo_renut_chain_reuse_replays, true, "Banjo/Enhancements",
                     "OFF by default since package 36r, with banjo_renut_chain_reuse. Renut's renderer (banjo_renut_chain_reuse): the draws replayed from the game's recorded command "
                     "buffers (about three quarters of N&B's draws in play) tell the draw which device chunks their ops "
@@ -312,6 +322,8 @@ struct alignas(64) Op {
   // Run
   u32 command_buffer = 0;
 
+  u32 binding = 0;  // halo3-nx (2026-11-03, banjo_renut_recorded_binds): a draw's shader's bind (LastBindingOf)
+
   // banjo-nx (2026-10-27, banjo_renut_shadow_sort): a draw that writes depth only (SortFacts): its key (vertex shader
   // << 32 | pixel shader, then the declaration) and its run's signature (the targets and the depth test's family);
   // sort_sig 0: not sortable, sort_why the first reason (the census).
@@ -436,6 +448,14 @@ struct HostCommandBuffer {
   std::vector<Op> ops;
   std::vector<u8, DefaultInitAllocator<u8>> arena;
   uint64_t id = 0;  // banjo-nx (2026-10-26): a number per recording (the objects are pooled), for the census
+  // halo3-nx (2026-11-03, banjo_renut_replay_inherits): the device words this recording set, a bit a word, against the
+  // device at its Begin; the ranges it did not set, which a replay takes from the running device (BuildInheritRuns).
+  u32 set_words[d3d::kDeviceSnapshotSize / 4 / 32] = {};
+  std::vector<std::pair<u32, u32>> inherit_runs;  // offset, bytes
+  bool inherit_built = false;
+  // renut-ultimate (audit, 2026-11-07, ultimate_renut_replay_inherit_same): the inherited runs' bytes as op 0 recorded them
+  // (every op had them so), one after another; empty when unknown.
+  std::vector<u8> inherit_recorded;
   // banjo-nx (2026-10-27, banjo_renut_shadow_sort): the sorted runs (PlanSortedRuns, by the thread that queues the
   // buffer's run: 0 none yet, 1 being made, 2 made; the render thread reads them only at 2).
   std::vector<SortRun> sort_runs;
@@ -487,6 +507,7 @@ struct DeviceRecording {
   // The device as its last op saw it, in the device layout; only the chunks
   // (ChunkOffset) are kept.
   u8 shadow[d3d::kDeviceSnapshotSize];
+  u8 begin_image[d3d::kDeviceSnapshotSize];  // halo3-nx: the device at the buffer's Begin (HostCommandBuffer::set_words)
   // banjo-nx (2026-10-28, host packets): each chunk's mixed hash as the ops last copied it, and their XOR (the state key
   // of the device's last op). Zero together at the start (the XOR of zeros); a buffer's first op copies every chunk.
   uint64_t chunk_key[64] = {};
@@ -1036,6 +1057,108 @@ size_t CopyState(HostCommandBuffer &buffer, const u8 *device, uint64_t plain_dir
 // first op), to the op's.
 // 'groups' (banjo_renut_replay_group_pointers): the replay's 128 group pointers, set to the op's recorded groups instead
 // of copying them into the image; null: copied, as before.
+// halo3-nx (2026-11-03, banjo_renut_replay_inherits): on the console a command buffer holds the state set in it and every
+// other register stays as the running device left it. BeginCommandBuffer's inherit tags say so: Halo 3 passes all ones but
+// five bits, and records on a no-hardware device of its own, whose targets are 0 and whose depth, blend and viewport are
+// defaults. A recording's first op keeps every chunk, so replaying it wrote those over the running device: 75 % of the
+// draws of the first mission had no targets and were dropped, without a word. Now: the words that differ from the device
+// at Begin are the recording's, the others come from the running device. Float constants are apart: vs_set, ps_set.
+constexpr u32 kInheritTailBegin = u32(offsetof(d3d::Device, m_Constants)) + 0x2300;  // 0x2780, after both float blocks
+static_assert(kInheritTailBegin == 0x2780);
+
+inline void NoteSetWords(HostCommandBuffer &buffer, const DeviceRecording &set, const u8 *device) {
+  const auto scan = [&](u32 from, u32 to) {
+    for (u32 at = from; at < to; at += 4) {
+      if (std::memcmp(device + at, set.begin_image + at, 4) != 0)
+        buffer.set_words[at / 128] |= 1u << ((at / 4) & 31);
+    }
+  };
+  scan(kFetchBegin, kVertexShaderF);
+  scan(kInheritTailBegin, d3d::kDeviceSnapshotSize);
+}
+
+void BuildInheritRuns(HostCommandBuffer &buffer) {
+  const auto is_set = [&buffer](u32 at) { return (buffer.set_words[at / 128] >> ((at / 4) & 31)) & 1; };
+  const auto mark = [&buffer](u32 at) { buffer.set_words[at / 128] |= 1u << ((at / 4) & 31); };
+  const auto any_set = [&is_set](u32 from, u32 to) {
+    for (u32 at = from; at < to; at += 4) {
+      if (is_set(at))
+        return true;
+    }
+    return false;
+  };
+  const auto mark_all = [&mark](u32 from, u32 to) {
+    for (u32 at = from; at < to; at += 4)
+      mark(at);
+  };
+  // What the console writes as one: a word equal to the device's at Begin may still be the recording's (a zero in a
+  // fetch constant, a stride as the last recording left it), and half of one draw's group with half of another's stretches
+  // its geometry across the screen.
+  // Each fetch constant's six words (its dirty tag), with its texture word.
+  for (u32 n = 0; n < 32; ++n) {
+    const u32 from = kFetchBegin + n * 24;
+    const bool has_word = n < d3d::kTextureFetchSlots;
+    const u32 word = has_word ? d3d::kDeviceOffsetTextures + n * 4 : 0;
+    if (any_set(from, from + 24) || (has_word && is_set(word))) {
+      mark_all(from, from + 24);
+      if (has_word)
+        mark(word);
+    }
+  }
+  // The stream sources and their strides.
+  if (any_set(d3d::kDeviceOffsetStreamSources, d3d::kDeviceOffsetTextures))
+    mark_all(d3d::kDeviceOffsetStreamSources, d3d::kDeviceOffsetTextures);
+  // A recording that binds a vertex shader decides all three: its declaration word stays 0 when D3DVertexShader_Bind gave
+  // the shader one, and a null pixel shader looks like no change on a device that had none.
+  if (is_set(d3d::kDeviceOffsetVertexShader)) {
+    mark(d3d::kDeviceOffsetPixelShader);
+    mark(d3d::kDeviceOffsetVertexDeclaration);
+  }
+  buffer.inherit_runs.clear();
+  const auto add = [&](u32 from, u32 to) {
+    for (u32 at = from; at < to;) {
+      if (is_set(at)) {
+        at += 4;
+        continue;
+      }
+      const u32 start = at;
+      while (at < to && !is_set(at))
+        at += 4;
+      buffer.inherit_runs.emplace_back(start, at - start);
+    }
+  };
+  add(kFetchBegin, kVertexShaderF);
+  add(kInheritTailBegin, d3d::kDeviceSnapshotSize);
+  // renut-ultimate (audit, 2026-11-07, ultimate_renut_replay_inherit_same): op 0 keeps every chunk (CopyState: the fetch
+  // constants' bytes, then the tail's); a run lies in one of the two.
+  static_assert(kInheritTailBegin >= kTailBegin, "an inherited tail run lies in the recorded tail");
+  buffer.inherit_recorded.clear();
+  if (banjo::renut_gpu::ReplayInheritSameOn() && !buffer.ops.empty() && buffer.ops[0].plain_dirty == kAllChunks &&
+      !buffer.inherit_runs.empty()) {
+    const u8 *image = buffer.arena.data() + buffer.ops[0].state;
+    for (const auto &[offset, bytes] : buffer.inherit_runs) {
+      const u32 at = offset < kVertexShaderF ? offset - kFetchBegin : kFetchBytes + (offset - kTailBegin);
+      buffer.inherit_recorded.insert(buffer.inherit_recorded.end(), image + at, image + at + bytes);
+    }
+  }
+  buffer.inherit_built = true;
+}
+
+// renut-ultimate (audit, 2026-11-07, ultimate_renut_replay_inherit_same): every inherited word of the running device as the
+// recording had it (BuildInheritRuns).
+uint64_t g_inherit_same_replays = 0, g_inherit_replays = 0;
+bool InheritedAsRecorded(const HostCommandBuffer &buffer, const u8 *running) {
+  if (buffer.inherit_recorded.empty())
+    return false;
+  const u8 *recorded = buffer.inherit_recorded.data();
+  for (const auto &[offset, bytes] : buffer.inherit_runs) {
+    if (std::memcmp(running + offset, recorded, bytes) != 0)
+      return false;
+    recorded += bytes;
+  }
+  return true;
+}
+
 void ApplyState(u8 *state, const u8 *from, uint64_t plain_dirty, uint64_t vs_dirty,
                 uint64_t ps_dirty, const u8 **groups = nullptr) {
   for (uint64_t chunks = plain_dirty; chunks; chunks &= chunks - 1) {
@@ -1779,6 +1902,12 @@ Op *NewOp(u32 device_va, OpKind kind, HostCommandBuffer **out_buffer) {
   // The first op of a buffer follows ops of other buffers: nothing known.
   const bool first = buffer.ops.size() == 1;
   const auto *bytes = reinterpret_cast<const u8 *>(device);
+  NoteSetWords(buffer, set, bytes);  // halo3-nx (2026-11-03)
+  if (kind == OpKind::Draw) {
+    u32 vs_word;
+    std::memcpy(&vs_word, bytes + d3d::kDeviceOffsetVertexShader, 4);
+    op.binding = LastBindingOf(__builtin_bswap32(vs_word));
+  }
   // banjo-nx (2026-10-23, batch 6b): fast_chunks. banjo-nx (2026-10-26): one static (one guard test an op, not three).
   struct ChunkConfig {
     bool fast_chunks, tags;
@@ -2328,6 +2457,21 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   // Only this thread touches a captured buffer: the game records into a new
   // one (BeginRecording).
   HostCommandBuffer &buffer = *it->second;
+  // halo3-nx (2026-11-03, banjo_renut_replay_inherits): see BuildInheritRuns.
+  static const bool inherits_on = REXCVAR_GET(banjo_renut_replay_inherits);
+  if (inherits_on && !buffer.inherit_built)
+    BuildInheritRuns(buffer);
+  // renut-ultimate (audit, 2026-11-07, ultimate_renut_replay_inherit_same): the running device holding every inherited word
+  // as recorded is the recorded device: no copies, and the record's answers below hold.
+  const bool inherit_same = inherits_on && InheritedAsRecorded(buffer, running);
+  const bool inherits = inherits_on && !inherit_same;
+  if (inherits_on) {
+    ++g_inherit_replays;
+    g_inherit_same_replays += inherit_same;
+    if ((g_inherit_replays & 0xFFFF) == 0)
+      RGPU_INFO("[renut] replays with the inherited words as recorded (ultimate_renut_replay_inherit_same): {} of {}",
+                g_inherit_same_replays, g_inherit_replays);
+  }
   static const bool repeat_census = REXCVAR_GET(banjo_renut_diag_fast_census);
   if (repeat_census)
     CensusRecording(buffer, command_buffer_va);
@@ -2358,7 +2502,9 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   resources.vb_mask = 0;
   resources.obj_mask = 0;  // (geometry objects)
   resources.index_obj = nullptr;
-  const bool use_resources = ResourceObjectsOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 45;
+  // halo3-nx: not with inherited state: these answers were worked out from the words the recording saw.
+  const bool use_resources =
+      !inherits && ResourceObjectsOn() && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 45;
   const bool stream = ReplayStreamOn();  // banjo-nx (2026-10-27, the replay stream)
   // banjo-nx (2026-10-28, banjo_renut_replay_group_pointers / A/B 52): the depth's group pointers (each op sets those it
   // writes before a draw reads them: a set group was written by an op at or before it), or null (copied into the image).
@@ -2375,7 +2521,7 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
   const Op *merge_prev = nullptr;  // banjo-nx (2026-10-27): the draw op before, with nothing between (the merge census)
   // banjo-nx (2026-10-27, banjo_renut_shadow_sort): the buffer's sorted runs (PlanSortedRuns), each taken at its first op
   // when its shaders allow any order and A/B target 40 is not in its off half; the ops as recorded otherwise.
-  const bool sort_runs = ShadowSortOn() && buffer.sort_state.load(std::memory_order_acquire) == 2 &&
+  const bool sort_runs = !inherits && ShadowSortOn() && buffer.sort_state.load(std::memory_order_acquire) == 2 &&
                          !buffer.sort_runs.empty() &&
                          banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 40;
   size_t sort_cursor = 0;
@@ -2551,6 +2697,10 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
     }
     const uint64_t op_start = kinds ? RenderTicks() : 0;
     ApplyState(state, buffer.arena.data() + op.state, op.plain_dirty, op.vs_dirty, op.ps_dirty, groups);
+    if (inherits && op.plain_dirty) {
+      for (const auto &[offset, bytes] : buffer.inherit_runs)
+        std::memcpy(state + offset, running + offset, bytes);
+    }
     if (op.extents != kNoExtents)
       ApplyExtents(extents, buffer.arena.data() + op.extents);
     else if (op.plain_dirty & ((uint64_t(1) << kFetchChunks) - 1))
@@ -2649,7 +2799,8 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         hint_last = seq;
         hint_plain = 0;
         hint_fields = 0;
-        g_chain_hint.packet_key = PacketKeyOf(op.call);  // banjo-nx (2026-10-28, host packets)
+        // banjo-nx (2026-10-28, host packets); halo3-nx: the key is of the recorded state alone, so not with inherited state.
+        g_chain_hint.packet_key = inherits ? 0 : PacketKeyOf(op.call);
       }
       // banjo-nx (2026-10-23, render-thread round): the next draw's shader lookups' lines, fetched while this draw runs
       // (the first thing a draw reads; its own prefetches come after them), and the start of its state in the arena.
@@ -2674,13 +2825,36 @@ void Replay(const u8 *running, const BufferSet &buffers, u32 command_buffer_va, 
         if (next.fields & (kFieldFetch | kFieldTexWords))  // banjo-nx (2026-10-26, round 3)
           PrefetchNextTextures(state, next_state, next.plain_dirty);
       }
-      g_draw_slot_extents = extents.mask ? &extents : nullptr;  // banjo-nx (2026-10-27)
+      g_draw_slot_extents = extents.mask && !inherits ? &extents : nullptr;  // banjo-nx (2026-10-27); halo3-nx: see use_resources
       g_draw_resources = use_resources ? &resources : nullptr;  // (Phase A)
       {
         static const bool packet_census = REXCVAR_GET(banjo_renut_diag_packet_census);  // banjo-nx (2026-10-28)
         if (packet_census) [[unlikely]]
           CensusPacket(state, op.call, hints ? g_chain_hint.fields : kFieldsAll);
       }
+      {
+        // halo3-nx (2026-11-03, banjo_renut_diag_replay_state): the words a replayed draw takes from its recording that
+        // differ from the running device's: what the recording overrides, right or wrong.
+        static const bool replay_state_diag = REXCVAR_GET(banjo_renut_diag_replay_state);
+        static uint32_t replay_state_logged = 0;
+        if (replay_state_diag && replay_state_logged < 12) [[unlikely]] {
+          ++replay_state_logged;
+          std::string words;
+          u32 differing = 0;
+          for (u32 at = 0x2780; at + 4 <= d3d::kDeviceSnapshotSize; at += 4) {
+            if (std::memcmp(state + at, running + at, 4) == 0)
+              continue;
+            if (++differing <= 60)
+              words += fmt::format(" {:04X}:{:02X}{:02X}{:02X}{:02X}/{:02X}{:02X}{:02X}{:02X}", at, state[at], state[at + 1],
+                                   state[at + 2], state[at + 3], running[at], running[at + 1], running[at + 2],
+                                   running[at + 3]);
+          }
+          RGPU_INFO("[replay state] buffer {:08X} op {}: {} words differ from the running device (recorded/running):{}",
+                    command_buffer_va, op_index, differing, words);
+        }
+      }
+      if (op.binding)
+        ApplyBindingLocked(op.binding);  // halo3-nx (2026-11-03)
       DrawStateLocked(state, call, &constants);
       g_draw_slot_extents = nullptr;
       g_draw_resources = nullptr;
@@ -2764,9 +2938,13 @@ void BeginRecording(u32 device_va, u32 command_buffer_va) {
   DeviceRecording &set = g_recording_devices[device_va];
   set.vs = 0;
   set.ps = 0;
+  std::memset(slot->set_words, 0, sizeof(slot->set_words));  // halo3-nx (2026-11-03)
+  slot->inherit_runs.clear();
+  slot->inherit_built = false;
   if (const auto *device = GuestPtr<const d3d::Device>(device_va)) {
     set.vs = u64(device->m_Pending[0]);
     set.ps = u64(device->m_Pending[1]);
+    std::memcpy(set.begin_image, device, sizeof(set.begin_image));
   }
 }
 
@@ -3454,6 +3632,25 @@ CommandBufferMemory CommandBufferMemoryUsage() {
   }
   usage.live = g_live_buffers.load(std::memory_order_relaxed);
   return usage;
+}
+
+// sasrt-nx (2026-10-21, sasrt_renut_constant_f4_pending): see command_buffers.h. A group is 4 registers (D3DTAGCOLLECTION), bit
+// 63 - group.
+void KeepConstantF4Pending(u32 device_va, bool pixel, u32 start, u32 count) {
+  if (!banjo::renut_gpu::ConstantF4PendingOn() || !count || start + count > 256)
+    return;
+  auto *d = GuestPtr<d3d::Device>(device_va);
+  if (!d)
+    return;
+  uint64_t mask = 0;
+  for (u32 g = start >> 2; g <= (start + count - 1) >> 2; ++g)
+    mask |= uint64_t(1) << (63 - g);
+  d->m_Pending[pixel ? 1 : 0] = u64(d->m_Pending[pixel ? 1 : 0]) | mask;
+  static std::atomic<uint64_t> calls{0};
+  if (calls.fetch_add(1, std::memory_order_relaxed) == 0)
+    RGPU_INFO("[renut] D3DDevice_BeginShaderConstantF4 used (first: device {:08X}, {} shader, registers {}-{}, recording {}): "
+              "its range kept pending (sasrt_renut_constant_f4_pending)", device_va, pixel ? "pixel" : "vertex", start,
+              start + count - 1, IsRecordingCommandBuffer(device_va) ? "yes" : "no");
 }
 
 } // namespace renut::gpu

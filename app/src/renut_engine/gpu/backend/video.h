@@ -27,7 +27,7 @@ namespace renut::gpu {
 
 constexpr uint32_t kFramesInFlight = 2;
 constexpr uint32_t kTextureDescriptorCount = 8192;
-constexpr uint32_t kSamplerDescriptorCount = 256;
+constexpr uint32_t kSamplerDescriptorCount = 1024;  // vivapinata-nx: 256 before the families below
 constexpr uint32_t kInvalidDescriptor = UINT32_MAX;
 
 // Fixed bindless slots. The table is shared by the 2D, 3D and cube arrays the
@@ -38,7 +38,10 @@ constexpr uint32_t kNullTextureCubeSlot = 2;
 constexpr uint32_t kFirstDynamicTextureSlot = 3;
 constexpr uint32_t kLinearClampSamplerSlot = 0;
 constexpr uint32_t kPointClampSamplerSlot = 1;
-constexpr uint32_t kFirstDynamicSamplerSlot = 2;
+// vivapinata-nx (2026-11-03): each sampler made takes this many consecutive slots (render/textures.cpp SamplerSlotUncached), and a
+// shader may add up to 4 to a word. The words of an empty texture slot are the fixed samplers above, so the slots up to 5 are filled.
+constexpr uint32_t kSamplerVariants = 5;
+constexpr uint32_t kFirstDynamicSamplerSlot = 6;
 
 // Depth resolve outputs (shaders/host/depth_resolve.hlsli): the destination
 // texture, and the guest words for 8_8_8_8 textures over its memory.
@@ -58,6 +61,9 @@ static_assert(sizeof(UtilityPush) == 32);
 
 // Matches StreamConvertPush in shaders/host/stream_convert_cs.hlsl.
 constexpr uint32_t kStreamConvertMaxElements = 8;
+// halo3-nx (2026-11-03): a stream of more elements takes several dispatches, 8 elements each (each writes only its own). Halo 3's particles have
+// 12: with the limit at 8 they could not be built on the GPU, and every update draw waited for the GPU to read the pool back.
+constexpr uint32_t kStreamConvertTotalElements = 16;
 struct StreamConvertPush {
   uint32_t source;
   uint32_t source_offset;
@@ -70,6 +76,16 @@ struct StreamConvertPush {
   uint32_t elements[2 * kStreamConvertMaxElements];
 };
 static_assert(sizeof(StreamConvertPush) == 96);
+// sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute): matches FetchCopyPush in shaders/host/fetch_copy_cs.hlsl; its
+// set: the slots' export buffers, the upload chunk, the fetch data buffer.
+struct FetchCopyPush {
+  uint32_t source;  // 0 / 1 the slots' export buffers, 2 the upload chunk
+  uint32_t source_offset;
+  uint32_t dest_offset;
+  uint32_t words;
+};
+static_assert(sizeof(FetchCopyPush) == 16);
+constexpr uint32_t kFetchCopyBuffers = 4;
 // stream_convert_cs: the export buffers of the slots come first in its set.
 constexpr uint32_t kStreamConvertBuffers = kFramesInFlight + 1;
 constexpr uint32_t kStreamConvertMaxStrideWords = 255;
@@ -176,9 +192,16 @@ struct VideoState {
   std::unique_ptr<plume::RenderShader> depth_resolve_ps[2];
   std::unique_ptr<plume::RenderShader> resolve_copy_ps;  // banjo-nx (2026-10-18): DrawResolveCopy
   std::unordered_map<uint32_t, std::unique_ptr<plume::RenderPipeline>> resolve_copy_pipelines;  // by format
+  // halo3-nx (2026-11-03): SyncColorViewLocked's, by the target's format.
+  std::unique_ptr<plume::RenderShader> view_fp10_encode_ps;
+  std::unordered_map<uint32_t, std::unique_ptr<plume::RenderPipeline>> view_fp10_encode_pipelines;
   std::unique_ptr<plume::RenderPipeline> depth_resolve_pipeline[2];
   // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): the same with the words target's writes masked off.
   std::unique_ptr<plume::RenderPipeline> depth_resolve_float_pipeline[2];
+  // sasrt-nx (2026-11-08, sasrt_gpu_depth_resolve_float_ps): the single-sampled depth-only pipeline with the float-only
+  // shader (depth_resolve_float_ps).
+  std::unique_ptr<plume::RenderShader> sasrt_depth_float_ps;
+  std::unique_ptr<plume::RenderPipeline> sasrt_depth_float_pipeline;
   // Host mip levels of scaled resolve destinations (textures.cpp); null when
   // it failed to build, which leaves them single-level.
   std::unique_ptr<plume::RenderShader> texture_mip_ps;
@@ -212,6 +235,19 @@ struct VideoState {
   std::unique_ptr<plume::RenderPipeline> stream_convert_pipeline;
   std::unique_ptr<plume::RenderDescriptorSet> stream_convert_set;
   const plume::RenderBuffer *stream_convert_set_buffers[kStreamConvertBuffers] = {};
+  // sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute; deko3d only): the fetch data copies on the 3D engine
+  // (fetch_copy_cs; draw.cpp UploadVertexFetchData). A set per slot, replaced (never rewritten) when its buffers change.
+  std::unique_ptr<plume::RenderPipelineLayout> fetch_copy_layout;
+  std::unique_ptr<plume::RenderShader> fetch_copy_cs;
+  std::unique_ptr<plume::RenderPipeline> fetch_copy_pipeline;
+  std::unique_ptr<plume::RenderDescriptorSet> fetch_copy_set[kFramesInFlight];
+  const plume::RenderBuffer *fetch_copy_set_buffers[kFramesInFlight][kFetchCopyBuffers] = {};
+  // sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute): the memexport windows' seeds (draw.cpp PrepareMemExportLocked)
+  // through fetch_copy_cs too: the set whose destination is the slot's export buffer.
+  std::unique_ptr<plume::RenderDescriptorSet> seed_copy_set[kFramesInFlight];
+  std::unique_ptr<plume::RenderDescriptorSet> readback_copy_set[kFramesInFlight];  // sasrt_gpu_readback_compute
+  const plume::RenderBuffer *readback_copy_set_buffers[kFramesInFlight][kFetchCopyBuffers] = {};
+  const plume::RenderBuffer *seed_copy_set_buffers[kFramesInFlight][kFetchCopyBuffers] = {};
   std::unique_ptr<plume::RenderBuffer> exported_streams[kFramesInFlight];
   uint64_t exported_streams_capacity[kFramesInFlight] = {};
   uint64_t exported_streams_used[kFramesInFlight] = {};
@@ -225,6 +261,12 @@ struct VideoState {
   std::unique_ptr<plume::RenderPipelineLayout> target_readback_layout;
   std::unique_ptr<plume::RenderShader> target_readback_cs;
   std::unique_ptr<plume::RenderPipeline> target_readback_pipeline;
+  // sasrt-nx (2026-11-08, sasrt_gpu_texel_readback_compute; deko3d only): a 1x1 float resolve's texel for the CPU
+  // (texel_readback_cs, in target_readback_layout).
+  std::unique_ptr<plume::RenderShader> texel_readback_cs;
+  std::unique_ptr<plume::RenderPipeline> texel_readback_pipeline;
+  std::unique_ptr<plume::RenderDescriptorSet> texel_readback_set[kFramesInFlight];
+  const plume::RenderBuffer *texel_readback_set_buffer[kFramesInFlight] = {};
 
   // Destruction deferred until the slot's fence has been waited.
   std::vector<std::unique_ptr<plume::RenderTexture>> retired_textures[kFramesInFlight];
@@ -276,7 +318,7 @@ public:
   // banjo-nx (2026-10-20, banjo_renut_game_gamma): the device's corrected gamma ramp at a Swap (768 big-endian words,
   // red, green, blue: the 10-bit entry << 6, d3d/hooks/device.cpp StoreGamma); the present applies it when the key is
   // on. Any thread.
-  static void NoteGameGamma(const uint8_t *ramp);
+  static void NoteGameGamma(const uint8_t *ramp, bool piecewise);  // halo3-nx: piecewise, D3DDevice_SetPWLGamma's form
   // banjo-nx (2026-10-20, input latency): the guest Swap the next present ends (the render thread, right before it),
   // and banjo_deko3d_latency_trim's 10 s report line (empty when off).
   static void NotePresentingSwap(uint64_t swap);

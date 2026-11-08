@@ -60,7 +60,11 @@ if(REXGLUE_PLATFORM_SWITCH)
     # shaders come from deko3d_glsl.bin beside the NRO, which the web installer makes from the player's files. OFF (the
     # everyday build): every translated shader built in (app/out/renut_switch).
     option(BANJO_RENUT_RELEASE_SHADERS "Switch: no translated game shader in the NRO (deko3d_glsl.bin beside it)" OFF)
-    if(BANJO_RENUT_RELEASE_SHADERS)
+    # rr6-nx's ultimate branch (2026-11-08): BANJO_RENUT_SHADER_DIR names another package folder (app/out/renut_switch_ult).
+    set(BANJO_RENUT_SHADER_DIR "" CACHE PATH "Switch: the shader package folder (empty: out/renut_switch or _release)")
+    if(BANJO_RENUT_SHADER_DIR)
+        set(_banjo_renut_shaders "${BANJO_RENUT_SHADER_DIR}")
+    elseif(BANJO_RENUT_RELEASE_SHADERS)
         set(_banjo_renut_shaders "${CMAKE_SOURCE_DIR}/out/renut_switch_release")
     else()
         set(_banjo_renut_shaders "${CMAKE_SOURCE_DIR}/out/renut_switch")
@@ -85,6 +89,8 @@ include("${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/gpu.cmake")
 add_library(banjo_renut_gpu OBJECT
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_select.cpp"
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_tuning.cpp"
+    "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/ultimate.cpp"  # renut-ultimate: the ported fixes' switches
+    "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/sasrt_gpu_round.cpp"  # sasrt-nx's GPU rounds (2026-11-08, night)
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_checks.cpp"
     "${CMAKE_SOURCE_DIR}/src/renut_engine/gpu/banjo_renut_record.cpp"
     # banjo-nx (2026-10-19, latency batch 3): the display's refresh for the frame limiter (it reads the presents' fences)

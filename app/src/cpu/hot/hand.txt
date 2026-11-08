@@ -4,4 +4,24 @@
 #
 #   <address or generated name> [id=<namespace suffix>] [exact=<registers>]   # evidence
 #
-# None yet: no console profile of this game exists.
+# The evidence below: console profile 2026-11-05 16:28 (build of 16:17, handheld, 1 kHz sampling; the race's 27
+# ten-second windows, 1020 to 1785 MHz; out/console_runs/sd_last_2026-11-05). The user asked (2026-11-08) for the five
+# hottest guest functions of the main thread and of the drawing thread (XThread94200EA0). Shares are of the thread's
+# samples in the race.
+82309770 exact=r3   # C runtime memcpy (banjo-nx's native: the same contract) [main thread 1.9 %, its 4th guest function; in 76 copies]
+820E33B0 exact=r5,r9,r10,v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13   # 4x4 matrix product: both operands stored to the red zone as doublewords and reloaded as vectors (not forwarded on the A57) [inlined into the drawing thread's 1st and 5th, sub_82218290 4.9 % and sub_820E6658 1.9 %]
+82153688 exact=r9,r10,v0,v9,v10,v11,v12,v13   # 4x4 matrix transpose: the same red-zone round trip [7 calls in sub_82218290]
+8213EAB0 exact=r9,r10,v0,v8,v9,v10,v11,v12,v13   # vector by a 4x4 matrix: the same red-zone round trip [4 calls in sub_82218290]
+#
+# Asked for and not written (2026-11-08), by the gate's condition 5 (the samples show no cost a rewrite removes):
+#   82144DA0  main 64 %: the wait for the frame's hand-over (it spins on 0x824D4F30); waiting, not work. Sleeping in
+#             it frees nothing cores 0-2 need (about half idle in the race) and risks noticing the flag late.
+#   821FB110  main 2.8 %: three calls and a branch; its time is in its callees (copies).
+#   821FA3A0  main 2.1 %: a flat profile, 108 samples over its 28 KB copy (it and its inlined callees), at most 7 % in
+#             any 512 bytes; float compares and eighteen calls, no round trip or repeated read standing out.
+#   820CD320  main 1.8 %: eleven calls, integer only; time in the callees.
+#   82216350  drawing 4.4 %: a submesh loop of D3D calls (SetTexture, SetStreamSource, SetIndices, DrawIndexedPrimitive);
+#             the time is Renut's hooks, which are host code.
+#   82222A08  drawing 2.2 %: seconds from the time base; 57 % of its samples follow the mftb call, whose cost is the
+#             SDK's Clock::QueryGuestTickCount.
+#   82156258  drawing 2.1 %: four calls; time in the callees.

@@ -38,44 +38,65 @@
 #include "renut_engine/gpu/banjo_renut_record.h"  // banjo-nx (package 28b): banjo_renut_record_worker
 #include "renut_engine/gpu/render/surfaces.h"  // banjo-nx (2026-10-28): NoteGpuFrameForDynamicResolution
 #include <rex/frame_latency.h>  // banjo-nx (2026-10-20): the latency probe's "input -> GPU done"
+#include <rex/cvar.h>  // sa2-nx (2026-10-20): pacman_renut_double_buffer
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-20, banjo_deko3d_latency_trim): fence copies
 #endif
 
 #include "host_shaders/depth_resolve_ms_ps.spirv.h"
 #include "host_shaders/depth_resolve_ps.spirv.h"
+#include "host_shaders/depth_resolve_float_ps.spirv.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/present_ps.spirv.h"
 #include "host_shaders/present_vs.spirv.h"
 #include "host_shaders/rectangle_list_gs.spirv.h"
 #include "host_shaders/point_sprite_gs.spirv.h"
 #include "host_shaders/stream_convert_cs.spirv.h"
+#include "host_shaders/fetch_copy_cs.spirv.h"  // sasrt-nx (2026-11-08)
+#include "host_shaders/texel_readback_cs.spirv.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/target_readback_cs.spirv.h"
 #include "host_shaders/texture_mip_ps.spirv.h"
 #include "host_shaders/resolve_copy_ps.spirv.h"
+#include "host_shaders/view_fp10_encode_ps.spirv.h"  // halo3-nx
 #if defined(PLUME_DEKO3D)  // banjo-nx (2026-10-17): the deko3d back end's (tools/deko3d_host_shader.py)
 #include "host_shaders/depth_resolve_ms_ps.deko3d.h"
 #include "host_shaders/depth_resolve_ps.deko3d.h"
+#include "host_shaders/depth_resolve_float_ps.deko3d.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/present_ps.deko3d.h"
 #include "host_shaders/present_vs.deko3d.h"
 #include "host_shaders/rectangle_list_gs.deko3d.h"
 #include "host_shaders/point_sprite_gs.deko3d.h"
 #include "host_shaders/stream_convert_cs.deko3d.h"
+#include "host_shaders/fetch_copy_cs.deko3d.h"  // sasrt-nx (2026-11-08)
+#include "host_shaders/texel_readback_cs.deko3d.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/target_readback_cs.deko3d.h"
 #include "host_shaders/texture_mip_ps.deko3d.h"
 #include "host_shaders/resolve_copy_ps.deko3d.h"
+#include "host_shaders/view_fp10_encode_ps.deko3d.h"  // halo3-nx
 #endif
 #if defined(_WIN32)
 #include "host_shaders/depth_resolve_ms_ps.dxil.h"
 #include "host_shaders/depth_resolve_ps.dxil.h"
+#include "host_shaders/depth_resolve_float_ps.dxil.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/present_ps.dxil.h"
 #include "host_shaders/present_vs.dxil.h"
 #include "host_shaders/rectangle_list_gs.dxil.h"
 #include "host_shaders/point_sprite_gs.dxil.h"
 #include "host_shaders/stream_convert_cs.dxil.h"
+#include "host_shaders/fetch_copy_cs.dxil.h"  // sasrt-nx (2026-11-08)
+#include "host_shaders/texel_readback_cs.dxil.h"  // sasrt-nx (2026-11-08)
 #include "host_shaders/target_readback_cs.dxil.h"
 #include "host_shaders/texture_mip_ps.dxil.h"
 #include "host_shaders/resolve_copy_ps.dxil.h"
+#include "host_shaders/view_fp10_encode_ps.dxil.h"  // halo3-nx
 #endif
+
+// sa2-nx (2026-10-20, sa2_renut_double_buffer). pacman-nx: on by default, the user's call (2026-11-03). renut-ultimate: off by
+// default, as in sa2-nx (a latency against stutter choice for each game's toml).
+REXCVAR_DEFINE_BOOL(pacman_renut_double_buffer, false, "PacMan/Renderer",
+                    "Renut's renderer: a swapchain of 2 images instead of 3 (input latency: a finished frame is shown at "
+                    "the next refresh instead of queueing behind one already waiting). A frame that misses a refresh then "
+                    "waits a whole one. Takes effect at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace renut::gpu {
 
@@ -155,6 +176,8 @@ bool BuildSamplers(VideoState &s) {
   }
   s.sampler_set->setSampler(kLinearClampSamplerSlot, s.linear_clamp_sampler.get());
   s.sampler_set->setSampler(kPointClampSamplerSlot, s.point_clamp_sampler.get());
+  for (uint32_t slot = kPointClampSamplerSlot + 1; slot < kFirstDynamicSamplerSlot; ++slot)
+    s.sampler_set->setSampler(slot, s.linear_clamp_sampler.get());  // vivapinata-nx: an empty texture slot's word plus a variant
   return true;
 }
 
@@ -279,6 +302,8 @@ bool BuildPresentPipeline(VideoState &s) {
 bool BuildDepthResolvePipelines(VideoState &s) {
   // banjo-nx (2026-10-18): the colour resolves drawn on deko3d (DrawResolveCopy); optional.
   s.resolve_copy_ps = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(resolve_copy_ps), "resolve_copy_ps");
+  // halo3-nx (2026-11-03): one EDRAM view read through another (SyncColorViewLocked).
+  s.view_fp10_encode_ps = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(view_fp10_encode_ps), "view_fp10_encode_ps");
   s.depth_resolve_ps[0] =
       CreateHostShader(s.device.get(), RENUT_HOST_SHADER(depth_resolve_ps), "depth_resolve_ps");
   s.depth_resolve_ps[1] = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(depth_resolve_ms_ps),
@@ -310,6 +335,17 @@ bool BuildDepthResolvePipelines(VideoState &s) {
     if (s.depth_resolve_float_pipeline[i])
       s.depth_resolve_float_pipeline[i]->setName(i ? "renut depth resolve, depth only (msaa)"
                                                    : "renut depth resolve, depth only");
+    // sasrt-nx (2026-11-08, sasrt_gpu_depth_resolve_float_ps): the same pipeline with the float-only shader.
+    if (i == 0) {
+      s.sasrt_depth_float_ps =
+          CreateHostShader(s.device.get(), RENUT_HOST_SHADER(depth_resolve_float_ps), "depth_resolve_float_ps");
+      if (s.sasrt_depth_float_ps) {
+        desc.pixelShader = s.sasrt_depth_float_ps.get();
+        s.sasrt_depth_float_pipeline = s.device->createGraphicsPipeline(desc);
+      }
+      if (s.sasrt_depth_float_pipeline)
+        s.sasrt_depth_float_pipeline->setName("sasrt depth resolve, the float alone");
+    }
   }
   return true;
 }
@@ -360,6 +396,37 @@ void BuildStreamConvertPipeline(VideoState &s) {
   s.stream_convert_pipeline->setName("renut stream convert");
 }
 
+// sasrt-nx (2026-11-08, sasrt_gpu_fetch_copy_compute): see shaders/host/fetch_copy_cs.hlsl.
+plume::RenderDescriptorSetBuilder FetchCopySetBuilder() {
+  plume::RenderDescriptorSetBuilder buffers;
+  buffers.begin();
+  buffers.addReadWriteByteAddressBuffer(0, kFetchCopyBuffers);  // u0, space0
+  buffers.end();
+  return buffers;
+}
+
+// Optional (deko3d only): without it the fetch data is copied by the copy engine, as before.
+void BuildFetchCopyPipeline(VideoState &s) {
+  if (!IsDeko3D())
+    return;
+  plume::RenderPipelineLayoutBuilder layout;
+  layout.begin(false, false);
+  layout.addDescriptorSet(FetchCopySetBuilder());
+  layout.addPushConstant(0, 1, sizeof(FetchCopyPush), plume::RenderShaderStageFlag::COMPUTE);
+  layout.end();
+  s.fetch_copy_layout = layout.create(s.device.get());
+  s.fetch_copy_cs = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(fetch_copy_cs), "fetch_copy_cs");
+  if (s.fetch_copy_layout && s.fetch_copy_cs) {
+    s.fetch_copy_pipeline = s.device->createComputePipeline(
+        plume::RenderComputePipelineDesc(s.fetch_copy_layout.get(), s.fetch_copy_cs.get(), 64, 1, 1));
+  }
+  if (!s.fetch_copy_pipeline) {
+    RGPU_WARN("[sasrt] fetch copy pipeline creation failed: the copy engine copies the fetch data (as before)");
+    return;
+  }
+  s.fetch_copy_pipeline->setName("sasrt fetch copy");
+}
+
 // See shaders/host/target_readback_cs.hlsl.
 plume::RenderDescriptorSetBuilder TargetReadbackSetBuilder() {
   plume::RenderDescriptorSetBuilder buffers;
@@ -396,6 +463,17 @@ void BuildTargetReadbackPipeline(VideoState &s) {
     return;
   }
   s.target_readback_pipeline->setName("renut target readback");
+  // sasrt-nx (2026-11-08, sasrt_gpu_texel_readback_compute; deko3d only): the 1x1 float readback in the same layout.
+  if (IsDeko3D()) {
+    s.texel_readback_cs = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(texel_readback_cs), "texel_readback_cs");
+    if (s.texel_readback_cs)
+      s.texel_readback_pipeline = s.device->createComputePipeline(plume::RenderComputePipelineDesc(
+          s.target_readback_layout.get(), s.texel_readback_cs.get(), 1, 1, 1));
+    if (s.texel_readback_pipeline)
+      s.texel_readback_pipeline->setName("sasrt texel readback");
+    else
+      RGPU_WARN("[sasrt] texel readback pipeline creation failed: the copy engine reads the 1x1 resolves back (as before)");
+  }
 }
 
 } // namespace
@@ -404,6 +482,10 @@ namespace detail {
 
 std::unique_ptr<plume::RenderDescriptorSet> CreateStreamConvertSet(VideoState &s) {
   return StreamConvertSetBuilder().create(s.device.get());
+}
+
+std::unique_ptr<plume::RenderDescriptorSet> CreateFetchCopySet(VideoState &s) {
+  return FetchCopySetBuilder().create(s.device.get());
 }
 
 std::unique_ptr<plume::RenderDescriptorSet> CreateTargetReadbackSet(VideoState &s) {
@@ -926,8 +1008,12 @@ bool Video::CreateHostDevice() {
   }
 
   // One image beyond the frames in flight, so acquiring never waits on scanout.
-  plume::RenderSwapChainDesc swap_desc(render_window, kSwapChainFormat, kFramesInFlight + 1, false,
-                                       kFramesInFlight);
+  // sa2-nx (2026-10-20, sa2_renut_double_buffer): two images, so a finished frame is shown at the next refresh instead
+  // of queueing behind one already waiting for it; a frame that misses a refresh then waits a whole one.
+  static const bool double_buffer = REXCVAR_GET(pacman_renut_double_buffer);
+  const uint32_t images = double_buffer ? 2u : kFramesInFlight + 1;
+  plume::RenderSwapChainDesc swap_desc(render_window, kSwapChainFormat, images, false, kFramesInFlight);
+  RGPU_INFO("Swapchain: {} images{}", images, double_buffer ? " (pacman_renut_double_buffer)" : "");
   s.swap_chain = s.queue->createSwapChain(swap_desc);
   // plume's Vulkan swapchain is created lazily by resize().
   if (s.swap_chain && IsVulkan())
@@ -953,6 +1039,7 @@ bool Video::CreateHostDevice() {
   }
   BuildRectangleListShader(s);
   BuildStreamConvertPipeline(s);
+  BuildFetchCopyPipeline(s);  // sasrt-nx (2026-11-08)
   BuildTargetReadbackPipeline(s);
   // Optional: without it, scaled resolve destinations keep one level.
   s.texture_mip_ps =

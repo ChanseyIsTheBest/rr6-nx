@@ -18,8 +18,21 @@
 #include <zstd.h>
 
 #include "renut_engine/gpu/banjo_renut_tuning.h"
+#include "renut_engine/gpu/ultimate.h"
+#include "renut_engine/gpu/sasrt_gpu_round.h"  // sasrt-nx (2026-11-08)
 #include "renut_engine/gpu/guest/command_buffers.h"  // banjo-nx (2026-10-28): ReleaseSpareBuffersNow
 #include "renut_engine/gpu/shaders/shader_cache.h"  // banjo-nx (2026-10-22): the installed package's shader table
+
+// sasrt-nx (2026-11-08, the GPU round after the move to the ultimate base): defined on every platform so the tomls read
+// the same; only the deko3d back end counts.
+REXCVAR_DEFINE_BOOL(sasrt_deko3d_diag_trace, false, "SASRT/Diagnostics",
+                    "deko3d renderer, a measurement (the second GPU round of 2026-11-08): every 600th frame's command "
+                    "stream logged as tokens ([deko3d trace] lines: barriers with their causes, draws, dispatches, target "
+                    "binds, clears, depth decompressions, copies), to find work that changes nothing");
+REXCVAR_DEFINE_BOOL(sasrt_deko3d_diag_barriers, false, "SASRT/Diagnostics",
+                    "deko3d renderer, a measurement: the barriers emitted counted by what they wait for and why (the "
+                    "layouts and stages of every call merged into them); the 10 s deko3d line then lists the commonest "
+                    "causes since the start");
 
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>
@@ -454,7 +467,6 @@ void InstallShaderCache() {
   options.clearWait = Deko3DClearWaitOn();
   options.fullBarriers = Deko3DFullBarriersOn();
   options.colorCompression = Deko3DColorCompressionOn();  // rr6-nx (2026-11-04): console test 10
-  options.userClipEnable = Deko3DUserClipEnable();  // rr6-nx (2026-11-05)
   options.restartIndexMode = unsigned(std::max(0, Deko3DRestartIndexMode()));  // console tests 16 and 17
   options.vsOutputs = Deko3DVsOutputsOn();
   options.uamFlags = Deko3DUamFlags();
@@ -467,7 +479,12 @@ void InstallShaderCache() {
   options.backgroundCompileShare = Deko3DBackgroundCompileShare();  // 2026-10-23
   options.compileWaitBoost = Deko3DCompileWaitBoostOn();  // 2026-10-23
   options.asyncCacheReads = Deko3DAsyncCacheReadsOn();     // 2026-10-23
+  options.userClipEnable = Deko3DUserClipEnable();  // renut-ultimate, from rr6-nx (2026-11-05)
+  options.depthResolve = Deko3DDepthResolveOn();  // sasrt-nx (2026-10-21)
+  options.depthResolveLazy = Deko3DDepthResolveLazyOn();  // renut-ultimate (2026-11-08)
+  options.diagBarriers = REXCVAR_GET(sasrt_deko3d_diag_barriers);  // sasrt-nx (2026-11-08)
   plume::Deko3DSetOptions(options);
+  sasrt::gpu_round::ApplyPlume();  // sasrt-nx (2026-11-08): the GPU round's items in plume (preciseDepthResolve)
   // banjo-nx (2026-10-28, the console's OOM): a block that finds no room in the heap gets the spare command buffers'.
   plume::Deko3DSetMemoryPressureCallback(+[] { ::renut::gpu::ReleaseSpareBuffersNow(); });
   plume::Deko3DSetGpuRegion(Deko3DGpuRegionOn());  // banjo-nx (2026-10-28, h10)
@@ -533,10 +550,70 @@ void InstallShaderCache() {
       });
 }
 
+// sasrt-nx (2026-11-08, sasrt_deko3d_diag_trace): one frame's command stream every 600 frames.
+void TraceFrameBoundary() {
+  static const bool on = REXCVAR_GET(sasrt_deko3d_diag_trace);
+  if (!on)
+    return;
+  static uint64_t frame = 0;
+  ++frame;
+  if (plume::g_deko3dTrace) {
+    plume::g_deko3dTrace = false;
+    const std::string text = plume::Deko3DTraceTake();
+    REXLOG_INFO("[deko3d trace] frame {} ({} characters; B barrier P/F/X + causes r read c copy C colour d depth o other "
+                "b buffer k compute m merged + i texture cache, D draw, X dispatch, T colour:depth bind, Cc/Cd clear, Z "
+                "depth decompression, K copy engine, I descriptor invalidation, E list end):",
+                frame - 1, text.size());
+    for (size_t at = 0; at < text.size(); at += 3000)
+      REXLOG_INFO("[deko3d trace] {}", text.substr(at, 3000));
+  } else if (frame % 600 == 0) {
+    plume::Deko3DTraceTake();  // (empty)
+    plume::g_deko3dTrace = true;
+  }
+}
+
+// sasrt-nx (2026-11-08, sasrt_deko3d_diag_barriers): the commonest barrier causes so far.
+std::string BarrierCauses() {
+  if (!REXCVAR_GET(sasrt_deko3d_diag_barriers))
+    return {};
+  const plume::Deko3DStats &st = plume::GetDeko3DStats();
+  std::vector<std::pair<uint64_t, uint32_t>> all;
+  for (uint32_t m = 0; m < 3; ++m)
+    for (uint32_t w = 0; w < 256; ++w)
+      if (const uint64_t n = st.barrierWhy[m][w].load(std::memory_order_relaxed))
+        all.emplace_back(n, (m << 8) | w);
+  std::sort(all.rbegin(), all.rend());
+  static const char *const kModes[3] = {"primitives", "fragments", "full"};
+  static const char *const kWhy[8] = {"read", "copy", "colour", "depth", "other", "buffer", "compute", "merged"};
+  std::string text = "; barrier causes (sasrt_deko3d_diag_barriers):";
+  for (size_t i = 0; i < all.size() && i < 16; ++i) {
+    text += fmt::format(" {} {}", all[i].first, kModes[all[i].second >> 8]);
+    const uint32_t w = all[i].second & 255;
+    if (!w)
+      text += " (none)";
+    for (uint32_t b = 0; b < 8; ++b)
+      if ((w >> b) & 1)
+        text += fmt::format("{}{}", (w & ((1u << b) - 1)) ? "+" : " ", kWhy[b]);
+    text += ',';
+  }
+  // sasrt-nx (2026-11-08, the second GPU round's census).
+  auto n = [](const std::atomic<uint64_t> &c) { return c.load(std::memory_order_relaxed); };
+  text += fmt::format(" census: {} descriptor invalidations, {} code invalidations, {} framebuffer binds ({} depth "
+                      "target changes), {} lists, {} dispatches, {} clears",
+                      n(st.diagDescInvalidates), n(st.diagCodeInvalidates), n(st.diagFramebufferBinds),
+                      n(st.diagDepthChanges), n(st.diagListEnds), n(st.diagDispatches), n(st.diagClears));
+  return text;
+}
+
+std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles);
+
 std::string Report() {
   const plume::Deko3DStats &st = plume::GetDeko3DStats();
-  const uint64_t compiles = st.shaderCompiles;
-  return fmt::format("deko3d: {} draws ({} through the address window), {} pipeline binds ({} state binds), bound "
+  return ReportBody(st, st.shaderCompiles) + BarrierCauses();
+}
+
+std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles) {
+  std::string r = fmt::format("deko3d: {} draws ({} through the address window), {} pipeline binds ({} state binds), bound "
                      "textures {} read, {} skipped (A/B 39); uam {} compiles (avg {:.0f} ms, {} failed; "
                      "{} stages given the generic variant meanwhile, {} compiled and {} read from the cache in the background, {} "
                      "swapped in; blocking: {} a draw "
@@ -558,6 +635,12 @@ std::string Report() {
                      st.barriersImageInvalidate.load(), st.copyBuffer.load(), st.copyUpload.load(), st.copyReadback.load(),
                      st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load(), st.msaaPipelines.load(),
                      st.msaaAlphaToCoverage.load(), st.msaaPositioned.load(), st.stripRestartDraws.load());
+  // renut-ultimate (2026-11-08): the depth decompresses (sasrt_deko3d_depth_resolve, ultimate_deko3d_depth_resolve_lazy).
+  if (Deko3DDepthResolveOn())
+    r += fmt::format("; depth decompresses (sasrt_deko3d_depth_resolve): {} where the target was bound, {} left for "
+                     "later, {} done later for a read", st.depthResolvesBound.load(), st.depthResolvesDeferred.load(),
+                     st.depthResolvesLater.load());
+  return r;
 }
 
 #else

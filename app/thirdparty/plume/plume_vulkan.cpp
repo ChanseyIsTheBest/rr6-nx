@@ -595,6 +595,8 @@ namespace plume {
             return VK_CULL_MODE_FRONT_BIT;
         case RenderCullMode::BACK:
             return VK_CULL_MODE_BACK_BIT;
+        case RenderCullMode::FRONT_AND_BACK:  // kameo-nx (2026-11-04)
+            return VK_CULL_MODE_FRONT_AND_BACK;
         default:
             assert(false && "Unknown cull mode.");
             return VK_CULL_MODE_FLAG_BITS_MAX_ENUM;
