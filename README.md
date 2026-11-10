@@ -1,3 +1,5 @@
+<p align=center><img src="tools/switch/icon/rr6_icon.jpg" alt="Ridge Racer 6" width="256" height="256"></p>
+
 <h1 align=center>Ridge Racer 6: Nintendo Switch port</h1>
 
 A port of the Xbox 360 game **Ridge Racer 6** (Namco, 2005) to the Nintendo Switch, with a PC build as the step on the way.
@@ -48,4 +50,5 @@ open.
 
 `THIRD_PARTY_NOTICES.md` has the full list and each project's license. GPL-3.0 where the sources are (`LICENSE`).
 
-Ridge Racer is a trademark of its owner. This project is not affiliated with or endorsed by them.
+Ridge Racer is a trademark of Bandai Namco Entertainment; the icon artwork is © Bandai Namco Entertainment. This project
+is not affiliated with or endorsed by Bandai Namco or Nintendo.
