@@ -55,6 +55,9 @@ namespace {
 // process's, as before), and the preferred one among them, for the threads created from then on.
 std::atomic<uint32_t> g_guest_core_mask{0};
 std::atomic<int32_t> g_guest_core_preferred{-1};
+// bejeweled3-nx (2026-10-22, RexSetGuestThreadCoresAtStart): the core the guest main thread pins itself to when it
+// starts (-1: none).
+std::atomic<int32_t> g_guest_main_core{-1};
 }  // namespace
 #endif
 
@@ -494,6 +497,12 @@ X_STATUS XThread::Create() {
       const uint32_t mask = g_guest_core_mask.load(std::memory_order_acquire);
       if (mask)
         RexSwitchSetCurrentThreadMask(g_guest_core_preferred.load(std::memory_order_relaxed), mask);
+    }
+    // bejeweled3-nx (2026-10-22): the guest main thread takes its own core, set by itself as it starts (no thread is
+    // moved while it runs: RexSetGuestThreadCoreLayout's way of moving them hung Peggle and Banjo on the console).
+    if (guest_thread_ && main_thread_) {
+      const int32_t core = g_guest_main_core.load(std::memory_order_acquire);
+      if (core >= 0) RexSwitchSetCurrentThreadMask(core, uint64_t(1) << core);
     }
 #endif
     runtime::ThreadState::Bind(thread_state_.get());
@@ -1532,6 +1541,23 @@ void XHostThread::Execute() {
 }
 
 }  // namespace rex::system
+
+// bejeweled3-nx (2026-10-22; port 55, from feedingfrenzy2-nx's SDK): the same layout as RexSetGuestThreadCoreLayout
+// below, for the guest threads started from now on, each thread setting its own cores as it starts (XThread's thread
+// body above). Called before the module is launched, it moves no running thread: RexSetGuestThreadCoreLayout re-masked
+// the running guest threads under the object table's lock and hung Peggle's first frames on the console (and Banjo's
+// first Swap in Ryujinx: banjo_renut_core_layout is off for it). A no-op elsewhere.
+extern "C" void RexSetGuestThreadCoresAtStart(int main_core, uint32_t others_mask, int others_preferred) {
+#if REX_PLATFORM_SWITCH
+  g_guest_core_preferred.store(others_preferred, std::memory_order_relaxed);
+  g_guest_core_mask.store(others_mask, std::memory_order_release);
+  g_guest_main_core.store(main_core, std::memory_order_release);
+#else
+  (void)main_core;
+  (void)others_mask;
+  (void)others_preferred;
+#endif
+}
 
 // banjo-nx (2026-10-20, from sa2-nx): the Switch's core layout for a game whose main thread does the game's work and its drawing (N&B and SA2
 // with Renut's renderer: banjo_renut_core_layout). The guest main thread is pinned to 'main_core', every other guest

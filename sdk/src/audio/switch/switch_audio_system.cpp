@@ -69,6 +69,10 @@ constexpr u64 kWaitTimeoutNs = 100'000'000;
 constexpr u64 kPumpIntervalNs = 1'000'000'000ull * SwitchAudioDriver::kChannelSamples / 48000;
 constexpr size_t kTargetQueuedFrames = 6;
 constexpr size_t kMinQueuedFrames = 2;
+// mk9-nx (2026-10-21; port 56): pump ticks with the queue above its target before the oldest frame is dropped to make
+// room (~0.34 s). Without it, an audout that stops releasing buffers (seen in Ryujinx) stops the game's audio engine
+// altogether, and a game that waits for a voice to drain waits forever (mk9-nx's main-menu freeze).
+constexpr uint32_t kStalledTicksBeforeDrop = 64;
 
 }  // namespace
 
@@ -143,6 +147,16 @@ size_t SwitchAudioDriver::QueuedFrames() {
   return frames_queued_.size();
 }
 
+bool SwitchAudioDriver::DropOldestFrame() {
+  std::lock_guard<std::mutex> guard(frames_mutex_);
+  if (frames_queued_.empty()) {
+    return false;
+  }
+  frames_unused_.push(frames_queued_.front());
+  frames_queued_.pop();
+  return true;
+}
+
 void SwitchAudioDriver::RequestFrame() {
   // The semaphore has a maximum: if the game does not serve the requests, the excess ones are lost.
   semaphore_->Release(1, nullptr);
@@ -155,6 +169,8 @@ struct SwitchAudioSystem::Output {
   bool thread_created = false;
   std::atomic<bool> running{false};
   bool pump = false;  // audio_switch_pump, read when audio is opened
+  uint32_t stalled_ticks = 0;   // port 56 (mk9-nx): PumpTick ticks with the queue above frames_in_queue
+  uint64_t dropped_frames = 0;  // port 56 (mk9-nx): frames dropped because audout stopped consuming
   size_t frames_in_queue = kTargetQueuedFrames;  // audio_switch_frames_in_queue, read when audio is opened
   bool audout_initialized = false;
   bool audout_started = false;
@@ -358,6 +374,14 @@ void SwitchAudioSystem::PumpTick() {
     const size_t queued = driver->QueuedFrames();
     if (queued <= output_->frames_in_queue) {
       driver->RequestFrame();
+      output_->stalled_ticks = 0;
+    } else if (++output_->stalled_ticks >= kStalledTicksBeforeDrop && driver->DropOldestFrame()) {
+      // port 56 (mk9-nx): audout is not consuming; keep the game's audio clock running (see kStalledTicksBeforeDrop).
+      driver->RequestFrame();
+      if (output_->dropped_frames++ == 0) {
+        REXLOG_WARN("SwitchAudioSystem: audout stopped consuming frames; dropping the oldest to keep the game's "
+                    "audio running");
+      }
     }
     if (queued < kMinQueuedFrames) {
       driver->RequestFrame();  // the queue has emptied: one more to catch up

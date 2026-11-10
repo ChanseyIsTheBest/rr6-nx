@@ -478,6 +478,7 @@ void InstallShaderCache() {
   options.compilePriority = Deko3DCompilePriority();
   options.backgroundCompileShare = Deko3DBackgroundCompileShare();  // 2026-10-23
   options.compileWaitBoost = Deko3DCompileWaitBoostOn();  // 2026-10-23
+  options.fastFirstCompile = Deko3DFastFirstCompileOn();  // port 56 (mk9-nx)
   options.asyncCacheReads = Deko3DAsyncCacheReadsOn();     // 2026-10-23
   options.userClipEnable = Deko3DUserClipEnable();  // renut-ultimate, from rr6-nx (2026-11-05)
   options.depthResolve = Deko3DDepthResolveOn();  // sasrt-nx (2026-10-21)
@@ -621,7 +622,7 @@ std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles) {
                      "background rests {:.1f} s), "
                      "DKSH cache {} hits, {} added; memory: images {} MB, buffers {} MB, code {} KB, commands {} KB; "
                      "barriers: {} primitives, {} fragments, {} full ({} invalidating textures); copy and 2D engines: {} "
-                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits; multisampled pipelines {} ({} with alpha to coverage, {} given the standard sample positions: banjo_deko3d_msaa_positions); indexed strips drawn with primitive restart {} (banjo_deko3d_strip_restart)",
+                     "buffer copies, {} texture uploads, {} readbacks, {} image copies, {} resolves, {} blits; multisampled pipelines {} ({} with alpha to coverage, {} given the standard sample positions: banjo_deko3d_msaa_positions); indexed strips drawn with primitive restart {} (banjo_deko3d_strip_restart); compiles a draw waited for made in one pass {} (banjo_deko3d_fast_first_compile)",
                      st.draws.load(), st.windowDraws.load(), st.pipelineBinds.load(), st.stateBinds.load(),
                      st.textureRuns.load(), st.textureSkips.load(), compiles,
                      compiles ? double(st.shaderCompileNs.load()) / 1e6 / double(compiles) : 0.0,
@@ -634,7 +635,8 @@ std::string ReportBody(const plume::Deko3DStats &st, uint64_t compiles) {
                      st.barriersPrimitives.load(), st.barriersFragments.load(), st.barriersFull.load(),
                      st.barriersImageInvalidate.load(), st.copyBuffer.load(), st.copyUpload.load(), st.copyReadback.load(),
                      st.copyImage.load(), st.copyResolve.load(), st.copyBlit.load(), st.msaaPipelines.load(),
-                     st.msaaAlphaToCoverage.load(), st.msaaPositioned.load(), st.stripRestartDraws.load());
+                     st.msaaAlphaToCoverage.load(), st.msaaPositioned.load(), st.stripRestartDraws.load(),
+                     st.fastCompiles.load());
   // renut-ultimate (2026-11-08): the depth decompresses (sasrt_deko3d_depth_resolve, ultimate_deko3d_depth_resolve_lazy).
   if (Deko3DDepthResolveOn())
     r += fmt::format("; depth decompresses (sasrt_deko3d_depth_resolve): {} where the target was bound, {} left for "

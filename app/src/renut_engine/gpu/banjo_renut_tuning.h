@@ -152,7 +152,18 @@ void CountTextureCards(uint64_t bytes, int what);
 // banjo_renut_shared_dedupe: a draw whose SharedConstants equal the last upload's reuses it (render/draw.cpp), counted
 // for the [renut] report.
 [[gnu::always_inline]] inline bool SharedDedupeOn() { return Latch().shared_dedupe && g_ab_off.load(std::memory_order_relaxed) != 3; }
-void CountSharedConstants(bool reused);
+// sasrt-nx (2026-11-09, the render-thread round, RT4; port 54): inline (a load and a store, as Bump in
+// banjo_renut_tuning.cpp), not a call into another file at every draw (~0.7 % of Sonic Transformed's render thread without
+// LTO). The same counts.
+extern std::atomic<uint64_t> g_shared_reused, g_shared_uploaded;
+// sasrt-nx (2026-11-09; port 54): the draws so far (CountSharedConstants: every draw, the render thread only), for the
+// A/B halves' draws a frame and render-thread microseconds a draw.
+extern uint64_t g_ab_draws;
+[[gnu::always_inline]] inline void CountSharedConstants(bool reused) {
+  std::atomic<uint64_t> &c = reused ? g_shared_reused : g_shared_uploaded;
+  c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  ++g_ab_draws;
+}
 
 // banjo_renut_exact_streams (package 27): Renut keeps converted copies of vertex streams and index ranges whose guest
 // bytes held for a few flushes, and checks them on a background thread once every 4 frames, so a range the game
@@ -344,6 +355,7 @@ int Deko3DCompileCore();
 int Deko3DCompilePriority();
 int Deko3DBackgroundCompileShare();  // banjo_deko3d_background_compile_share (2026-10-23)
 bool Deko3DCompileWaitBoostOn();  // banjo_deko3d_compile_wait_boost (2026-10-23)
+bool Deko3DFastFirstCompileOn();  // banjo_deko3d_fast_first_compile (port 56, from mk9-nx)
 bool Deko3DAsyncCacheReadsOn();  // banjo_deko3d_async_cache_reads (2026-10-23)
 void CountDrawnResolve();
 void CountSmaa();  // banjo_renut_smaa: a frame done
@@ -410,7 +422,11 @@ void CountColorNotLeft(int why);
 [[gnu::always_inline]] inline bool RingCleanerOn() { return Latch().ring_cleaner; }
 void CountKickSubmit(int what);
 [[gnu::always_inline]] inline bool PushConstantsVerifyOn() { return Latch().push_constants_verify; }
-void CountPushedConstants(uint64_t bytes, int what);
+// sasrt-nx (2026-11-09, RT4; port 54): inline, as CountSharedConstants.
+extern std::atomic<uint64_t> g_pushed[4];
+[[gnu::always_inline]] inline void CountPushedConstants(uint64_t bytes, int what) {
+  g_pushed[what].store(g_pushed[what].load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+}
 // banjo-nx (2026-10-19, render-thread proposal 23): upload ring bytes cleaned at the submits.
 void CountRingPublished(uint64_t bytes);
 void CountHandOver(int what);

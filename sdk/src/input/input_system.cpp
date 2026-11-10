@@ -46,7 +46,12 @@ REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-thro
 // rr6-nx (2026-11-05): only user 0 has a profile (XamUserGetSigninState, xam_user.cpp), so a first press from any other
 // controller made the game ask "No Gamer Profile selected" at launch, intermittently: it depended on which pad pressed
 // first (the handheld is player 1; a second pad, or sys-botbase's virtual one, is player 2).
-REXCVAR_DEFINE_BOOL(input_all_pads_user0, true, "Input",
+// rr6-nx (2026-11-10, the user: Multi Battle asks for a second Xbox 360 controller and none ever answers): off, so a second
+// controller is guest user 1 again, as in the ultimate base (which never had this key). With it on, every pad pressed as
+// user 0 and the game never saw a second player. "No Gamer Profile selected" for a second pad, the reason it was on, is
+// what feedingfrenzy2-nx's guest sign-in now answers (xam_guest_signin, port 55: controllers 2-4 sign in as guests of the
+// profile). The first-press swap (port 56, input_first_press_is_player1) is taken out at the user's request.
+REXCVAR_DEFINE_BOOL(input_all_pads_user0, false, "Input",
                     "Every controller feeds guest user 0, the one with the profile (false: controller N is user N)");
 REXCVAR_DEFINE_STRING(input_script, "", "Input",
                       "Test automation: button presses for user 0 as 'seconds:button,...' counted from the first input "
@@ -60,9 +65,13 @@ REXCVAR_DEFINE_INT32(input_script_sticks, 0, "Input",
                      "input poll, both analog sticks of user 0 wander at random (a new direction every 1.5 s, eased "
                      "between them): the left stick moves the player, the right turns the camera. 0: off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(input_rumble, false, "Input",
-                    "Controller vibration (off by default: controllers only get "
-                    "zero vibration). true = the game's vibration");
+// renut-ultimate (2026-11-10, the user's request): on by default. The Switch driver sends the game's two motors as HD
+// rumble (the heavy one on the low band at 160 Hz, the light one on the high band at 320 Hz) to the handheld Joy-Cons,
+// a Joy-Con pair, a single Joy-Con or a Pro Controller, and only when the value changes (one hid IPC then); the PC's
+// SDL and XInput drivers pass it to the pad. Stopped when the process exits.
+REXCVAR_DEFINE_BOOL(input_rumble, true, "Input",
+                    "Controller vibration: the game's own rumble (on by default). false = controllers only get zero "
+                    "vibration");
 namespace rex::input {
 
 namespace {

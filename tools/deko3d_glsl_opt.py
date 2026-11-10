@@ -1246,6 +1246,83 @@ def pass_plainfetch(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# pass: fetchconv — a fetch's sign, gamma and exponent words as constants of the draw (sasrt-nx, 2026-11-09, the fifth GPU
+# round: sasrt_gpu_fetch_conversion_spec, constants 950-957)
+
+_FC_SIGNS = re.compile(r'^(\s*uint (_\d+) = )(\(g_UboShared\.v\[(2[4-5])u\]\.([xyzw]) >> 16u\) & 15u);$', re.M)
+_FC_GAMMA = re.compile(r'^(\s*uint (_\d+) = )(\(g_UboShared\.v\[(2[4-5])u\]\.([xyzw]) >> 13u\) & 7u);$', re.M)
+_FC_EXP = re.compile(r'^(\s*int (_\d+) = )(int\(g_UboShared\.v\[([0-1])u\]\.([xyzw]) << 6u\) >> 26);$', re.M)
+# sasrt-nx (2026-11-09, sasrt_gpu_fetch_exp_3d_spec): the 3D (v[8 + r / 4]) and cube (v[16 + r / 4]) words' exponent
+_FC_EXP3 = re.compile(r'^(\s*int (_\d+) = )(int\(g_UboShared\.v\[(8|9|16|17)u\]\.([xyzw]) << 6u\) >> 26);$', re.M)
+
+
+def _fc_decl(r):
+    return (f'#ifndef SPIRV_CROSS_CONSTANT_ID_{950 + r}\n#define SPIRV_CROSS_CONSTANT_ID_{950 + r} 0u\n#endif\n'
+            f'const uint g_sasrtConv{r} = SPIRV_CROSS_CONSTANT_ID_{950 + r};\n'
+            f'const bool g_sasrtConvKnown{r} = (g_sasrtConv{r} >> 15u) != 0u;\n')
+
+
+def pass_fetchconv(text):
+    """Renut's fetch code reads fetch constant r's signs (sampler_indices[r] bits 16-19: v[24 + r / 4]), gamma (bits 13-15)
+    and, for a 2D fetch, the exponent adjust (texture_indices[0][r] bits 20-25: v[r / 4]), and applies each to each
+    channel through selects among the conversions: every conversion is computed for every channel where any applies.
+    Constant 950 + r (fetch constant r < 8; render/draw.cpp SasrtSpecWordsOf [12]-[15]): bit 15 set, the draw's three
+    words in bits 0-3, 4-6 and 7-12; each read of them becomes the constant, so the selects fold to the conversions this
+    draw's texture has on the channels that have them, and the block's condition to false where none (as pass plainfetch,
+    which it runs after). Default 0: each read as it was. Same values: the same pixels."""
+    if 'SPIRV_CROSS_CONSTANT_ID_950' in text or '>> 16u) & 15u;' not in text:
+        return text
+    used = set()
+
+    def slot(m, base):
+        return (int(m.group(4)) - base) * 4 + 'xyzw'.index(m.group(5))
+
+    def signs(m):
+        r = slot(m, 24)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? (g_sasrtConv{r} & 15u) : ({m.group(3)});'
+
+    def gamma(m):
+        r = slot(m, 24)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? ((g_sasrtConv{r} >> 4u) & 7u) : ({m.group(3)});'
+
+    def exp(m):
+        r = slot(m, 0)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? (int(g_sasrtConv{r} << 19u) >> 26) : ({m.group(3)});'
+
+    used3 = set()
+
+    def exp3(m):
+        v = int(m.group(4))
+        cube = v >= 16
+        r = (v - (16 if cube else 8)) * 4 + 'xyzw'.index(m.group(5))
+        if r >= 8:
+            return m.group(0)
+        cid = (966 if cube else 958) + r
+        used3.add(cid)
+        return f'{m.group(1)}((g_sasrtExp{cid} >> 7u) != 0u) ? (int(g_sasrtExp{cid} << 26u) >> 26) : ({m.group(3)});'
+
+    text = _FC_SIGNS.sub(signs, text)
+    text = _FC_GAMMA.sub(gamma, text)
+    text = _FC_EXP.sub(exp, text)
+    text = _FC_EXP3.sub(exp3, text)
+    if not used and not used3:
+        return text
+    decl = ''.join(_fc_decl(r) for r in sorted(used))
+    decl += ''.join(f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
+                    f'const uint g_sasrtExp{c} = SPIRV_CROSS_CONSTANT_ID_{c};\n' for c in sorted(used3))
+    return insert_globals(text, decl)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # pass: onex — a draw at 1x (targets and every sampled texture): the texture scale codes and the pixel position's scale
 # fold (sasrt-nx, 2026-11-08, the GPU round: sasrt_gpu_one_x, constant 926 bit 31)
 
@@ -2735,6 +2812,7 @@ PASSES = [
     ('aw4', pass_aw4),
     ('skinonce', pass_skinonce),
     ('plainfetch', pass_plainfetch),  # sasrt-nx (2026-11-08): the GPU round, constant 926
+    ('fetchconv', pass_fetchconv),  # sasrt-nx (2026-11-09): the fifth GPU round, constants 950-957
     ('onex', pass_onex),  # sasrt-nx (2026-11-08): the GPU round, constant 926 bit 31
     ('facesign', pass_facesign),  # sasrt-nx (2026-11-08): the GPU round, constant 928
     ('clipspec', pass_clipspec),  # sasrt-nx (2026-11-08): the second GPU round, constant 929
@@ -2752,7 +2830,7 @@ DEFAULT = ','.join(name for name, _ in PASSES if name not in ('scale1', 'fragsca
 
 
 # The passes for one stage only.
-STAGE_OF = {'plainfetch': 'frag', 'onex': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
+STAGE_OF = {'plainfetch': 'frag', 'fetchconv': 'frag', 'onex': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
             'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
 
 

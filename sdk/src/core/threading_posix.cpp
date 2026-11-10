@@ -14,6 +14,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <signal.h>
 
 #include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -96,6 +97,14 @@ REXCVAR_DEFINE_INT32(thread_alertable_slice_ms, 8, "Threading",
 REXCVAR_DEFINE_INT32(thread_multiwait_safety_ms, 20, "Threading",
                      "With thread_wait_blocking: a parked WaitMultiple re-polls its handles at least this "
                      "often even if nobody poked it (safety net against a state change that did not notify)");
+
+#if defined(__SWITCH__)
+// port 56 (ds3-nx's sdk-patches/0005): see MaybeYield.
+REXCVAR_DEFINE_BOOL(switch_yield_backoff, true, "Kernel",
+                    "Switch: a thread that yields more than 16 times in a row within 20 us each (a polling loop) sleeps "
+                    "100 us per yield from then on, instead of spinning a core (ds3-nx). false: every yield is "
+                    "svcSleepThread(0)");
+#endif
 
 namespace rex::thread {
 
@@ -231,6 +240,33 @@ uint32_t current_thread_system_id() {
 }
 
 void MaybeYield() {
+#if defined(__SWITCH__)
+  /*
+   * ds3-nx (2026-10-23, sdk-patches/0005; port 56, switch_yield_backoff): polling loops sleep instead of spinning.
+   * Horizon's yield (svcSleepThread(0)) returns at once when nothing else waits on that core, and the guest's polling
+   * loops (waits with a zero timeout, KeDelayExecutionThread of 0, NtYieldExecution, contended kernel spinlocks) all
+   * end here: Dead Space 2 made 40,000-100,000 yields a second, a large part of a core of a CPU-bound process. A
+   * thread that yields again within 20 us, more than 16 times in a row, is polling: from then on it sleeps 100 us per
+   * call. A lone yield, or the first few of a short wait, is unchanged.
+   */
+  // Read at every call (a load): a yield before the toml is loaded must not decide it.
+  if (REXCVAR_GET(switch_yield_backoff)) {
+    thread_local std::chrono::steady_clock::time_point previous{};
+    thread_local uint32_t in_a_row = 0;
+    const auto now = std::chrono::steady_clock::now();
+    in_a_row = now - previous < std::chrono::microseconds(20) ? in_a_row + 1 : 0;
+    if (in_a_row > 16) {
+      const timespec rest = {0, 100000};
+      nanosleep(&rest, nullptr);
+      previous = std::chrono::steady_clock::now() - std::chrono::microseconds(1);  // still polling at the next call
+    } else {
+      sched_yield();
+      previous = std::chrono::steady_clock::now();
+    }
+    __sync_synchronize();
+    return;
+  }
+#endif
   sched_yield();
   __sync_synchronize();
 }

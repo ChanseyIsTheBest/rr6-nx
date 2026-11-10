@@ -52,20 +52,30 @@ tools\build_switch.bat
 
 The released NRO, in folders of their own (`BUILD_DIR` and `CMAKE_EXTRA` of `tools/build_switch.bat`):
 
-1. **Instrumented:** `-DBANJO_PGO=generate -DBANJO_SWITCH_LTO=ON`. Play it: it writes `pgo/banjo_pgo_<N>.stream` next to
-   the NRO every 2 minutes, at HOME and at exit.
+1.0.0 was built this way (2026-11-10). Every folder takes `app/out/switch-ult`'s settings (the renut-ultimate shaders:
+`-DBANJO_RENUT_SHADER_DIR`, `-DBANJO_RENUT_SHADER_CACHE_CPP` and `-DBANJO_DEKO3D_GLSL_CPP` from
+`app/out/renut_switch_ult`, `-DRR6_RENUT_HOOKS=ON`) plus `-DRR6_BUILTIN_CONFIG=ON -DBANJO_SWITCH_SDK_OPT=ON` (the SDK's
+runtime and FFmpeg get the PGO and LTO flags too):
+
+1. **Instrumented:** `-DBANJO_PGO=generate` (no LTO needed). Play it: it writes `pgo/banjo_pgo_<N>.stream` next to the
+   NRO every 2 minutes, at HOME and at exit (the whole session each time). 1.0.0's profile: a 400 s Ryujinx session
+   (boot, menus, a race), Ryubing with the ARMeilleure fix in its `BANJO-NX.md` (2026-11-10).
 2. **Merge** on the PC that built it (the streams name its folders): `python tools/pgo_merge.py <folder with the
    streams>` fills `pgo/` (it stops if `pgo/` already has `.gcda` files: move them aside first).
-3. **Optimised:** `-DBANJO_PGO=use -DBANJO_SWITCH_LTO=ON -DBANJO_RENUT_RELEASE_SHADERS=ON`. It carries no game shader and
-   reads `deko3d_glsl.bin` beside itself. `pgo/` in this repository is the released build's profile. A function changed
-   since the instrumented build keeps no profile.
+3. **Optimised:** `-DBANJO_PGO=use -DBANJO_SWITCH_LTO=ON -DBANJO_PGO_DIR=<a copy of pgo/ at a path without spaces>`.
+   `pgo/` in this repository is the released build's profile. A function changed since the instrumented build keeps no
+   profile.
 
-Keep the temporary folder's path free of spaces (GCC's parallel LTO link writes a makefile with it unquoted), and never
-run two of these builds at once: they share the SDK's archives in `sdk/out/switch-arm64`.
+Keep the build folders' and the profile's paths free of spaces (GCC's parallel LTO link writes a makefile with them
+unquoted; 1.0.0 used `C:\rr6pgo\gen`, `C:\rr6pgo\lto` and `C:\rr6pgo\profile`), and never run two of these builds at
+once: they share the SDK's archives in `sdk/out/switch-arm64`. Configure with Visual Studio's CMake by its full path: Git
+Bash's PATH finds devkitPro's MSYS2 cmake, which damaged a cache once.
 
-The NRO reads `renut.toml` next to it (`RR6_BUILTIN_CONFIG` is OFF in this port): `dist/switch/rr6-nx`, made by
-`tools/make_rr6_tomls.py`, has it with `renut_play.toml`, `renut_ab.toml` and `configs/`. The test runs copy one over it
-(`tools/run_ryujinx.ps1 -Toml <file>`).
+With `RR6_BUILTIN_CONFIG=ON` the settings are compiled in: `app/rr6_switch_defaults.toml` (every fixed setting, log_level
+"off") and `app/rr6_switch.toml`, the player's `config.toml`, written next to the NRO when there is none. Keys in
+`config.toml` override the built-in ones. `tools/make_rr6_builtin.py` makes both from a play toml. With it OFF the NRO
+reads `renut.toml` next to it: `dist/switch/rr6-nx`, made by `tools/make_rr6_tomls.py`, has it with `renut_play.toml`
+and `renut_ab.toml`. The test runs copy one over it (`tools/run_ryujinx.ps1 -Toml <file>`).
 
 ## 5. After a change to the code generator
 

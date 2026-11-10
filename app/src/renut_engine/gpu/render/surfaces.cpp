@@ -24,6 +24,8 @@
 #include "renut_engine/gpu/guest/widescreen.h"
 #include "renut_engine/gpu/log.h"
 #include "renut_engine/gpu/backend/video.h"
+#include "renut_engine/perf/frame_stats.h"  // sasrt-nx (2026-11-09, sasrt_dynamic_cpu_aware; port 52)
+#include "renut_engine/gpu/sasrt_gpu_round.h"  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54)
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-21, from sa2-nx 1.0.3.1): Deko3DSetSwapChainSize
 #endif
@@ -184,7 +186,13 @@ void FreeDepthViews(std::vector<DepthImage::View> &views) {
   views.clear();
 }
 
+// sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54): moves when a target is built, retired or leaves the table
+// (DepthRestoreSourceLocked's candidate lists). An epoch of its own: the surface epoch moves with every re-pointed surface
+// and override change.
+uint64_t g_sasrt_table_epoch = 1;
+
 void RetireTarget(HostSurface &surface) {
+  ++g_sasrt_table_epoch;  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54)
   // banjo-nx (2026-10-21, internal resolution): the composite's target goes, and its UI target with it.
   for (UiTarget *u : {&g_ui, &g_ui_depth}) {
     if (&surface == u->scene) {
@@ -428,7 +436,22 @@ void LatchResolutionScaleLocked() {
           const bool docked_mode = m == 1;
           const int32_t low = pick(DynamicHeight(docked_mode, false), docked_mode ? "dynamic docked low" : "dynamic handheld low");
           const int32_t high = pick(DynamicHeight(docked_mode, true), docked_mode ? "dynamic docked high" : "dynamic handheld high");
-          if (low >= high || (low != 720 && high != 720)) {
+          // sasrt-nx (2026-11-09, the user's ranges: handheld 480-720, docked 540-1080; port 52): on deko3d a range need
+          // not have 720 at one end (CodeForHeightLocked gives any height a code); a mode then starts at its step nearest
+          // below 720 (the 720 end where it has one, as before).
+#if defined(PLUME_DEKO3D)
+          const bool needs_720 = false;
+#else
+          const bool needs_720 = true;
+#endif
+          // rr6-nx (2026-11-09, the user's request: dynamic resolution docked only): low = high keeps that mode at its
+          // fixed height (banjo_renut_render_height_*), said as such instead of the warning below.
+          if (low == high) {
+            RGPU_INFO("[renut] dynamic resolution, {} mode: off (low = high = {}): the fixed {} lines",
+                      docked_mode ? "docked" : "handheld", low, docked_mode ? dh : hh);
+            continue;
+          }
+          if (low >= high || (needs_720 && low != 720 && high != 720)) {
             RGPU_WARN("[renut] dynamic resolution, {} mode: {} to {} lines is not a range with 720 at one end: the "
                       "fixed height", docked_mode ? "docked" : "handheld", low, high);
             continue;
@@ -485,7 +508,12 @@ void LatchResolutionScaleLocked() {
     const bool mode_changed = g_dynamic_docked.exchange(docked) != docked;
     if ((mode_changed || !dynamic_started) && count) {
       dynamic_started = true;
-      g_dynamic_step = g_dynamic_steps[mode][0] == 720 ? 0 : count - 1;  // the 720 end
+      // the 720 end, or (sasrt-nx, 2026-11-09; port 52) the step nearest below 720 for a range without it
+      int start = 0;
+      for (int i = 0; i < count; ++i)
+        if (g_dynamic_steps[mode][i] <= 720)
+          start = i;
+      g_dynamic_step = start;
     }
     ++g_latches;
     const int32_t chosen = count ? g_dynamic_steps[mode][std::clamp(g_dynamic_step.load(), 0, count - 1)]
@@ -540,6 +568,32 @@ void LatchResolutionScaleLocked() {
 // down 5 s at least after a change. night_gpu5 (the user's request, banjo_renut_dynamic_steps): with heights between the
 // ends, down goes to the highest step predicted to fit the budget (the lowest if none) and up to the highest predicted
 // under 85 % of it, in one change each.
+// sasrt-nx (2026-11-09, the user: "we were quite CPU limited"; their handheld race: render thread 33-50 ms a frame,
+// GPU 28-30 ms at 612 lines, 37 at 720; port 52): dynamic resolution gives up lines only where the GPU is what holds the
+// frame.
+REXCVAR_DEFINE_BOOL(sasrt_dynamic_cpu_aware, true, "Nuts&Bolts/Graphics",
+                    "banjo_renut_dynamic_resolution's budget (banjo_renut_dynamic_gpu_ms) raised to the CPU side's time a "
+                    "frame when that is longer (the render thread's busy time or the game thread's, the larger: moving "
+                    "averages): a frame the CPU holds is not made faster by fewer pixels, so the height steps down only "
+                    "when the GPU's time is above both, and up while the next step is predicted under 85 % of the larger "
+                    "(from sasrt-nx). Off: the budget alone, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-09, the user: "raise it if there's 1.0 ms of room for 1 second"; rr6-nx 2026-11-09, the user: "go
+// up if held for a second copy sasrt"): the next step is taken when its predicted time is at least this far under the
+// budget for banjo_renut_dynamic_up_s in a row (in place of "under 85 % of the budget"). 0: the 85 % rule. The
+// prediction (the time now times the pixel ratio) is an overestimate, so a step taken by it fits.
+REXCVAR_DEFINE_DOUBLE(sasrt_dynamic_up_room_ms, 1.0, "SASRT/Graphics",
+                      "banjo_renut_dynamic_resolution: step up when the next height's predicted GPU time a frame has "
+                      "been this many ms under the budget for banjo_renut_dynamic_up_s (0: under 85 % of the budget)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-09, the user: "more steps, especially in docked"): a step up went to the highest step predicted with
+// room, often two at once, onto a height neither settable code held: its targets made again each time. One step at a
+// time, the moves stay between the heights the codes hold.
+REXCVAR_DEFINE_BOOL(sasrt_dynamic_up_one_step, true, "SASRT/Graphics",
+                    "banjo_renut_dynamic_resolution: a step up goes one step (when the next has the room), not to the "
+                    "highest step with room: fewer changes of a settable code's height (each makes its targets again)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 void NoteGpuFrameForDynamicResolution(double gpu_ms) {
   const int mode = g_dynamic_docked ? 1 : 0;
   const int count = g_dynamic_count[mode];
@@ -563,12 +617,25 @@ void NoteGpuFrameForDynamicResolution(double gpu_ms) {
   const int step = std::clamp(g_dynamic_step.load(), 0, count - 1);
   const int32_t *heights = g_dynamic_steps[mode];
   const double current = double(heights[step]);
-  const double budget = DynamicGpuMs();
+  double budget = DynamicGpuMs();
+  // sasrt-nx (2026-11-09, sasrt_dynamic_cpu_aware; port 52): the CPU side's time a frame, when longer, as the budget.
+  static const bool cpu_aware = REXCVAR_GET(sasrt_dynamic_cpu_aware);
+  if (cpu_aware) {
+    static double cpu_average = 0.0;
+    const frame_stats::Snapshot fs = frame_stats::Get();
+    const double cpu_side = std::max(fs.render_thread_known ? fs.render_thread_ms : 0.0, fs.cpu_ms);
+    if (cpu_side > 0.0)
+      cpu_average = cpu_average > 0.0 ? cpu_average * 0.94 + cpu_side * 0.06 : cpu_side;
+    budget = std::max(budget, cpu_average);
+  }
   // The time a step is predicted to take: the average times the pixel ratio.
   const auto predicted = [&](int s) {
     const double r = double(heights[s]) / current;
     return average * r * r;
   };
+  // sasrt-nx (2026-11-09, sasrt_dynamic_up_room_ms): the predicted time a step up must stay at or under.
+  static const double up_room = REXCVAR_GET(sasrt_dynamic_up_room_ms);
+  const double up_limit = up_room > 0.0 ? budget - up_room : budget * 0.85;
   int next = step;
   const int32_t test = DynamicTestSeconds();
   if (test > 0) {
@@ -588,11 +655,12 @@ void NoteGpuFrameForDynamicResolution(double gpu_ms) {
       }
     }
   } else if (step + 1 < count) {
-    if (predicted(step + 1) >= budget * 0.85)
+    if (predicted(step + 1) > up_limit)
       fits_since = now;
     if (since >= up_seconds && std::chrono::duration<double>(now - fits_since).count() >= up_seconds) {
       next = step + 1;
-      while (next + 1 < count && predicted(next + 1) < budget * 0.85)
+      static const bool one_step = REXCVAR_GET(sasrt_dynamic_up_one_step);  // sasrt-nx (2026-11-09)
+      while (!one_step && next + 1 < count && predicted(next + 1) <= up_limit)
         ++next;
     }
   }
@@ -604,8 +672,8 @@ void NoteGpuFrameForDynamicResolution(double gpu_ms) {
   last_change = now;
   fits_since = now;
   RGPU_INFO("[renut] dynamic resolution: 3D at {} lines (the GPU's time a frame {:.1f} ms on average at {}; "
-            "banjo_renut_dynamic_gpu_ms {})",
-            heights[next], was, heights[step], DynamicGpuMs());
+            "banjo_renut_dynamic_gpu_ms {}, the budget {:.1f} ms with the CPU side's time: sasrt_dynamic_cpu_aware)",
+            heights[next], was, heights[step], DynamicGpuMs(), budget);
 }
 
 void SetTilingExtentLocked(uint32_t width, uint32_t height) {
@@ -623,6 +691,7 @@ void UnuseTarget(uint64_t key) {
     return;
   g_target_users.erase(users);
   ++g_surface_epoch;
+  ++g_sasrt_table_epoch;  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54)
   if (auto it = g_targets.find(key); it != g_targets.end()) {
     RetireTarget(*it->second);
     g_targets.erase(it);
@@ -900,6 +969,7 @@ HostSurface *GetHostSurfaceSlow(u32 surface_va, const d3d::SurfaceDesc *desc) {
     slot->guest_va = surface_va;
   }
   ++g_surface_epoch;
+  ++g_sasrt_table_epoch;  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54): a target built
   if (!BuildTarget(*slot, *desc, min_width, min_height, scale))
     return nullptr;
   // No defined content yet; D3D12 wants a new target discarded (or cleared)
@@ -926,6 +996,7 @@ HostSurface *GrowDepthToColourLocked(u32 surface_va, HostSurface *depth, uint32_
             depth->width, depth->height, min_width, min_height);
   RetireTarget(*depth);
   ++g_surface_epoch;
+  ++g_sasrt_table_epoch;  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54)
   if (!BuildTarget(*depth, *desc, min_width, min_height, depth->scale))
     return nullptr;
   if (plume::RenderCommandList *cmd = Video::CommandListLocked()) {
@@ -940,6 +1011,43 @@ uint64_t g_surface_write_seq = 0;  // sasrt-nx (2026-10-20)
 HostSurface *DepthRestoreSourceLocked(const HostSurface *depth) {
   if (!depth || !depth->depth || depth->samples != plume::RenderSampleCount::COUNT_1)
     return nullptr;
+  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; the render-thread round; port 54): the depth target's own candidates
+  // (the two scans below, found again when the table's epoch moved), then the same test of their write sequences. The
+  // fast path asks for nearly every draw with depth bound (~430 calls a frame in Sonic Transformed's race).
+  if (sasrt::gpu_round::On(sasrt::gpu_round::kRtRestoreCandidates)) {
+    HostSurface *d = const_cast<HostSurface *>(depth);
+    if (d->sasrt_candidates_epoch != g_sasrt_table_epoch) [[unlikely]] {
+      d->sasrt_restore_candidates.clear();
+      d->sasrt_candidates_epoch = g_sasrt_table_epoch;
+      uint64_t own_key = 0;
+      bool own_found = false;
+      for (const auto &[key, target] : g_targets)
+        if (target.get() == depth) {
+          own_key = key;
+          own_found = true;
+          break;
+        }
+      constexpr uint64_t kBaseAndPitchMask = 0x3FFFFFFull;  // TargetKey: the EDRAM base in bits 0-11, the pitch in 12-25
+      if (own_found)
+        for (const auto &[key, target] : g_targets) {
+          HostSurface *c = target.get();
+          if (c && !c->depth && (key & kBaseAndPitchMask) == (own_key & kBaseAndPitchMask) &&
+              c->samples == plume::RenderSampleCount::COUNT_1 && c->scale == depth->scale &&
+              (c->format == plume::RenderFormat::R8G8B8A8_UNORM || c->format == plume::RenderFormat::B8G8R8A8_UNORM))
+            d->sasrt_restore_candidates.push_back(c);
+        }
+      sasrt::gpu_round::Count(sasrt::gpu_round::kRtRestoreCandidates, 1, 1);
+    }
+    HostSurface *best = nullptr;
+    for (HostSurface *c : d->sasrt_restore_candidates) {
+      if (!c->texture || c->write_seq <= depth->write_seq || c->write_seq <= depth->restored_from_seq)
+        continue;
+      if (!best || c->write_seq > best->write_seq)
+        best = c;
+    }
+    sasrt::gpu_round::Count(sasrt::gpu_round::kRtRestoreCandidates);
+    return best;
+  }
   uint64_t own = 0;
   bool found = false;
   for (const auto &[key, target] : g_targets) {

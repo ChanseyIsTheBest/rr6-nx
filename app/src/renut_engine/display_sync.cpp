@@ -20,6 +20,7 @@
 #include "me/me_platform_compat.h"  // RexSwitchPinCurrentThreadToCore and the priority helper
 #include "renut_engine/gpu/backend/video.h"
 #include "renut_engine/gpu/banjo_renut_tuning.h"  // StartLongLivedThread
+#include "renut_engine/perf/frame_stats.h"  // port 53: WaitForFrameStart's wait is a game-thread wait
 
 #if REX_PLATFORM_SWITCH
 #include <switch.h>  // viGetDisplayVsyncEvent
@@ -478,9 +479,16 @@ void WaitForFrameStart() {
   constexpr uint64_t kResyncTicks = 3;
   if (g_ticks.load(std::memory_order_relaxed) - seen >= kResyncTicks)
     seen = g_ticks.load(std::memory_order_relaxed);
+  const auto waiting = std::chrono::steady_clock::now();
   g_tick_cv.wait_for(lock, std::chrono::milliseconds(50),
                      [] { return g_ticks.load(std::memory_order_relaxed) != seen; });
   seen = g_ticks.load(std::memory_order_relaxed);
+  lock.unlock();
+  // renut-ultimate port 53 (2026-11-09; sasrt-nx found the same in its own pacing): the wait for the frame's refresh is
+  // the game thread waiting, not its work: frame_stats' CPU time (the FPS overlay's, and sasrt_dynamic_cpu_aware's
+  // budget, port 52) leaves it out. It had counted it, so a paced game's CPU side was its whole frame.
+  renut::frame_stats::OnGameThreadWait(
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waiting).count());
 }
 
 bool QueueDrainOn() {

@@ -1601,11 +1601,9 @@ REX_EXPORT_STUB(__imp__KeIpiGenericCall);
 REX_EXPORT_STUB(__imp__KeQueryBackgroundProcessors);
 REX_EXPORT_STUB(__imp__KeQueryInterruptTime);
 REX_EXPORT_STUB(__imp__KeRegisterDriverNotification);
-REX_EXPORT_STUB(__imp__KeRestoreFloatingPointState);
 REX_EXPORT_STUB(__imp__KeRestoreVectorUnitState);
 REX_EXPORT_STUB(__imp__KeRetireDpcList);
 REX_EXPORT_STUB(__imp__KeRundownQueue);
-REX_EXPORT_STUB(__imp__KeSaveFloatingPointState);
 REX_EXPORT_STUB(__imp__KeSaveVectorUnitState);
 REX_EXPORT_STUB(__imp__KeSetBackgroundProcessors);
 REX_EXPORT_STUB(__imp__KeSetPriorityClassThread);
@@ -1621,3 +1619,20 @@ REX_HOOK_RAW(__imp__KfRaiseIrql) {
   rex::kernel::xboxkrnl::KfRaiseIrql_raw(ctx, base);
 }
 static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KfRaiseIrql("__imp__KfRaiseIrql", &__imp__KfRaiseIrql);
+
+// mk9-nx (2026-10-20; port 56): Mortal Kombat calls these ~40 times a second each (one game thread around its
+// floating-point work). The recompiled code keeps each guest thread's floating-point state in its own host context, so
+// there is nothing to save or restore: both succeed (STATUS_SUCCESS in r3; the logging stub left the caller's buffer
+// pointer there) without a log line per call.
+REX_HOOK_RAW(__imp__KeSaveFloatingPointState) {
+  (void)base;
+  ctx.r3.u64 = 0;
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KeSaveFloatingPointState("__imp__KeSaveFloatingPointState",
+                                                                                    &__imp__KeSaveFloatingPointState);
+REX_HOOK_RAW(__imp__KeRestoreFloatingPointState) {
+  (void)base;
+  ctx.r3.u64 = 0;
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KeRestoreFloatingPointState(
+    "__imp__KeRestoreFloatingPointState", &__imp__KeRestoreFloatingPointState);

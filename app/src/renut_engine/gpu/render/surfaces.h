@@ -62,6 +62,10 @@ struct HostSurface {
   // the colour surface's write it was last restored from (RestoreDepthFromColorLocked).
   uint64_t write_seq = 0;
   uint64_t restored_from_seq = 0;
+  // sasrt-nx (2026-11-09, sasrt_rt_restore_candidates; port 54): a depth target's colour targets over its EDRAM base and
+  // pitch that could be its restore's source, as of the target table's epoch 'sasrt_candidates_epoch' (0: not found yet).
+  std::vector<HostSurface *> sasrt_restore_candidates;
+  uint64_t sasrt_candidates_epoch = 0;
   // halo3-nx (2026-11-03): when it was last bound to draw to, and what of another format's target over the same EDRAM view it
   // holds (SyncColorViewLocked).
   uint64_t bound_serial = 0;

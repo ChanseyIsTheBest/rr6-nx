@@ -45,3 +45,5 @@ pgo/*
 *.stream
 # ...except the PGO profile of the released NRO (counts of which code ran, no game code or data)
 !pgo/*.gcda
+# 2026-11-10: the NRO icon is the game's cover art (the build uses it when it is there, as kameo-nx does)
+tools/switch/icon/

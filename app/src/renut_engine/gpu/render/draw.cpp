@@ -7102,6 +7102,11 @@ UploadAllocation UploadVertexFetchData(const GuestDevice &device, const DrawCall
   // chunk the allocation goes to are read there (before, their room was taken anyway, and cleaned at the submit). If
   // the allocation lands in another chunk, none is (that chunk has none of them): then room for all.
   bool reused[32] = {};
+  // mk9-nx (2026-10-21; port 56): the queued copy's offset, taken when it is found. g_fetch_copies is direct-mapped: a
+  // copy this draw makes below for another buffer whose key lands on the same entry overwrites it, and reading the entry
+  // again then gave the reused stream the other buffer's offset (two streams of a draw with one slot, the other's bytes
+  // decoded as positions: mk9-nx's huge flat triangles on the Switch, where host pointers collide differently).
+  u32 reused_offset[32] = {};
   u32 needed = total;
   const plume::RenderBuffer *chunk = shared ? Video::UploadsLocked().CurrentBuffer() : nullptr;
   if (shared && chunk) {
@@ -7110,7 +7115,9 @@ UploadAllocation UploadVertexFetchData(const GuestDevice &device, const DrawCall
       const Copy &c = copies[i];
       if (c.size && !c.exported && !(c.index == up_fetch_index && call.up_vertices)) {
         // banjo-nx (2026-10-23, batch 6): or kept from an earlier flush of the frame (FetchCopyHeld).
-        reused[i] = FetchCopyHeld(FetchCopyFor(c.src, c.size), c.src, c.size, chunk);
+        FetchCopy &known = FetchCopyFor(c.src, c.size);
+        reused[i] = FetchCopyHeld(known, c.src, c.size, chunk);
+        reused_offset[i] = known.offset;
       }
       if (!reused[i])
         needed += (c.size + 15u) & ~15u;
@@ -7132,7 +7139,7 @@ UploadAllocation UploadVertexFetchData(const GuestDevice &device, const DrawCall
     u32 at = u32(chunk_offset) + offset;
     if (reused[i]) {
       // Queued in this chunk by an earlier draw: read there, no room here.
-      sc.vertex_fetch_slots[c.index] = FetchCopyFor(c.src, c.size).offset | c.endian;
+      sc.vertex_fetch_slots[c.index] = reused_offset[i] | c.endian;  // port 56: as found (see reused_offset)
       continue;
     }
     if (c.size && !c.exported) {
@@ -7385,8 +7392,9 @@ inline u32 SasrtClipBit(const SharedConstants &sc) {
 //       vertex shader's constant buffer holds it (its literal's if it defines one; byte-swapped and NaN-flushed as
 //       CopyAndSwapGroup uploads it) is [9], [10] or [11] (941-943), by its order among the set bits (three at most)
 struct SasrtSpecWords {
-  u32 w[12];
+  u32 w[20];  // sasrt-nx (2026-11-09, the fifth round): [12]-[19] constants 950-973
 };
+static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
 // sasrt-nx (2026-11-08, sasrt_gpu_export_format_spec): [8]-[11] (cold: export shaders only).
 [[gnu::noinline]] void SasrtExportFormatWords(SasrtSpecWords &s, const ShaderCacheEntry &vs, const FloatConstants &vsc) {
   u32 n = 0;
@@ -7476,6 +7484,25 @@ struct SasrtSpecWords {
         s.w[2] = 0x80000000u | linear;
         s.w[3] = 0x80000000u | wrap;
       }
+    }
+  }
+  // sasrt-nx (2026-11-09, sasrt_gpu_fetch_conversion_spec; the fifth round): [12]-[15]. The sampler word packs Xenos'
+  // gamma at bits 16-19 and the biased signs at 13-15 below the sampler slot (bit 20), as sasrt-nx's tree does
+  // (checked by rr6-nx, 2026-11-09).
+  if (ps_entry && On(sasrt::gpu_round::kFetchConvSpec)) {
+    for (u32 bits = ps_entry->textureFetchMask & 0xFFu; bits; bits &= bits - 1) {
+      const u32 r = u32(std::countr_zero(bits));
+      const u32 sampler = sc.sampler_indices[r], word = sc.texture_indices[0][r];
+      const u32 field = 0x8000u | ((sampler >> 16) & 15u) | ((sampler >> 13) & 7u) << 4 | ((word >> 20) & 63u) << 7;
+      s.w[12 + r / 2] |= field << (16 * (r & 1));
+    }
+  }
+  // sasrt-nx (2026-11-09, sasrt_gpu_fetch_exp_3d_spec): [16]-[19].
+  if (ps_entry && On(sasrt::gpu_round::kFetchExpSpec)) {
+    for (u32 bits = ps_entry->textureFetchMask & 0xFFu; bits; bits &= bits - 1) {
+      const u32 r = u32(std::countr_zero(bits));
+      s.w[16 + r / 4] |= (0x80u | ((sc.texture_indices[1][r] >> 20) & 63u)) << (8 * (r & 3));
+      s.w[18 + r / 4] |= (0x80u | ((sc.texture_indices[2][r] >> 20) & 63u)) << (8 * (r & 3));
     }
   }
   return s;
@@ -8133,9 +8160,17 @@ bool EnsureBuffer(std::unique_ptr<plume::RenderBuffer> &buffer, uint64_t &capaci
 plume::RenderBuffer *MemExportBufferSlowLocked(VideoState &s, uint64_t size) {
   auto &buffer = s.memexport_buffer[s.frame];
   const bool had = buffer && s.memexport_capacity[s.frame] >= size;
+  // sasrt-nx (2026-11-09, sasrt_rt_cached_export_seeds; port 54): CPU-cached on deko3d (the key as latched: a buffer keeps
+  // its memory type, so the A/B half does not decide it). The windows start on 256-byte boundaries (PrepareMemExportLocked),
+  // so a cache line belongs to one window, and the CPU never reads the buffer.
+  if (!sasrt::gpu_round::g_latched_ready.load(std::memory_order_acquire)) [[unlikely]]
+    sasrt::gpu_round::LatchNow();
+  const bool cached = IsDeko3D() && sasrt::gpu_round::g_latched.on[sasrt::gpu_round::kRtCachedExportSeeds];
   if (!EnsureBuffer(buffer, s.memexport_capacity[s.frame], size,
-                    plume::RenderBufferDesc::DefaultBuffer(
-                        0, StorageBufferFlags() | AddressableBufferFlags()),
+                    cached ? plume::RenderBufferDesc::UploadBuffer(0, StorageBufferFlags() | AddressableBufferFlags() |
+                                                                          plume::RenderBufferFlag::HOST_CACHED)
+                           : plume::RenderBufferDesc::DefaultBuffer(
+                                 0, StorageBufferFlags() | AddressableBufferFlags()),
                     "renut memexport buffer")) {
     return nullptr;
   }
@@ -8353,8 +8388,12 @@ bool SasrtSeedExportsCpuLocked(plume::RenderBuffer *buffer, const MemExportStrea
     const MemExportStream &f = fresh[indices[k]];
     std::memcpy(window + fresh_offsets[indices[k]], guests[k], f.size);
     g_seed_bytes += f.size;  // banjo-nx (2026-10-26): the 10 s line's
+    // sasrt-nx (2026-11-09, sasrt_rt_cached_export_seeds; port 54): the seed's own lines cleaned when the buffer is
+    // CPU-cached (plume's unmap cleans the written range then; on uncached memory it does nothing, as the whole-buffer
+    // unmap here before did).
+    const plume::RenderRange written(fresh_offsets[indices[k]], uint64_t(fresh_offsets[indices[k]]) + f.size);
+    buffer->unmap(0, &written);
   }
-  buffer->unmap();
   sasrt::gpu_round::Count(sasrt::gpu_round::kSeedCpu, count);
   return true;
 #else
@@ -13029,6 +13068,13 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   struct PipelineReuse {
     uint64_t seq = 0, lookups = 0, epoch = 0;
     plume::RenderPipeline *pipeline = nullptr;
+    // rr6-nx (2026-11-10, the base's port 58; SASRT's octopus): the words the key takes from each draw after the base key
+    // was reused (sasrt_words, fetch_pad, the clip bit in reserved, point_sprite). The pipeline was handed back whenever
+    // the base key was reused, so with sasrt_gpu_fetch_endian_spec a skinning draw whose bone fetch had another byte
+    // order than the draw before ran the draw before's specialised pipeline: SASRT's Ocean View octopus came apart under
+    // a heavy GPU. Now the reuse needs them the same too. Console check: SASRT's run octo_fix38, right in all ten shots.
+    uint32_t sasrt_words[20] = {};
+    uint32_t fetch_pad = 0, reserved = 0, point_sprite = 0;
   };
   static PipelineReuse preuse;
   plume::RenderPipeline *pipeline = nullptr;
@@ -13037,8 +13083,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // reusing the generic pipeline while a lookup would give the specialised one (emulator run 120: one
   // banjo_renut_chain_reuse_verify difference in 7 minutes; the same pixels, the generic pipeline reads the bools).
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
+  const bool same_draw_words = preuse.fetch_pad == key.fetch_pad && preuse.reserved == key.reserved &&
+                               preuse.point_sprite == key.point_sprite &&
+                               std::memcmp(preuse.sasrt_words, key.sasrt_words, sizeof(key.sasrt_words)) == 0;
   if (reused && preuse.pipeline && preuse.seq + 1 == hint.seq && preuse.lookups == PipelineLookupsLocked() &&
-      preuse.epoch == prebuild_epoch) {
+      preuse.epoch == prebuild_epoch && same_draw_words) {
     pipeline = preuse.pipeline;
     CountReuse(4, true);  // banjo-nx (2026-10-23)
     if (reuse_verify) {
@@ -13055,8 +13104,16 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       CountReuse(4, false);  // banjo-nx (2026-10-23)
     pipeline = GetPipelineLocked(key, {host_vs, host_ps, &declaration->layout});
   }
-  if (reuse_on)
-    preuse = {hint.seq, PipelineLookupsLocked(), prebuild_epoch, pipeline};
+  if (reuse_on) {
+    preuse.seq = hint.seq;
+    preuse.lookups = PipelineLookupsLocked();
+    preuse.epoch = prebuild_epoch;
+    preuse.pipeline = pipeline;
+    std::memcpy(preuse.sasrt_words, key.sasrt_words, sizeof(key.sasrt_words));  // rr6-nx (2026-11-10, port 58)
+    preuse.fetch_pad = key.fetch_pad;
+    preuse.reserved = key.reserved;
+    preuse.point_sprite = key.point_sprite;
+  }
   // banjo-nx (2026-10-23, render-thread round): the pipeline's lines setPipeline and the refresh read, fetched while
   // the targets are bound.
   __builtin_prefetch(pipeline);
@@ -13278,7 +13335,9 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // it (render/smaa.cpp); then (internal resolution) the image scaled to the display's resolution for the HUD
   // (render/ui_scale.cpp). The passes leave their own targets, pipeline, layout and viewport bound.
   // banjo-nx (2026-10-23, batch 6): the record's answer (DrawSummaryOf), not the list's scan at every draw.
-  if (ps && targets.color_count == 1 && !export_count && DrawSummaryOf(*ps).composite) {
+  // sasrt-nx (2026-11-08, port 52): a composite with more targets too (Sonic Transformed's 2414CA963766CE4E writes two):
+  // SMAA and the HUD scale on its first.
+  if (ps && targets.color_count >= 1 && !export_count && DrawSummaryOf(*ps).composite) {
     // sasrt-nx (2026-11-08, sasrt_gpu_handover_with_smaa): a texture still sharing the target's image gets its resolve
     // drawn before SMAA writes the image (the composite draw settled them already; this keeps SMAA safe on its own).
     if (targets.colors[0]->handed && SmaaAfterPs(ps->hash))
@@ -14667,7 +14726,14 @@ bool RestoreDepthFromColorLocked(HostSurface *depth, HostSurface *color) {
   const uint32_t h = depth->scale.Size(std::min(depth->height, color->height));
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(w), float(h), 0.0f, 1.0f));
   cmd->setScissors(plume::RenderRect(0, 0, int32_t(w), int32_t(h)));
-  cmd->clearDepthStencil(false, true, 0.0f, 0, nullptr, 0);
+  {  // sasrt-nx (2026-11-09, sasrt_gpu_depth_restore_whole_clear, item 50; port 52): depth with the stencil when every
+     // pixel's depth is drawn (a stencil-only clear keeps the depth, so it cannot be a fast clear)
+    const bool whole = sasrt::gpu_round::On(sasrt::gpu_round::kRestoreClear) && w >= depth->scale.Size(depth->width) &&
+                       h >= depth->scale.Size(depth->height);
+    cmd->clearDepthStencil(whole, true, 0.0f, 0, nullptr, 0);
+    if (whole)
+      sasrt::gpu_round::Count(sasrt::gpu_round::kRestoreClear);
+  }
   cmd->setGraphicsPipelineLayout(s.utility_layout.get());
   cmd->setPipeline(pipeline);
   cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);

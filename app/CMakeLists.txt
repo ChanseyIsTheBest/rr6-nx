@@ -84,6 +84,7 @@ set(RENUT_SOURCES
     src/rr6_game_fixes.cpp
     # katamari-nx (2026-10-31): DLC packages in the "dlc" folder next to the NRO installed at start (reNut upstream's).
     src/renut_engine/dlc_install.cpp
+    src/renut_engine/rr6_language.cpp
 	src/renut_engine/FPS.cpp
     # CPU/GPU profiler ported from UnleashedRecomp-NX (see src/profiler/profiler.h).
     src/profiler/profiler.cpp
@@ -604,10 +605,12 @@ if(REXGLUE_PLATFORM_SWITCH)
     # (tools/switch-cpu-profile.py). It must come from the same build as the NRO that was profiled.
     target_link_options(renut PRIVATE "LINKER:-Map=${CMAKE_BINARY_DIR}/renut.map")
     # katamari-nx (2026-11-02, the user: only these settings in the toml, the rest hardcoded; sa2-nx's design): the fixed
-    # settings compiled in (src/renut_app.h BuiltInConfig), and the player's rr6.toml, written next to the NRO when
+    # settings compiled in (src/renut_app.h BuiltInConfig), and the player's config.toml, written next to the NRO when
     # it is missing (DefaultConfigFile). RR6_BUILTIN_CONFIG=OFF: test builds that read a full renut.toml.
-    # rr6-nx: OFF, this port's packages are test builds with renut.toml, renut_play.toml and renut_ab.toml.
-    option(RR6_BUILTIN_CONFIG "Switch: the fixed settings compiled in, the player's options in rr6.toml" OFF)
+    # rr6-nx (2026-11-10, the user: "what I want in config.toml, hardcode everything else"): ON for the player's build
+    # (app/out/switch-ult, -DRR6_BUILTIN_CONFIG=ON through tools/build_switch.bat's CMAKE_EXTRA); app/rr6_switch.toml is
+    # config.toml, app/rr6_switch_defaults.toml the rest (tools/make_rr6_builtin.py writes it from the play toml).
+    option(RR6_BUILTIN_CONFIG "Switch: the fixed settings compiled in, the player's options in config.toml" OFF)
     if(RR6_BUILTIN_CONFIG)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rr6_switch_defaults.toml" RR6_BUILTIN_TEXT)
         file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rr6_switch.toml" RR6_PLAYER_TEXT)
@@ -624,12 +627,12 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(EXISTS "${RENUT_ICON}")
         set(RENUT_ICON_ARG ICON "${RENUT_ICON}")
     endif()
-    # katamari-nx (2026-11-02, the user's request): author ChanseyIsTheBest, the user's icon (the cover art).
-    # 2026-11-05: version 1.0.1, the game's memory and the NRO's code on 2 MB blocks, and the boot's cvars.
+    # rr6-nx (2026-11-09, the user's request): author ChanseyIsTheBest, version 1.0.0, and the user's icon: Ridge Racer
+    # 6's cover art at 256x256 (tools/switch/icon/rr6_icon.jpg, a baseline JPEG as hbmenu reads it).
     rexglue_switch_add_nro(renut
         NAME "Ridge Racer 6"
         AUTHOR "ChanseyIsTheBest"
-        VERSION "0.1.0"
+        VERSION "1.0.0"
         ${RENUT_ICON_ARG})
 endif()
 

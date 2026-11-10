@@ -37,6 +37,12 @@ input_xbox_layout = true
 # controller, change the order, split a Joy-Con pair into two). Single Joy-Cons are held sideways, one per player: the
 # four buttons under the right thumb are the face buttons, SL / SR are ZL / ZR, minus or plus is Start.
 input_joycon_sideways = true
+# Rumble (2026-11-10, your request): the game's own vibration on every controller that has it (HD rumble on the
+# Joy-Cons and the Pro Controller). false = no vibration.
+input_rumble = true
+# Players (2026-11-10, your request: Multi Battle): each controller is its own player, in the order they connect; the
+# others sign in as guests of the profile (xam_guest_signin). true = every controller is player 1 (no second player).
+input_all_pads_user0 = false
 # Per-player button maps: the [input_p1] and [input_p2] sections at the end of this file.
 # The game's on-screen keyboard (naming things) opens the Switch's own keyboard (2026-10-21, your request): type with
 # the touch screen or the controller, + or OK accepts, Cancel keeps the old name. false = the old ImGui text box.
@@ -464,7 +470,7 @@ banjo_renut_portrait_msaa_samples = 2
 # (rounded to a multiple of 9: 648, 702, 756, 810, 864, 900, ...; read at start). configs/banjo_renut_native_720p.toml
 # is the game's own 720p.
 banjo_renut_render_height_handheld = 720
-banjo_renut_render_height_docked = 720
+banjo_renut_render_height_docked = 1080
 banjo_renut_display_height_docked = 1080
 # The upscale: 0 = bilinear (your choice, every config: one sample a pixel, the cheapest), 1 = bicubic Catmull-Rom
 # (sharper, five samples a pixel).
@@ -540,24 +546,25 @@ frame_cap = "Off"
 # 2026-10-28 (the user's request): the uam shader compile thread alone goes to core 3 (banjo_system_core_uam), at
 # the lowest priority (the audio threads there go first) and held to 10 % of the core by its rests
 # (banjo_deko3d_background_compile_share); the pipeline prebuild workers stay on cores 0-2.
-# Dynamic resolution (2026-10-28, the user's request): the 3D image between 540 and 720 lines handheld and between
-# 720 and 1080 docked (900 before night_gpu5; at 1080 the 3D is at the display's own size, the HUD drawn into it
-# without the upscale): the low height while the GPU's time a frame is above 34.5 ms (banjo_renut_dynamic_gpu_ms,
-# the user's choice; 40 before), the high one again once it has fitted for banjo_renut_dynamic_up_s (1 s, quick;
-# down at least 5 s after a change; the log says each change). Docking or undocking starts at 720. The HUD stays at
-# the display's resolution.
-# banjo_renut_dynamic_resolution = false (renut_dynamic_off.toml) keeps 648 / 864 as before.
-# night_gpu5 (the user's request): banjo_renut_dynamic_steps = 4 heights between the ends: handheld 540 576 612 648
-# 684 720, docked 720 792 864 936 1008 1080. Down goes to the highest that is predicted to fit, up to the highest
-# that fits with room (the log names each change). 0 = only the two ends.
-banjo_renut_dynamic_resolution = false
-banjo_renut_dynamic_handheld_low = 540
+# Dynamic resolution (2026-11-09, the user's requests: docked only, 900p to 1080p, 5 steps; switch at 15.5 ms and go
+# up once it has held for a second, as sasrt-nx does): docked, the 3D image at 900 936 1008 1044 1080 lines (the steps
+# are multiples of 36), by the GPU's time a frame (a moving average) against banjo_renut_dynamic_gpu_ms, 15.5 ms of the
+# 16.7 a 60 fps frame has (with sasrt_dynamic_cpu_aware, the CPU side's time when that is longer). Down: above it, to
+# the highest step predicted to fit (at least 5 s after a change). Up: one step (sasrt_dynamic_up_one_step) once the
+# next step's predicted time has been sasrt_dynamic_up_room_ms (1.0 ms) under the budget for banjo_renut_dynamic_up_s
+# (1 s) in a row. The log says each change. Docking starts at 900. At 1080 the 3D is at the display's own size, the HUD
+# drawn into it without the upscale; below it the HUD stays at the display's resolution. Handheld: off (low = high =
+# 720), the fixed banjo_renut_render_height_handheld.
+banjo_renut_dynamic_resolution = true
+banjo_renut_dynamic_handheld_low = 720
 banjo_renut_dynamic_handheld_high = 720
-banjo_renut_dynamic_docked_low = 720
+banjo_renut_dynamic_docked_low = 900
 banjo_renut_dynamic_docked_high = 1080
-banjo_renut_dynamic_steps = 4
-banjo_renut_dynamic_gpu_ms = 34.5
+banjo_renut_dynamic_steps = 3
+banjo_renut_dynamic_gpu_ms = 15.5
 banjo_renut_dynamic_up_s = 1.0
+sasrt_dynamic_up_room_ms = 1.0
+sasrt_dynamic_up_one_step = true
 banjo_system_core = 1
 banjo_system_core_compiles = false
 banjo_system_core_uam = true
@@ -588,6 +595,12 @@ rr6_user_clip_plane = true  # false: the car reflects the wrong scene and no sky
 rr6_strip_markers = true  # false: torn meshes and wedges on the Switch (a strip restart marker drawn as a vertex), A/B 77
 rr6_fetch_over_pointer = true  # false: no bloom, lit surfaces a quarter too dark, A/B 75
 rr6_diag_paint_frames = 0
+
+# rr6-nx (2026-11-09, the user's request: SMAA working): SMAA runs right after the race's final composite, pixel
+# shader 0D40BDEF428B4D2D (the last of its three full-screen 1280x720 passes, before the HUD; console GPU-counter
+# trace m13_ctr). N&B's 981A6A58F2ABFA42 never occurs here, so SMAA had run 0 frames. The composite also starts the
+# internal resolution's gameplay frames: docked stays at 1080 as before (render = display), handheld is 720 either way.
+banjo_renut_smaa_after_ps = "0D40BDEF428B4D2D"
 
 [input_p1]
 a = ""

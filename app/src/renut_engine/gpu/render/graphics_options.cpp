@@ -28,7 +28,8 @@ REXCVAR_DEFINE_BOOL(banjo_renut_dynamic_resolution, false, "Nuts&Bolts/Graphics"
                     "image between banjo_renut_dynamic_handheld_low and _high in handheld mode, _docked_low and _high "
                     "docked (in place of banjo_renut_render_height_handheld / _docked): the low height while the GPU's "
                     "time a frame is above banjo_renut_dynamic_gpu_ms, the high one when it would fit again (at least "
-                    "5 s between changes). One end of each range is 720 lines (the 1x scale)")
+                    "5 s between changes). One end of each range is 720 lines (the 1x scale) on the PC's back ends; "
+                    "on deko3d any range, started at its step nearest below 720 (sasrt-nx, port 52)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(banjo_renut_dynamic_handheld_low, 540, "Nuts&Bolts/Graphics",
                      "banjo_renut_dynamic_resolution: the handheld range's low height (a multiple of 9)")

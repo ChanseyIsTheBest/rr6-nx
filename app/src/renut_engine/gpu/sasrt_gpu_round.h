@@ -63,7 +63,16 @@ namespace sasrt::gpu_round {
   X(kHandoverSmaa, sasrt_gpu_handover_with_smaa, "banjo's colour hand-over kept on with SMAA (SMAA's target settled first)") \
   X(kExportWindowUbo, sasrt_gpu_export_window_ubo, "memexport windows read from the constant buffer, not a local array (constant 944)") \
   X(kExportListTopology, sasrt_gpu_export_list_topology, "export draws with the rasterizer off drawn as triangle or line lists, not points") \
-  X(kExportNoPointGs, sasrt_gpu_export_no_point_gs, "export point lists with the rasterizer off drawn without the point-sprite geometry shader")
+  X(kExportNoPointGs, sasrt_gpu_export_no_point_gs, "export point lists with the rasterizer off drawn without the point-sprite geometry shader") \
+  /* the fifth round (2026-11-09, docs/gpu-round-1108.md "Round 5"): A/B 139 and up */                                     \
+  X(kRestoreDirect, sasrt_gpu_depth_restore_direct, "SASRT only: the EDRAM depth restore in one pass") \
+  X(kRestoreClear, sasrt_gpu_depth_restore_whole_clear, "the depth restore clears depth and stencil together when it draws the whole target") \
+  X(kFetchConvSpec, sasrt_gpu_fetch_conversion_spec, "a non-plain fetch's sign, gamma and exponent words as constants of the draw (950-957)") \
+  X(kFetchExpSpec, sasrt_gpu_fetch_exp_3d_spec, "a 3D or cube fetch's exponent adjust as a constant of the draw (958-973)") \
+  X(kConvertVertexPass, sasrt_gpu_convert_vertex_pass, "exported stream conversions drawn as a vertex pass (flat: off)") \
+  /* sasrt-nx's render-thread round (2026-11-09; port 54): A/B 144 and up, and 200 for the group (kAbRtGroup) */          \
+  X(kRtRestoreCandidates, sasrt_rt_restore_candidates, "render thread: a depth target's EDRAM-restore source found among its own few candidate colour targets, kept until a target is built or retired, not by two scans of every target a draw") \
+  X(kRtCachedExportSeeds, sasrt_rt_cached_export_seeds, "render thread: the memexport windows' buffer CPU-cached, so the CPU writes the seeds at cache speed and cleans their lines (chosen at start: no in-run A/B)")
 
 enum Item : int {
 #define SASRT_GPU_ROUND_ENUM(name, key, what) name,
@@ -73,6 +82,10 @@ enum Item : int {
 };
 
 constexpr int kAbBase = 90;
+// sasrt-nx (2026-11-09, the render-thread round; port 54): A/B target 200 switches every render-thread item (from
+// kRtRestoreCandidates on) at once: the round's total, best with banjo_renut_ab_s 30 (4 s halves cannot resolve 1-3 ms
+// of render thread).
+constexpr int kAbRtGroup = 200;
 static_assert(kCount <= 64, "plume's Deko3DStats::sasrtRound has 64 counts");
 static_assert(kAbBase + kCount <= 256, "banjo_renut_ab_targets takes targets up to 255");
 
@@ -87,7 +100,8 @@ void LatchNow();
 [[gnu::always_inline]] inline bool On(Item i) {
   if (!g_latched_ready.load(std::memory_order_acquire)) [[unlikely]]
     LatchNow();
-  return g_latched.on[i] && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != kAbBase + i;
+  const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  return g_latched.on[i] && ab != kAbBase + i && !(ab == kAbRtGroup && i >= kRtRestoreCandidates);
 }
 
 // Counts for the 10 s line: a load and a store (no read-modify-write on the A57; a count lost between two threads is a

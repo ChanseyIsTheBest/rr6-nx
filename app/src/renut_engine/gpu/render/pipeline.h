@@ -108,7 +108,7 @@ struct PipelineKey {
   //   [7] the pixel shader's 910 (32 registers at most) when bit 0 (sasrt_gpu_gpr_cap) or bit 1 (sasrt_gpu_gpr_cap_filter)
   //   [8] the vertex shader's 940: bit r set: float constant r (r < 31) is an export address register whose z word (as
   //       the shader's constant buffer has it) is [9], [10] or [11] (941-943) by its order among the set bits
-  uint32_t sasrt_words[12];
+  uint32_t sasrt_words[20];  // sasrt-nx: [12]-[19] the fifth round (2026-11-09, constants 950-973)
 };
 
 // banjo-nx (banjo_gpu_blend_skip): for the key's other fields, 1 when its one target keeps its value for a source alpha

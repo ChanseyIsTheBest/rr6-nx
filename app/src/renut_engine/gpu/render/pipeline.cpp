@@ -384,7 +384,7 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
 
   // banjo-nx (banjo_gpu_bool_spec): the key's bools as the shaders' specialization constants (banjo_bool_spec.h). One
   // list for every stage: a stage takes the ids it declares (vertex and pixel shader bools have distinct ones).
-  plume::RenderSpecConstant spec[300];  // 256 bools, 900-914, 920-930 and sasrt-nx's 932-944
+  plume::RenderSpecConstant spec[340];  // 256 bools, 900-914, 920-930 and sasrt-nx's 932-945, 950-973
   uint32_t spec_count = 0;
   for (uint32_t w = 0; w < 8; ++w) {
     for (uint32_t m = key.bool_mask[w]; m; m &= m - 1) {
@@ -472,6 +472,20 @@ std::unique_ptr<plume::RenderPipeline> Build(const PipelineKey &key, const Pipel
     for (uint32_t k = 1; k < 4; ++k) {
       if (key.sasrt_words[k])
         spec[spec_count++] = plume::RenderSpecConstant(933 + k, key.sasrt_words[k]);
+    }
+    // sasrt-nx (2026-11-09, sasrt_gpu_fetch_conversion_spec; the fifth round): fetch constant r's conversion words (16 bits
+    // each, bit 15 set when known) as constant 950 + r.
+    for (uint32_t r = 0; r < 8; ++r) {
+      const uint32_t field = (key.sasrt_words[12 + r / 2] >> (16 * (r & 1))) & 0xFFFFu;
+      if (field & 0x8000u)
+        spec[spec_count++] = plume::RenderSpecConstant(950 + r, field);
+      // sasrt-nx (2026-11-09, sasrt_gpu_fetch_exp_3d_spec): the 3D and cube words' exponent (8 bits each, bit 7 known)
+      const uint32_t e3 = (key.sasrt_words[16 + r / 4] >> (8 * (r & 3))) & 0xFFu;
+      const uint32_t ec = (key.sasrt_words[18 + r / 4] >> (8 * (r & 3))) & 0xFFu;
+      if (e3 & 0x80u)
+        spec[spec_count++] = plume::RenderSpecConstant(958 + r, e3);
+      if (ec & 0x80u)
+        spec[spec_count++] = plume::RenderSpecConstant(966 + r, ec);
     }
   }
   // banjo-nx (banjo_deko3d_early_hoist, 2026-10-18): the main body's first texture region ahead of the early alpha test
@@ -582,11 +596,13 @@ constexpr char kListMagic[4] = {'R', 'N', 'P', 'L'};
 // LoadList).
 // vivapinata-nx: 5, fetch_types and tess_kind (banjo_gpu_fetch_spec; a version 4 list is kept the same way).
 // sasrt-nx (2026-11-08): 6, sasrt_words (the third GPU round; a version 5 list is kept the same way).
-constexpr u32 kListVersion = 6;
+// sasrt-nx (2026-11-09): 7, sasrt_words[12]-[19] (the fifth round; a version 6 list is kept the same way).
+constexpr u32 kListVersion = 7;
 constexpr u32 kListV3KeySize = 184;  // the key up to output_trim
 constexpr u32 kListV4KeySize = 192;  // the key up to reserved
 constexpr u32 kListV5KeySize = 216;  // the key up to fetch_pad
-static_assert(sizeof(PipelineKey) == kListV5KeySize + 48, "the version 6 key: version 5's and twelve words");
+constexpr u32 kListV6KeySize = 264;  // twelve sasrt_words
+static_assert(sizeof(PipelineKey) == kListV5KeySize + 80, "the version 7 key: version 5's and twenty words");
 
 struct ListHeader {
   char magic[4];
@@ -761,6 +777,10 @@ bool DecodeRecord(const char *data, size_t size, Job &job) {
       w[7] &= ~2u;
     if (!sasrt::gpu_round::On(sasrt::gpu_round::kExportFmtSpec))
       w[8] = w[9] = w[10] = w[11] = 0;
+    if (!sasrt::gpu_round::On(sasrt::gpu_round::kFetchConvSpec))  // sasrt-nx (2026-11-09, the fifth round)
+      w[12] = w[13] = w[14] = w[15] = 0;
+    if (!sasrt::gpu_round::On(sasrt::gpu_round::kFetchExpSpec))
+      w[16] = w[17] = w[18] = w[19] = 0;
   }
   if (!banjo::renut_gpu::BoolSpecOn()) {
     std::memset(job.key.bool_mask, 0, sizeof(job.key.bool_mask));
@@ -928,8 +948,9 @@ std::vector<std::unique_ptr<Job>> LoadList() {
                            : header.version == 3 && header.key_size == kListV3KeySize ? kListV3KeySize
                            : header.version == 4 && header.key_size == kListV4KeySize ? kListV4KeySize
                            : header.version == 5 && header.key_size == kListV5KeySize ? kListV5KeySize
+                           : header.version == 6 && header.key_size == kListV6KeySize ? kListV6KeySize
                                                                                      : 0;
-  const bool v3 = old_key_size != 0;  // an older list to convert (version 3, 4 or 5)
+  const bool v3 = old_key_size != 0;  // an older list to convert (version 3, 4, 5 or 6)
   if (!valid && !v3) {
     std::error_code ec;
     std::filesystem::remove(path, ec);

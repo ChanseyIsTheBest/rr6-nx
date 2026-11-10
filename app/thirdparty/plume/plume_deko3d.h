@@ -59,6 +59,7 @@ namespace plume {
         // waited, those a background thread (prebuild) waited for; boost mode during them (compileWaitBoost): times
         // and time; the uam thread's rests between background compiles (backgroundCompileShare).
         std::atomic<uint64_t> compileWaits{0}, compileWaitNs{0}, compileBackgroundWaits{0}, backgroundRestNs{0};
+        std::atomic<uint64_t> fastCompiles{0};  // port 56: the drawWaits compiles made with fastFirstCompile
         std::atomic<uint64_t> compileBoosts{0}, compileBoostNs{0};
         std::atomic<uint64_t> imageBytes{0}, bufferBytes{0}, codeBytes{0}, commandBytes{0};
         std::atomic<uint64_t> descriptorWrites{0}, pipelineBinds{0}, stateBinds{0}, draws{0};
@@ -1055,6 +1056,11 @@ namespace plume {
         // banjo-nx (2026-10-23, the user's request): boost mode (CPU 1785 MHz, GPU 76.8 MHz) while a drawing thread
         // waits for a compile, normal again as soon as it is done. Background compiles never boost.
         bool compileWaitBoost = false;
+        // mk9-nx (2026-10-24; port 56): a compile a drawing thread waits for (a generic variant missing from the DKSH
+        // cache) is a single back-end pass (uam::compileFast: no CompileBest alternatives, about a quarter of a pixel
+        // shader's full compile), stored in the cache as it is. Background compiles stay full. mk9-nx: the fight intros'
+        // compile waits ~2.5x shorter, GPU 10.00 against 10.05 ms a frame (no difference to see).
+        bool fastFirstCompile = false;
         // banjo-nx (2026-10-19, GPU): barriers recorded one after another with no work between them are one barrier
         // (the strongest wait and every invalidation of them), emitted right before the next command that does GPU
         // work: the same ordering, one drain instead of several.

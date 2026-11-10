@@ -112,11 +112,16 @@ def read_cache(path):
 # and a reserved word.
 # version 5 (banjo-nx 2026-10-31, here 2026-11-03: banjo_gpu_fetch_spec) adds fetch_types[4] at 192 (constants 920-923, each
 # + 1) and tess_kind at 208 (constant 904 + 1 for a tessellated draw), and a padding word.
-LIST_KEY_SIZES = {3: 184, 4: 192, 5: 216, 6: 264}  # sasrt-nx (2026-11-08): 6, sasrt_words[12] at 216
-OFF_SASRT_WORDS = 216
+# sasrt-nx (2026-11-09, the fifth GPU round): the offsets as render/pipeline.h's PipelineKey has them: reserved at 184,
+# fetch_types[4] at 188, tess_kind at 204, fetch_pad (constant 926) at 208, sasrt_words at 212 (this tool read them all 4
+# bytes on, from 192: every specialised variant it made since the GPU rounds had 926, 932-944 from the next word, and
+# the console compiled the ones it drew; checked against the console's list 1109b: 208 holds the plain-fetch masks).
+# Version 7: sasrt_words[20] (constants 950-957 from [12]-[15], 958-973 from [16]-[19]).
+LIST_KEY_SIZES = {3: 184, 4: 192, 5: 216, 6: 264, 7: 296}
+OFF_SASRT_WORDS = 212
 LIST_KEY_SIZE = 184
 OFF_BOOL_MASK, OFF_BOOL_VALUES, OFF_BLEND_SKIP, OFF_OUTPUT_TRIM, OFF_ALPHA_FUNC = 108, 140, 172, 176, 180
-OFF_FETCH_TYPES, OFF_TESS_KIND = 192, 208
+OFF_FETCH_TYPES, OFF_TESS_KIND, OFF_FETCH_PAD = 188, 204, 208
 OFF_PER_INSTANCE, OFF_RECT_LIST, OFF_POINT_SPRITE = 96, 100, 104
 OFF_DEPTH_CONTROL = 76  # banjo-nx (2026-10-19): RB_DEPTHCONTROL (constant 909, banjo_deko3d_early_z)
 OFF_STENCIL_REF_MASK = 80  # 2026-10-20: ref, read mask, write mask (bits 16-23)
@@ -258,9 +263,10 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
         alpha_func = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC)[0] if version >= 4 else 0
         fetch_types = struct.unpack_from('<4I', data, at + OFF_FETCH_TYPES) if version >= 5 else (0, 0, 0, 0)
         tess_kind = struct.unpack_from('<I', data, at + OFF_TESS_KIND)[0] if version >= 5 else 0
-        sw = struct.unpack_from('<12I', data, at + OFF_SASRT_WORDS) if version >= 6 else (0,) * 12  # sasrt-nx
+        sw = struct.unpack_from('<20I', data, at + OFF_SASRT_WORDS) if version >= 7 else (
+            struct.unpack_from('<12I', data, at + OFF_SASRT_WORDS) + (0,) * 8 if version >= 6 else (0,) * 20)  # sasrt-nx
         # sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches): the key's word after tess_kind (fetch_pad), constant 926
-        plain = struct.unpack_from('<I', data, at + OFF_TESS_KIND + 4)[0] if version >= 5 else 0
+        plain = struct.unpack_from('<I', data, at + OFF_FETCH_PAD)[0] if version >= 5 else 0
         # sasrt-nx (2026-11-08, sasrt_gpu_clip_spec): the key's reserved word (after alpha_func), bit 3 clear: the draw
         # had no user clip plane, constant 929 = 0 (every list made before the key: no SASRT draw has a plane)
         reserved = struct.unpack_from('<I', data, at + OFF_ALPHA_FUNC + 4)[0] if version >= 4 else 0
@@ -300,6 +306,17 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
                 spec[940 + k] = sw[8 + k]
         if plain and ps:
             spec[926] = plain
+        if ps:  # sasrt-nx (2026-11-09, sasrt_gpu_fetch_conversion_spec): constants 950-957
+            for r in range(8):
+                field = (sw[12 + r // 2] >> (16 * (r & 1))) & 0xFFFF
+                if field & 0x8000:
+                    spec[950 + r] = field
+                e3 = (sw[16 + r // 4] >> (8 * (r & 3))) & 0xFF
+                ec = (sw[18 + r // 4] >> (8 * (r & 3))) & 0xFF
+                if e3 & 0x80:
+                    spec[958 + r] = e3
+                if ec & 0x80:
+                    spec[966 + r] = ec
         if no_clip:
             spec[929] = 0
         for w in range(8):
@@ -312,6 +329,12 @@ def read_list(path, blend_skip_on, alpha_guess=ALPHA_GUESS):
             # sasrt-nx (2026-11-08): the same pipeline with sasrt_gpu_clip_spec off (its A/B's off half, the round-off
             # configs): the vertex shader keeps its clip distance
             out.append((hashes, {k: v for k, v in spec.items() if k != 929}))
+        if ps and any(950 <= k <= 973 for k in spec):
+            # sasrt-nx (2026-11-09, the fifth round): the same pipeline with sasrt_gpu_fetch_conversion_spec and
+            # sasrt_gpu_fetch_exp_3d_spec off (their A/B's off halves), and with each alone on
+            out.append((hashes, {k: v for k, v in spec.items() if not 950 <= k <= 973}))
+            out.append((hashes, {k: v for k, v in spec.items() if not 958 <= k <= 973}))
+            out.append((hashes, {k: v for k, v in spec.items() if not 950 <= k <= 957}))
         if any(mask) or alpha_func or tess_kind or any(fetch_types) or plain or no_clip or any(sw):
             out.append((hashes, tail))  # the generic pipeline a specialised key draws with until it is built
         made = [spec]

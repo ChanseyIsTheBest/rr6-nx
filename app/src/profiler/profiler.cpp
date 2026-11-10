@@ -10,6 +10,8 @@
 #include <chrono>
 #include <mutex>
 
+#include "renut_engine/perf/frame_stats.h"  // port 53: the limiter's sleep is a game-thread wait
+
 #if REX_PLATFORM_SWITCH
 #include <switch.h>
 
@@ -84,7 +86,16 @@ bool HasValue(Series s) { return g_values[static_cast<size_t>(s)].set.load(std::
 
 void RecordTick(double ms) { Store(Series::kTick, ms); }
 void RecordDraw(double ms) { Store(Series::kDraw, ms); }
-void RecordLimiterWait(double ms) { Store(Series::kLimiterWait, ms); }
+// renut-ultimate port 53 (2026-11-09; sasrt-nx found the same in its own pacing): the frame cap's sleep is the game
+// thread waiting, not its work. frame_stats' CPU time (the frame less the game thread's waits) counted it, so in a game
+// with a frame cap the CPU side came out at the whole frame: the FPS overlay's CPU figure, and the budget of
+// sasrt_dynamic_cpu_aware (port 52), which then let dynamic resolution step down only when the GPU took more than a
+// whole frame. Every port's limiter reports its sleep here.
+void RecordLimiterWait(double ms) {
+  Store(Series::kLimiterWait, ms);
+  if (ms > 0.0)
+    renut::frame_stats::OnGameThreadWait(ms);
+}
 void SetGpuFrameMs(double ms) { Store(Series::kGpuFrame, ms); }
 void SetRenderThreadMs(double ms) { Store(Series::kRenderThread, ms); }
 

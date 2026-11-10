@@ -439,6 +439,57 @@ REXCVAR_DEFINE_BOOL(sasrt_gpu_handover_with_smaa, false, "SASRT/GPU",
                     "writes it, so the hand-over stays on with SMAA. Every texel is the one the copy would write: same "
                     "pixels")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx's fifth GPU round (2026-11-09; rr6-nx's port of its pixel-identical items). Items 49 and 53 have no code
+// here (49 is SASRT's own restore copy, A393B1E0; 53 is flat on its console): placeholders, so the A/B numbers stay
+// SASRT's (139-143). Item 50 since port 52 (the base's EDRAM depth restore, port 29, for any game).
+REXCVAR_DEFINE_BOOL(sasrt_gpu_depth_restore_direct, false, "SASRT/GPU", "SASRT only (fifth GPU round, item 49, A/B 139)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_gpu_depth_restore_whole_clear, true, "SASRT/GPU",
+                    "Renut's renderer (fifth GPU round, item 50, A/B 140; port 52): the EDRAM depth restore "
+                    "(sasrt_renut_depth_restore) cleared the stencil alone (depth kept) before drawing every pixel's depth "
+                    "with the test off: a stencil-only clear keeps the depth, so it cannot be a fast clear. When the "
+                    "restore's rectangle is the whole depth target, depth and stencil are cleared together (the depth to "
+                    "0, then every pixel drawn over it, as before): the same depth and stencil 0 in every pixel")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_gpu_fetch_conversion_spec, true, "SASRT/GPU",
+                    "deko3d renderer (fifth GPU round, item 51, A/B 141): a pixel shader's texture fetch applies Xenos' "
+                    "signs, gamma and exponent adjust from the draw's words (SharedConstants: sampler bits 13-19, the 2D "
+                    "texture word's bits 20-25) for each of the four channels, choosing among the conversions at run time; "
+                    "item 3 (sasrt_gpu_plain_fetches) drops the block where a fetch constant has none of them. Here the "
+                    "words of fetch constants 0-7 are constants of the draw (950-957, pass fetchconv), so the shader keeps "
+                    "only the conversions the draw's texture has, on the channels that have them. The same operations on "
+                    "the same values: the same pixels")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_gpu_fetch_exp_3d_spec, true, "SASRT/GPU",
+                    "deko3d renderer (fifth GPU round, item 52, A/B 142): item 51 for the exponent adjust a 3D or cube fetch "
+                    "reads from its own word (texture_indices[1] / [2] bits 20-25): constants 958-965 (3D) and 966-973 "
+                    "(cube) for fetch constants 0-7 (pass fetchconv). Same values: the same pixels")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_gpu_convert_vertex_pass, false, "SASRT/GPU",
+                    "SASRT only (fifth GPU round, item 53, A/B 143: flat on its console; no code here)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx's render-thread round (2026-11-09; port 54): items 54 and 55, A/B 144 and 145; target 200 switches both.
+REXCVAR_DEFINE_BOOL(sasrt_rt_restore_candidates, true, "SASRT/RenderThread",
+                    "Render thread (sasrt-nx's render-thread round, RT1; item 54, A/B 144): the EDRAM depth restore "
+                    "(sasrt_renut_depth_restore) asks, for every draw with a depth target bound whose surfaces were written "
+                    "since (the fast path's check; nearly every draw), which RGBA8 colour target over the same EDRAM base "
+                    "and pitch was written after the depth (DepthRestoreSourceLocked). That scanned the whole target table "
+                    "twice (to find the depth's own key, then every target; ~2.6 % of Sonic Transformed's render thread). "
+                    "With this key each depth target keeps its own few candidates (same base and pitch, colour, one "
+                    "sample, its scale, RGBA8 or BGRA8), found again only when a target is built or retired (an epoch of "
+                    "its own): the same answer from the same write sequences")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(sasrt_rt_cached_export_seeds, true, "SASRT/RenderThread",
+                    "Render thread (sasrt-nx's render-thread round, RT5; item 55; chosen at start, so no in-run A/B: "
+                    "target 145 does nothing): with sasrt_gpu_seed_cpu_direct (item 30) the CPU writes each fresh memexport "
+                    "window's seed (its guest bytes) into the slot's export buffer, which was CPU-uncached memory: "
+                    "memcpy's bulk loop at uncached speed was ~2 % of Sonic Transformed's render thread. With this key the "
+                    "buffer is CPU-cached (plume: an upload buffer with HOST_CACHED, flushed at creation so no older dirty "
+                    "line can land on the GPU's results) and each seed's lines are cleaned right after it is written, "
+                    "before anything is submitted. The windows start on 256-byte boundaries, so no line holds two windows; "
+                    "every line a seed touches is wholly its own: the GPU sees the same bytes. The CPU never reads the "
+                    "buffer (readbacks go through a GPU copy). For games with memory exports")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>
@@ -486,6 +537,8 @@ const char *AbName(int target) {
       SASRT_GPU_ROUND_ITEMS(SASRT_GPU_ROUND_NAME)
 #undef SASRT_GPU_ROUND_NAME
   };
+  if (target == kAbRtGroup)  // sasrt-nx (2026-11-09; port 54)
+    return "the render-thread round's items, all at once (sasrt_rt_*, A/B 200)";
   const int i = target - kAbBase;
   return i >= 0 && i < kCount ? kNames[i] : nullptr;
 }

@@ -490,7 +490,9 @@ namespace plume {
         cpu = static_cast<uint8_t *>(dkMemBlockGetCpuAddr(block));
         // No line of the memory (from whatever used it before) may be dirty in the CPU's caches: one written back over the
         // GPU's results later would lose them. The CPU never writes a readback buffer after this.
-        if (cpuCached && desc.heapType == RenderHeapType::READBACK)
+        // sasrt-nx (2026-11-09, sasrt_rt_cached_export_seeds; port 54): a cached upload buffer the GPU writes too (the
+        // memexport windows, which the CPU seeds) needs the same: every cached buffer gets it (once, at creation).
+        if (cpuCached)
             armDCacheFlush(cpu, size_t(size));
         g_deko3dStats.bufferBytes += size;
         {
@@ -1656,7 +1658,12 @@ namespace plume {
                          uint32_t(job->stage), src.size(), body + (src.size() - rest), base, defines.c_str());
                 }
             }
-            uam::Result r = uam::compile(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str());
+            // port 56 (mk9-nx, fastFirstCompile): one pass for a compile a drawing thread waits for.
+            const bool fast = !job->async && job->drawWaits && g_deko3dOptions.fastFirstCompile;
+            uam::Result r = fast ? uam::compileFast(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str())
+                                 : uam::compile(stages[std::min<uint32_t>(job->stage, 5)], job->source->c_str());
+            if (fast)
+                g_deko3dStats.fastCompiles++;
             g_deko3dStats.shaderCompileNs += armTicksToNs(armGetSystemTick()) - t0;
             g_deko3dStats.shaderCompiles++;
             if (job->async) {

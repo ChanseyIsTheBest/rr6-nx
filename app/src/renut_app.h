@@ -29,6 +29,7 @@
 #include "renut_engine/gpu/banjo_renut_capture.h"
 #endif
 #include "cpu/banjo_enhancements.h"
+#include "renut_engine/rr6_language.h"  // rr6-nx (2026-11-10): the language key
 #if defined(RR6_BUILTIN_CONFIG)
 #include "rr6_builtin_config.h"  // generated from app/rr6_switch_defaults.toml and rr6_switch.toml (CMake)
 #endif
@@ -71,7 +72,7 @@ public:
     }
 
     // katamari-nx (2026-11-02, sa2-nx's design): the Switch build's fixed settings, compiled in and applied before
-    // rr6.toml, which holds only the player's options (a key added there still overrides these: test runs).
+    // config.toml, which holds only the player's options (a key added there still overrides these: test runs).
     std::string_view BuiltInConfig() const override {
 #if defined(RR6_BUILTIN_CONFIG)
         return kRr6BuiltInConfig;
@@ -79,7 +80,7 @@ public:
         return {};
 #endif
     }
-    // Without a rr6.toml next to the NRO, the player's default one is written there.
+    // Without a config.toml next to the NRO, the player's default one is written there.
     std::string_view DefaultConfigFile() const override {
 #if defined(RR6_BUILTIN_CONFIG)
         return kRr6PlayerConfig;
@@ -210,6 +211,7 @@ public:
         // katamari-nx (2026-10-31): DLC packages in the "dlc" folder next to the NRO / exe installed before the game
         // starts (reNut upstream's installer, renut_engine/dlc_install.cpp, as banjo-nx does).
         renut::dlc::InstallPackages(runtime());
+        rr6::ApplyLanguage();  // rr6-nx (2026-11-10): config.toml's language
         // One log line with every enhancement and whether it is active (src/cpu/banjo_enhancements.h).
         banjo::LogEnhancements();
         // PC: function-level CPU profile (banjo_pc_profile_s = N seconds per report; 0 = off; from futari-nx).
@@ -261,8 +263,8 @@ public:
     void OnConfigurePaths(rex::PathConfig& paths) override {
 #if defined(RR6_BUILTIN_CONFIG)
         // The player's settings file. Not renut.toml: the test builds' full one, left on an SD card, would override
-        // every built-in setting.
-        paths.config_path = rex::filesystem::GetExecutableFolder() / "rr6.toml";
+        // every built-in setting. rr6-nx (2026-11-10, the user): config.toml.
+        paths.config_path = rex::filesystem::GetExecutableFolder() / "config.toml";
 #endif
         if (paths.game_data_root.empty()) {
             const auto folder = rex::filesystem::GetExecutableFolder();
