@@ -57,6 +57,8 @@ Libraries used by the SDK, the NRO and the code generator, in `sdk/thirdparty`, 
 | [CLI11](https://github.com/CLIUtils/CLI11) | BSD-3-Clause |
 | [libnx](https://github.com/switchbrew/libnx) and the devkitA64 runtime (newlib, libstdc++) | ISC; newlib and GCC runtime licenses |
 | zlib and Zstandard, from devkitPro's Switch portlibs | zlib License; BSD-3-Clause |
+| [LZ4](https://github.com/lz4/lz4) 1.10.0 by Yann Collet (`lib/lz4.c`: the decoder of the packed RRM archives) | BSD-2-Clause |
+| [ZXC](https://github.com/hellobertrand/zxc) 0.15.0 by Bertrand Lebonnois (the decoder of the other packed game files), with [rapidhash](https://github.com/Nicoshev/rapidhash) by Nicolas De Carli | BSD-3-Clause; MIT |
 
 Only for builds on a computer or for the tests, never in the Switch NRO: SDL3 (zlib), the Vulkan loader (Apache-2.0),
 Catch2 (BSL-1.0).
@@ -68,13 +70,14 @@ Everything needed to rebuild and relink the NRO with a modified version of eithe
 
 ## The installer page
 
-The installer page is its own repository, [katamari-nx-installer](https://github.com/ChanseyIsTheBest/katamari-nx-installer).
-Its WebAssembly shader translator is built from `app/thirdparty/reblue-XenosRecomp` and `tools/renut_hlsl_frontend.cpp` of
-this repository (with [Emscripten](https://emscripten.org): MIT and the University of Illinois/NCSA license); its other
-components are listed in its `NOTICES.md`.
+The installer page is its own repository, [rr6-nx-installer](https://github.com/ChanseyIsTheBest/rr6-nx-installer). It
+translates no shaders (this port carries them); it packs the game files with LZ4 and ZXC built to WebAssembly (with
+[Emscripten](https://emscripten.org): MIT and the University of Illinois/NCSA license). Its components are listed in its
+`NOTICES.md`.
 
 ## Trademarks
 
-Beautiful Katamari is a trademark of Bandai Namco Entertainment; the icon (`tools/switch/icon/katamari_icon.jpg`,
-`app/icon/app.ico`) is its cover artwork, © Bandai Namco. Nintendo Switch is a trademark of Nintendo. Xbox 360 is a
-trademark of Microsoft. This project is not affiliated with or endorsed by any of them.
+Ridge Racer is a trademark of Bandai Namco Entertainment; the Switch icon (`tools/switch/icon/rr6_icon.jpg`) is Ridge
+Racer 6's cover artwork, © Bandai Namco. The PC build's icon (`app/icon/app.ico`) is still Beautiful Katamari's cover
+artwork, © Bandai Namco, from katamari-nx, the tree this port was copied from. Nintendo Switch is a trademark of Nintendo.
+Xbox 360 is a trademark of Microsoft. This project is not affiliated with or endorsed by any of them.

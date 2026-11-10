@@ -16,8 +16,8 @@ It's not an emulator. The PowerPC code of the game's `default.xex` is statically
 
 1. Open the installer page: **https://chanseyisthebest.github.io/rr6-nx-installer/**
 2. Choose your game (the disc image or an extracted folder), then any DLC packages, and press **Create rr6-nx.zip**.
-   Everything runs in your browser and your game files stay on your computer. The three RRM archives are packed with LZ4
-   on the way (about 600 MB smaller on the SD card).
+   Everything runs in your browser and your game files stay on your computer. The game files are packed on the way: LZ4
+   for the three RRM archives, ZXC for the videos, the music and the sounds (about 800 MB smaller on the SD card).
 3. If you have an older rr6-nx, delete its `switch/rr6-nx/game_root` folder. Then extract `rr6-nx.zip` to the root of
    your SD card. It makes `switch/rr6-nx/`.
 4. In **Sphaira**, find Ridge Racer 6, press **X**, choose **Install Forwarder**, set **Address Space** to **39-bit**,

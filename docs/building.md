@@ -52,14 +52,18 @@ tools\build_switch.bat
 
 The released NRO, in folders of their own (`BUILD_DIR` and `CMAKE_EXTRA` of `tools/build_switch.bat`):
 
-1.0.0 was built this way (2026-11-10). Every folder takes `app/out/switch-ult`'s settings (the renut-ultimate shaders:
+1.0.0 (2026-11-10) and 1.0.1 (2026-11-11) were built this way. Every folder takes `app/out/switch-ult`'s settings (the renut-ultimate shaders:
 `-DBANJO_RENUT_SHADER_DIR`, `-DBANJO_RENUT_SHADER_CACHE_CPP` and `-DBANJO_DEKO3D_GLSL_CPP` from
 `app/out/renut_switch_ult`, `-DRR6_RENUT_HOOKS=ON`) plus `-DRR6_BUILTIN_CONFIG=ON -DBANJO_SWITCH_SDK_OPT=ON` (the SDK's
 runtime and FFmpeg get the PGO and LTO flags too):
 
 1. **Instrumented:** `-DBANJO_PGO=generate` (no LTO needed). Play it: it writes `pgo/banjo_pgo_<N>.stream` next to the
    NRO every 2 minutes, at HOME and at exit (the whole session each time). 1.0.0's profile: a 400 s Ryujinx session
-   (boot, menus, a race), Ryubing with the ARMeilleure fix in its `BANJO-NX.md` (2026-11-10).
+   (boot, menus, a race), Ryubing with the ARMeilleure fix in its `BANJO-NX.md` (2026-11-10). 1.0.1's: a session on
+   the console (the PC was busy), on the hybrid-packed game folder: `tools/console_run.py` drove the Single Race route
+   (`out/console_tests/m/pgo101_session.txt`), then the user raced; HOME, then the game closed, and the stream fetched
+   by ftp. The `.lz4b` reader and its codecs (`rexfilesystem`, `rexblockcodecs`) are outside the LTO and PGO targets:
+   every build compiles them the same way.
 2. **Merge** on the PC that built it (the streams name its folders): `python tools/pgo_merge.py <folder with the
    streams>` fills `pgo/` (it stops if `pgo/` already has `.gcda` files: move them aside first).
 3. **Optimised:** `-DBANJO_PGO=use -DBANJO_SWITCH_LTO=ON -DBANJO_PGO_DIR=<a copy of pgo/ at a path without spaces>`.
@@ -67,7 +71,8 @@ runtime and FFmpeg get the PGO and LTO flags too):
    profile.
 
 Keep the build folders' and the profile's paths free of spaces (GCC's parallel LTO link writes a makefile with them
-unquoted; 1.0.0 used `C:\rr6pgo\gen`, `C:\rr6pgo\lto` and `C:\rr6pgo\profile`), and never run two of these builds at
+unquoted; 1.0.0 used `C:\rr6pgo\gen`, `C:\rr6pgo\lto` and `C:\rr6pgo\profile`, 1.0.1 the same names with `101`
+added), and never run two of these builds at
 once: they share the SDK's archives in `sdk/out/switch-arm64`. Configure with Visual Studio's CMake by its full path: Git
 Bash's PATH finds devkitPro's MSYS2 cmake, which damaged a cache once.
 
