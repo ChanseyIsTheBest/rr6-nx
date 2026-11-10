@@ -3870,7 +3870,30 @@ inline u32 SlotTextureVa(const GuestDevice &device, u32 r) {
   }
   if (!g_fetch_owner[r] || !banjo::renut_gpu::FetchOverPointerOn())
     return 0;
-  return DeviceTextureFetch(device.dev(), r).IsTexture() ? g_fetch_owner[r] : 0;
+  const TextureFetch fetch = DeviceTextureFetch(device.dev(), r);
+  if (!fetch.IsTexture())
+    return 0;
+  // renut-ultimate (port 63, 2026-11-10, renut_fetch_owner_same_data; Viva Pinata's finding): the last texture only while
+  // the fetch constant still describes its data (textures.cpp SameData: format, endian and base address in dword 1, the
+  // size in dword 2, the dimension in dword 5). A fetch constant naming other data (Viva Pinata: object BCCA0550, a
+  // 1280x720 resolve destination, with a fetch of a 16x64 texture at 0F99B000) was bound through the old texture's
+  // host texture, which textures.cpp then remade for the fetch, throwing the resolve away (the title logo's dark shadow,
+  // "[flash] resolve destination ... dropped"). Without a header pointer the slot takes port 37's fetch-only path: the
+  // fetch's own texture, and a resolve's content found by its address (ResolvedAlias).
+  if (banjo::renut_gpu::FetchOwnerSameDataOn()) {
+    const TextureFetch owner = TextureFetch::FromHeader(GuestPtr<const d3d::BaseTexture>(g_fetch_owner[r])->Format);
+    if (owner.dword[1] != fetch.dword[1] || owner.dword[2] != fetch.dword[2] ||
+        ((owner.dword[5] ^ fetch.dword[5]) & 0x600u) != 0) {
+      static std::atomic<uint32_t> logged{0};
+      if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+        RGPU_INFO("[renut] slot {} after SetTexture(NULL): the fetch constant names other data than its last texture "
+                  "{:08X} (fetch {:08X} {:08X}, header {:08X} {:08X}): sampled as the fetch alone "
+                  "(renut_fetch_owner_same_data)", r, g_fetch_owner[r], fetch.dword[1], fetch.dword[2], owner.dword[1],
+                  owner.dword[2]);
+      return 0;
+    }
+  }
+  return g_fetch_owner[r];
 }
 
 // banjo-nx (deko3d renderer, docs/deko3d-renderer.md): the sampler words hold the sampler id where a texture handle has

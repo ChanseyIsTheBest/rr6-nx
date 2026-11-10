@@ -37,6 +37,21 @@ REXCVAR_DEFINE_BOOL(rr6_fetch_over_pointer, true, "Banjo/Enhancements",
                     "came out about a quarter too dark). Read at start")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// renut-ultimate (port 63, 2026-11-10; vivapinata-nx's finding: the title logo's dark shadow).
+REXCVAR_DEFINE_BOOL(renut_fetch_owner_same_data, true, "Banjo/Enhancements",
+                    "With rr6_fetch_over_pointer: a slot after SetTexture(NULL) keeps its last texture only while the fetch "
+                    "constant still describes that texture's data (format, address, size, dimension); a fetch of other data is "
+                    "sampled as the fetch alone (sasrt_renut_texture_fetch_only), so the old texture's content (a resolve's) is "
+                    "kept. Off: the last texture whatever the fetch names (port 04 as it was). Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// renut-ultimate (port 64, 2026-11-10; sasrt-nx's GPU hang: docs/handoff/gpu_hang_1110 there).
+REXCVAR_DEFINE_BOOL(sasrt_texture_scale_size_check, true, "Banjo/Enhancements",
+                    "From sasrt-nx: a texture over a depth resolve whose image is of another size than its dynamic-resolution "
+                    "code's (codes 4 and 6 change their ratio at each step) is made again at its bind; before, its depth words "
+                    "were copied into it past its end, and the GPU could hang. false = as before (tests only). Read at start")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // kameo-nx (2026-11-04, 71d0abaf; the user's console run: exploded far-away models, broken portraits).
 REXCVAR_DEFINE_BOOL(banjo_renut_resolve_clears_both, true, "Banjo/Enhancements",
                     "From kameo-nx: a resolve's clear flags clear both surfaces they name, as on the console (an imposter renderer "
@@ -298,6 +313,14 @@ bool StripMarkersOn() {
 }
 bool FetchOverPointerOn() {
   static const bool on = REXCVAR_GET(rr6_fetch_over_pointer);
+  return on;
+}
+bool FetchOwnerSameDataOn() {
+  static const bool on = REXCVAR_GET(renut_fetch_owner_same_data);
+  return on;
+}
+bool TextureScaleSizeCheckOn() {
+  static const bool on = REXCVAR_GET(sasrt_texture_scale_size_check);
   return on;
 }
 bool ResolveClearsBothOn() {

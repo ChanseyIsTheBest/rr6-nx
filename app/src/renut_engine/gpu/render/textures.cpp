@@ -773,7 +773,17 @@ void CopyDepthWords(HostTexture &t, HostTexture &source) {
   plume::RenderCommandList *cmd = State().command_list;
   TransitionTextureLocked(source.words.get(), plume::RenderTextureLayout::COPY_SOURCE);
   TransitionTextureLocked(&t, plume::RenderTextureLayout::COPY_DEST);
-  const plume::RenderBox box(0, 0, int32_t(t.scale.Size(t.width)), int32_t(t.scale.Size(t.height)));
+  // renut-ultimate (port 64, 2026-11-10, sasrt-nx's GPU hang): never past either image (the copy is not checked below).
+  const uint32_t copy_w = std::min({t.scale.Size(t.width), t.alloc_width, source.words->alloc_width});
+  const uint32_t copy_h = std::min({t.scale.Size(t.height), t.alloc_height, source.words->alloc_height});
+  if (copy_w != t.scale.Size(t.width) || copy_h != t.scale.Size(t.height)) {
+    static uint32_t logged = 0;
+    if (logged++ < 16)
+      RGPU_WARN("[renut] depth words copy into {:08X} clamped to {}x{} (its image {}x{}, the words {}x{}, the scale's "
+                "size {}x{})", t.guest_va, copy_w, copy_h, t.alloc_width, t.alloc_height, source.words->alloc_width,
+                source.words->alloc_height, t.scale.Size(t.width), t.scale.Size(t.height));
+  }
+  const plume::RenderBox box(0, 0, int32_t(copy_w), int32_t(copy_h));
   t.resolve_signature = 0;  // banjo-nx (banjo_renut_resolve_skip)
   cmd->copyTextureRegion(plume::RenderTextureCopyLocation::Subresource(t.texture.get(), 0, 0),
                          plume::RenderTextureCopyLocation::Subresource(source.words->texture.get()),
@@ -1287,6 +1297,23 @@ TextureBinding BindTextureLocked(u32 texture_va, const TextureFetch &device_fetc
   }
   const RenderScale scale = depth_source ? depth_source->scale : RenderScale{};
   if (slot && !slot->gpu_written && slot->scale != scale) {
+    Retire(*slot);
+    slot.reset();
+  }
+  // renut-ultimate (port 64, 2026-11-10, sasrt_texture_scale_size_check; sasrt-nx's GPU hang): the same code at another
+  // size. Codes 4 and 6 are the dynamic resolution's settable ones: their ratio changes at each step and RenderScale
+  // compares the code only, so a texture over a depth resolve made at 666 lines kept that image at 702. WordsViewSlot
+  // then refused it (the sizes differ) and CopyDepthWords copied the scale's new, larger size into it: a GPU write past
+  // the image, which hung the console once the memory batch packed live data behind it. ResolveTarget already makes a
+  // destination again when alloc_width != scale.Size(width); this is the same rule for the textures sampling it.
+  if (banjo::renut_gpu::TextureScaleSizeCheckOn() && slot && !slot->gpu_written && slot->texture && depth_source &&
+      scale.code != 0 && plume::RenderFormatBlockWidth(slot->host_format) <= 1 &&
+      (slot->alloc_width != scale.Size(slot->width) || slot->alloc_height != scale.Size(slot->height))) {
+    static uint64_t remade = 0;
+    if (const uint64_t n = ++remade; n <= 8 || (n & (n - 1)) == 0)
+      RGPU_INFO("[renut] texture {:08X} over a depth resolve made again: {}x{} host, its scale's size now {}x{} (the "
+                "code's size changed; sasrt_texture_scale_size_check; {} so far)", texture_va, slot->alloc_width,
+                slot->alloc_height, scale.Size(slot->width), scale.Size(slot->height), n);
     Retire(*slot);
     slot.reset();
   }

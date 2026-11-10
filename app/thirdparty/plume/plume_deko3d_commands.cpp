@@ -1738,7 +1738,30 @@ namespace plume {
             else
                 srect = {0, 0, 0, mipDim(st->desc.width, srcLoc.subresource.mipLevel), mipDim(st->desc.height, srcLoc.subresource.mipLevel),
                          st->type == DkImageType_3D ? mipDim(st->desc.depth, srcLoc.subresource.mipLevel) : 1};
-            const DkImageRect drect = {dstX, dstY, dt->type == DkImageType_3D ? dstZ : 0, srect.width, srect.height, srect.depth};
+            DkImageRect drect = {dstX, dstY, dt->type == DkImageType_3D ? dstZ : 0, srect.width, srect.height, srect.depth};
+            {  // renut-ultimate (port 64, 2026-11-10, sasrt-nx's GPU hang): never past either image (dkCmdBufCopyImage does not check)
+                const uint32_t sw = mipDim(st->desc.width, srcLoc.subresource.mipLevel);
+                const uint32_t sh = mipDim(st->desc.height, srcLoc.subresource.mipLevel);
+                const uint32_t dw = mipDim(dt->desc.width, dstLoc.subresource.mipLevel);
+                const uint32_t dh = mipDim(dt->desc.height, dstLoc.subresource.mipLevel);
+                if (srect.x >= sw || srect.y >= sh || drect.x >= dw || drect.y >= dh) {
+                    static std::atomic<uint32_t> logged{0};
+                    if (logged.fetch_add(1) < 16)
+                        logf("image copy refused: source %ux%u at (%u, %u), destination %ux%u at (%u, %u)", sw, sh, srect.x,
+                             srect.y, dw, dh, drect.x, drect.y);
+                    return;
+                }
+                const uint32_t w = std::min({srect.width, sw - srect.x, dw - drect.x});
+                const uint32_t h = std::min({srect.height, sh - srect.y, dh - drect.y});
+                if (w != srect.width || h != srect.height) {
+                    static std::atomic<uint32_t> logged{0};
+                    if (logged.fetch_add(1) < 16)
+                        logf("image copy clamped: %ux%u to %ux%u (source %ux%u at (%u, %u), destination %ux%u at (%u, %u))",
+                             srect.width, srect.height, w, h, sw, sh, srect.x, srect.y, dw, dh, drect.x, drect.y);
+                    srect.width = drect.width = w;
+                    srect.height = drect.height = h;
+                }
+            }
             flushBarriers();
             GetDeko3DStats().copyImage.store(GetDeko3DStats().copyImage.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
             if (g_deko3dTrace)
@@ -1946,7 +1969,30 @@ namespace plume {
         DkImageView dv = dt->defaultView();
         DkImageView sv = st->defaultView();
         const RenderRect r = srcRect ? *srcRect : RenderRect(0, 0, int32_t(st->desc.width), int32_t(st->desc.height));
-        const DkImageRect srect = {uint32_t(r.left), uint32_t(r.top), 0, uint32_t(r.right - r.left), uint32_t(r.bottom - r.top), 1};
+        // renut-ultimate (port 64, 2026-11-10, sasrt-nx): the region never past either image (dkCmdBufBlitImage does not
+        // check). Without scaling here (the same width and height both sides), so both rectangles shrink alike.
+        if (r.left < 0 || r.top < 0 || r.right <= r.left || r.bottom <= r.top || uint32_t(r.left) >= st->desc.width ||
+            uint32_t(r.top) >= st->desc.height || dstX >= dt->desc.width || dstY >= dt->desc.height) {
+            static std::atomic<uint32_t> logged{0};
+            if (logged.fetch_add(1) < 16)
+                logf("resolve blit refused: source rect (%d, %d)-(%d, %d) of %ux%u, destination %ux%u at (%u, %u)", r.left, r.top,
+                     r.right, r.bottom, st->desc.width, st->desc.height, dt->desc.width, dt->desc.height, dstX, dstY);
+            return;
+        }
+        DkImageRect srect = {uint32_t(r.left), uint32_t(r.top), 0, uint32_t(r.right - r.left), uint32_t(r.bottom - r.top), 1};
+        {
+            const uint32_t w = std::min({srect.width, st->desc.width - srect.x, dt->desc.width - dstX});
+            const uint32_t h = std::min({srect.height, st->desc.height - srect.y, dt->desc.height - dstY});
+            if (w != srect.width || h != srect.height) {
+                static std::atomic<uint32_t> logged{0};
+                if (logged.fetch_add(1) < 16)
+                    logf("resolve blit clamped: %ux%u to %ux%u (source %ux%u at (%u, %u), destination %ux%u at (%u, %u))", srect.width,
+                         srect.height, w, h, st->desc.width, st->desc.height, srect.x, srect.y, dt->desc.width, dt->desc.height,
+                         dstX, dstY);
+                srect.width = w;
+                srect.height = h;
+            }
+        }
         const DkImageRect drect = {dstX, dstY, 0, srect.width, srect.height, 1};
         flushBarriers();
         GetDeko3DStats().copyBlit.store(GetDeko3DStats().copyBlit.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
