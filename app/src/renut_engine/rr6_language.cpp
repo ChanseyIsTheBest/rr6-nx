@@ -87,3 +87,11 @@ void ApplyLanguage() {
 }
 
 }  // namespace rr6
+
+// rr6-nx (2026-11-21, the game menu from the ultimate base: game_menu.cpp asks it for the menu's own language): the
+// language the game is told, user_language as ApplyLanguage set it (the base's own, from its xam_user.cpp, is not
+// in rr6-nx: RR6 keeps its own language key).
+#include <rex/system/flags.h>
+namespace rex::system {
+uint32_t EffectiveLanguage() { return REXCVAR_GET(user_language); }
+}  // namespace rex::system

@@ -20,6 +20,10 @@
 #include "renut_engine/dlc_install.h"
 #include "profiler/profiler.h"
 #include "profiler/profiler_overlay.h"
+#include "game_menu.h"  // blur-nx (2026-11-18): the game menu (A+B+X+Y+L+R, F8)
+namespace rr6 {
+void RegisterMenuRows();  // rr6_menu_rows.cpp (2026-11-21): RR6's rows on the menu's Settings tab
+}
 #include "me/me_native_system.h"
 // banjo-nx (2026-10-16): Renut's Direct3D-level renderer, the boot choice banjo_renderer = "renut"
 // (app/src/renut_engine/gpu, tools/renut_gpu_import.py, docs/renut-renderer-port.md).
@@ -104,6 +108,9 @@ public:
     //     rex::cvar::LoadConfig("renut.toml");
     // }
 
+    // blur-nx (2026-11-18): the game menu's fonts (the console's own shared font) in the SDK drawer's atlas.
+    void OnConfigureFonts(ImFontAtlas* atlas) override { blur::AddGameMenuFonts(atlas); }
+
     void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
 #if BANJO_RENUT_RENDERER
         // katamari-nx (2026-11-01): the app's dialogs draw with the ImGui inside this executable, whose context only
@@ -120,6 +127,11 @@ public:
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
         profiler_dialog_ = std::make_unique<ProfilerOverlayDialog>(drawer);
         drawer->AddDialog(profiler_dialog_.get());
+        // blur-nx (2026-11-18, the user's request): the game menu. Attached for good (its constructor adds it), it
+        // asks for no ImGui frame while closed (WantsFrame), so the drawer builds none for it then.
+        rr6::RegisterMenuRows();  // rr6-nx (2026-11-21): before the menu is first drawn
+        game_menu_ = std::make_unique<blur::GameMenuDialog>(drawer, config_path(), [this] { return runtime(); },
+                                                            [this] { return immediate_drawer(); });
 #if !REX_PLATFORM_SWITCH
         path_wizard_ = new PathSetupWizard(drawer);
         drawer->AddDialog(path_wizard_);
@@ -313,4 +325,5 @@ private:
 #endif
     std::unique_ptr<FpsOverlayDialog> fps_dialog_;
     std::unique_ptr<ProfilerOverlayDialog> profiler_dialog_;
+    std::unique_ptr<blur::GameMenuDialog> game_menu_;  // blur-nx (2026-11-18)
 };

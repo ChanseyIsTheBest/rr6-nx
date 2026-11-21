@@ -246,10 +246,11 @@ REXCVAR_DEFINE_INT32(banjo_renut_portrait_fur_shells_percent, 100, "Banjo/Enhanc
                      "targets of 128 x 128 or less (the dialogue portrait, 96 x 96): 50 draws every other shell (11 of "
                      "21, the first always). 100: the same share as the rest of the fur")
     .range(25, 100);
+// rr6-nx (2026-11-21, the game menu; the ultimate base's port 177, blur-nx's): read at each frame's latch, so the
+// menu changes it at once (render/surfaces.cpp g_msaa_latched: the MSAA targets made again).
 REXCVAR_DEFINE_INT32(msaa_level, 4, "Katamari/Graphics",
                      "Samples per pixel of the game's MSAA targets: 4 (the game's own), 2 or 1 (off). Fewer: rougher "
-                     "edges, less GPU work")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+                     "edges, less GPU work. From the next frame");
 REXCVAR_DEFINE_INT32(banjo_renut_portrait_msaa_samples, 0, "Banjo/Enhancements",
                      "NOT exact, the user's call (2026-10-21): the samples of the colour and depth targets of 128 x 128 "
                      "or less that the game makes with MSAA (the dialogue portrait's 96 x 96 box, 4x). 0 as the game; 2: "
@@ -301,7 +302,7 @@ REXCVAR_DEFINE_INT32(banjo_renut_render_height_handheld, 720, "Banjo/Enhancement
 REXCVAR_DEFINE_INT32(banjo_renut_render_height_docked, 720, "Banjo/Enhancements",
                      "NOT exact, the user's request (2026-10-21): banjo_renut_render_height_handheld for docked mode "
                      "(864 = 1536x864, 1.2x the game's; 900 = 1600x900; with banjo_renut_display_height_docked = 1080 "
-                     "the HUD at 1920x1080). Read at start")
+                     "the HUD at 1920x1080). From the next frame on deko3d (blur-nx 2026-11-18, rr6-nx's menu), else read at start")
     .range(480, 1080);
 REXCVAR_DEFINE_INT32(banjo_renut_display_height_docked, 720, "Banjo/Enhancements",
                      "The display's resolution when docked on deko3d (2026-10-21; the swapchain change from sa2-nx "

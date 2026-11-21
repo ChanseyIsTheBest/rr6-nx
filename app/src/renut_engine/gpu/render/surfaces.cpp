@@ -114,12 +114,17 @@ struct CachedFramebuffer {
 // host format and render scale: graphics_options renders some surfaces at
 // another scale (the post-processing buffers at 1x), and a view used by
 // surfaces of both kinds would otherwise be rebuilt at every switch.
+// blur-nx (2026-11-18, the game menu: MSAA at once): msaa_level as taken at this frame's latch (0 before the first);
+// part of an MSAA target's key, so a change makes those targets anew at their next use.
+uint32_t g_msaa_latched = 0;
+
 uint64_t TargetKey(const d3d::SurfaceDesc &desc, bool depth, plume::RenderFormat format,
                    RenderScale scale) {
   const u32 info = desc.SurfaceInfo;
+  const uint64_t msaa = ((info >> 16) & 3) == 0 ? 0 : g_msaa_latched >= 4 ? 2 : g_msaa_latched >= 2 ? 1 : 0;
   return uint64_t(u32(desc.ColorInfo) & 0xFFF) | uint64_t(info & 0x3FFF) << 12 |
          uint64_t((info >> 16) & 3) << 26 | uint64_t(depth) << 28 |
-         uint64_t(scale.code & 7) << 29 | uint64_t(u32(format)) << 32;
+         uint64_t(scale.code & 7) << 29 | uint64_t(u32(format) & 0xFFFFFF) << 32 | msaa << 56;
 }
 
 std::unordered_map<uint64_t, std::unique_ptr<HostSurface>> g_targets;
@@ -261,7 +266,8 @@ bool BuildTarget(HostSurface &surface, const d3d::SurfaceDesc &desc, uint32_t mi
   }
   // katamari-nx (2026-11-02, msaa_level, the player's setting): the same for every target the game makes with MSAA.
   // 4 is the game's own (nothing changes); it only lowers a count.
-  if (const uint32_t want = banjo::renut_gpu::MsaaLevel(); uint32_t(surface.samples) > want)
+  if (const uint32_t want = g_msaa_latched ? g_msaa_latched : banjo::renut_gpu::MsaaLevel();
+      uint32_t(surface.samples) > want)
     surface.samples = want == 2 ? plume::RenderSampleCount::COUNT_2 : plume::RenderSampleCount::COUNT_1;
   if (surface.depth) {
     surface.format = DepthTargetFormat(surface.format_word);  // banjo-nx (2026-10-19, banjo_deko3d_depth24)
@@ -381,6 +387,14 @@ RenderScale ResolutionScale() {
 
 void LatchResolutionScaleLocked() {
   LatchGraphicsOptionsLocked();
+  // blur-nx (2026-11-18, the game menu: MSAA at once): the level once a frame; a change makes the MSAA targets anew (their
+  // key has it), the old ones retired as idle targets are.
+  if (const uint32_t level = banjo::renut_gpu::MsaaLevel(); level != g_msaa_latched) {
+    if (g_msaa_latched != 0)
+      RGPU_INFO("[renut] MSAA {}x from this frame (msaa_level; the MSAA targets made again)", level);
+    g_msaa_latched = level;
+    ++g_surface_epoch;
+  }
   const std::string resolution = REXCVAR_GET(renut_resolution);
   // Codes of RenderScale.
   RenderScale scale{resolution == "480p"    ? 1u
@@ -516,8 +530,16 @@ void LatchResolutionScaleLocked() {
       g_dynamic_step = start;
     }
     ++g_latches;
-    const int32_t chosen = count ? g_dynamic_steps[mode][std::clamp(g_dynamic_step.load(), 0, count - 1)]
-                                 : (docked ? heights.docked : heights.handheld);
+#if defined(PLUME_DEKO3D)
+    // blur-nx (2026-11-18, the game menu: the resolutions at once): the configured heights read at every latch, rounded
+    // as at start; CodeForHeightLocked gives a new one a code (the dynamic resolution's way), its targets made anew.
+    auto rounded = [](int32_t want) { return std::clamp((std::clamp(want, 360, 1080) + 4) / 9 * 9, 360, 1080); };
+    const int32_t configured = docked ? rounded(banjo::renut_gpu::RenderHeightDocked())
+                                      : rounded(banjo::renut_gpu::RenderHeightHandheld());
+#else
+    const int32_t configured = docked ? heights.docked : heights.handheld;
+#endif
+    const int32_t chosen = count ? g_dynamic_steps[mode][std::clamp(g_dynamic_step.load(), 0, count - 1)] : configured;
 #if defined(PLUME_DEKO3D)
     render_scale = CodeForHeightLocked(chosen);  // banjo-nx (2026-10-28, night_gpu5): the steps take turns on codes 4 and 6
 #else
