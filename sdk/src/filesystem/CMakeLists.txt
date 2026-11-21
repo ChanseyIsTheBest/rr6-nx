@@ -18,6 +18,9 @@ add_library(rexfilesystem OBJECT
     devices/stfs_container_entry.cpp
     devices/stfs_container_file.cpp
     lz4_blocks.cpp
+    opus_decoder.cpp  # rr6-nx (2026-11-21): NAME.opcm, the music as Opus
+    opus_pcm.cpp
+    sfd_hevc.cpp      # rr6-nx (2026-11-21): NAME.hevc, the movies as H.265
 )
 add_library(rex::filesystem ALIAS rexfilesystem)
 
@@ -63,3 +66,17 @@ target_include_directories(rexfilesystem PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexfilesystem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/devices)
+
+# rr6-nx (2026-11-21, the user: the music re-encoded to Opus, as culdcept-nx does): opus_decoder.cpp's libopus (BSD-3):
+# devkitPro's portlibs build (switch-libopus) on the Switch; a PC loads one at run time (none: the .opcm music is silent).
+if(REXGLUE_PLATFORM_SWITCH)
+    set(_rex_opus_pl "$ENV{DEVKITPRO}/portlibs/switch")
+    if(DEFINED DEVKITPRO)
+        set(_rex_opus_pl "${DEVKITPRO}/portlibs/switch")
+    endif()
+    if(NOT EXISTS "${_rex_opus_pl}/lib/libopus.a")
+        message(FATAL_ERROR "libopus not found in ${_rex_opus_pl} (devkitPro's switch-libopus)")
+    endif()
+    target_include_directories(rexfilesystem PRIVATE "${_rex_opus_pl}/include/opus")
+    target_link_libraries(rexfilesystem PUBLIC "${_rex_opus_pl}/lib/libopus.a")
+endif()

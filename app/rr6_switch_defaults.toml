@@ -604,3 +604,9 @@ rr6_diag_paint_frames = 0
 # trace m13_ctr). N&B's 981A6A58F2ABFA42 never occurs here, so SMAA had run 0 frames. The composite also starts the
 # internal resolution's gameplay frames: docked stays at 1080 as before (render = display), handheld is 720 either way.
 banjo_renut_smaa_after_ps = "0D40BDEF428B4D2D"
+
+# rr6-nx (2026-11-21, the movies as H.265: app/src/cpu/rr6_hevc_movies.cpp hooks sub_822FB420 and sub_822DCD80): the
+# machine copies of their callers call the originals directly, around the hooks; off until the next codegen, which no
+# longer makes them (app/src/cpu/hot/localized_bulk.txt).
+banjo_cpu_native_sub_822FB638 = false
+banjo_cpu_native_sub_82247720 = false

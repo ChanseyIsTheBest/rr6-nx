@@ -19,6 +19,7 @@
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#include <rex/filesystem/opus_pcm.h>  // rr6-nx (2026-11-21)
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/content_manager.h>
@@ -173,8 +174,11 @@ void InstallPackages(rex::Runtime *runtime) {
     std::vector<fs::path> files;
     // rr6-nx: into subfolders: the packages keep their Xbox 360 layout (<name>/content/<profile>/<title>/00000002/<file>)
     // and the folder is pointed at where they lie, not copied.
+    // rr6-nx (2026-11-21): a package's P.opcm (its music as Opus, rex/filesystem/opus_pcm.h) is not a package: the
+    // package P beside it is registered, and its reads go through P.opcm (StfsContainerDevice).
     for (const auto &entry : fs::recursive_directory_iterator(folder, fs::directory_options::skip_permission_denied, ec))
-        if (entry.is_regular_file(ec) && entry.path().filename() != kInstalledList)
+        if (entry.is_regular_file(ec) && entry.path().filename() != kInstalledList &&
+            !rex::filesystem::HasOpusPcmSuffix(rex::path_to_utf8(entry.path().filename())))
             files.push_back(entry.path());
     std::sort(files.begin(), files.end());
     if (files.empty())

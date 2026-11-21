@@ -14,6 +14,7 @@ folder it is in (see below).
 | NetherSX2_nx, battd_nx | The four-core layout, the GPU arena | See their projects |
 | [renut-nx](https://github.com/ChanseyIsTheBest/renut-nx) (banjo-nx: Banjo-Kazooie: Nuts & Bolts) by ChanseyIsTheBest | The tree this port started from: the SDK fork, the app, the tools, the renderer's adaptation, plume's deko3d back end, the shader passes | GPL-3.0 |
 | [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx), [futari-nx](https://github.com/ChanseyIsTheBest/futari-nx), Peggle 2's and Sonic & All-Stars Racing Transformed's ports by ChanseyIsTheBest | CPU rounds, built-in settings, release shader files, fixes | GPL-3.0 |
+| [culdcept-nx](https://github.com/ChanseyIsTheBest/culdcept-nx) and [culdcept-nx-installer](https://github.com/ChanseyIsTheBest/culdcept-nx-installer) by ChanseyIsTheBest | The music and movie re-encodes' method (Opus, H.265), `tools/switch/nxvideo`, the Opus decoder's wrapper, the installer's WebAssembly decoder build | GPL-3.0 |
 | [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx) by NebadasSwifty | The structure of `app/`, `app/src/me` | GPL-3.0 |
 | [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) by StevensND | The Horizon (Switch) layer of the SDK, the profiling and PGO method, scripts and the toolchain file | GPL-3.0; the SDK parts BSD-3-Clause |
 | [NFSMW Recompiled](https://github.com/madelrandel-blip/NFSMW-Recompiled) by madelrandel-blip | The recompilation project the ports above started from | GPL-3.0 |
@@ -59,6 +60,8 @@ Libraries used by the SDK, the NRO and the code generator, in `sdk/thirdparty`, 
 | zlib and Zstandard, from devkitPro's Switch portlibs | zlib License; BSD-3-Clause |
 | [LZ4](https://github.com/lz4/lz4) 1.10.0 by Yann Collet (`lib/lz4.c`: the decoder of the packed RRM archives) | BSD-2-Clause |
 | [ZXC](https://github.com/hellobertrand/zxc) 0.15.0 by Bertrand Lebonnois (the decoder of the other packed game files), with [rapidhash](https://github.com/Nicoshev/rapidhash) by Nicolas De Carli | BSD-3-Clause; MIT |
+| [libopus](https://opus-codec.org) 1.3 (devkitPro's `switch-libopus`, linked into the Switch build: the decoder of the music the installer re-encodes to Opus; a PC build loads the system's at run time) | BSD-3-Clause |
+| [FFmpeg](https://ffmpeg.org) 7.1 as devkitPro's `switch-ffmpeg` builds it, with averne's nvtegra backend (in `tools/switch/nxvideo`, linked into the Switch build: the H.265 movies' decoder on the Switch's NVDEC, and its software decoder) | GPL (built with `--enable-gpl`); LGPL-2.1-or-later sources |
 
 Only for builds on a computer or for the tests, never in the Switch NRO: SDL3 (zlib), the Vulkan loader (Apache-2.0),
 Catch2 (BSL-1.0).

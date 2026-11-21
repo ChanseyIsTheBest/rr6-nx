@@ -34,6 +34,14 @@ class HostPathEntry : public Entry {
   // rr6-nx (2026-11-10): host_path_ is an LZ4 block file (NAME.lz4b, rex/filesystem/lz4_blocks.h) shown as NAME with
   // the size of the file it holds; opened through OpenLz4Blocks, never mapped or written.
   bool lz4_blocks() const { return lz4_blocks_; }
+  // rr6-nx (2026-11-21): host_path_ is a NAME.opcm (rex/filesystem/opus_pcm.h: a file whose PCM samples are Opus),
+  // shown as NAME with that file's size; opened through OpenOpusPcm, never mapped or written.
+  bool opus_pcm() const { return opus_pcm_; }
+  // rr6-nx (2026-11-21): host_path_ is a NAME.hevc (rex/filesystem/sfd_hevc.h: a Sofdec movie whose pictures are
+  // H.265), shown as NAME with that file's size; opened through OpenSfdHevc, never mapped or written.
+  bool sfd_hevc() const { return sfd_hevc_; }
+  // Any of them: the guest's file is made from the host's one (read only, not mapped, its size the one it stands for).
+  bool packed() const { return lz4_blocks_ || opus_pcm_ || sfd_hevc_; }
 
   /*
    * "All the children of this directory are already known."
@@ -56,7 +64,7 @@ class HostPathEntry : public Entry {
   X_STATUS Open(uint32_t desired_access, File** out_file) override;
   bool Truncate() override;
 
-  bool can_map() const override { return !lz4_blocks_; }
+  bool can_map() const override { return !packed(); }
   std::unique_ptr<memory::MappedMemory> OpenMapped(memory::MappedMemory::Mode mode, size_t offset,
                                                    size_t length) override;
   void update() override;
@@ -76,6 +84,8 @@ class HostPathEntry : public Entry {
   std::filesystem::path host_path_;
   bool children_complete_ = false;
   bool lz4_blocks_ = false;
+  bool opus_pcm_ = false;
+  bool sfd_hevc_ = false;
 };
 
 }  // namespace rex::filesystem

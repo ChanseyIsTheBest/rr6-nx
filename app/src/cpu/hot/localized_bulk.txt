@@ -150,7 +150,6 @@
 8217FF58 55 PC samples (0.01 %), 190 instructions, 2 direct callees
 82111320 55 PC samples (0.01 %), 26 instructions, 2 direct callees
 821647E8 54 PC samples (0.01 %), 40 instructions, 2 direct callees
-82247720 54 PC samples (0.01 %), 334 instructions, 13 direct callees
 822D8E40 54 PC samples (0.01 %), 168 instructions, 4 direct callees
 822AB920 54 PC samples (0.01 %), 48 instructions, 0 direct callees
 821FC828 53 PC samples (0.01 %), 90 instructions, 16 direct callees
@@ -3270,7 +3269,6 @@
 82169620 1 console samples, 40 instructions, 5 direct callees
 821F9AA0 1 console samples, 16 instructions, 1 direct callees
 822F0560 1 console samples, 28 instructions, 0 direct callees
-822FB638 1 console samples, 90 instructions, 5 direct callees
 82322808 1 console samples, 10 instructions, 3 direct callees
 82169400 1 console samples, 54 instructions, 5 direct callees
 8216E580 1 console samples, 134 instructions, 11 direct callees

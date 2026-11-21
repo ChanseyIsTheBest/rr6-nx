@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/filesystem/devices/stfs_container_device.h>
 #include <rex/filesystem/devices/stfs_container_entry.h>
 #include <rex/filesystem/devices/stfs_container_file.h>
 
@@ -78,9 +79,9 @@ size_t StfsContainerFile::ReadRuns(uint8_t* out, size_t byte_offset, size_t leng
     }
     const size_t read_length = std::min(run, remaining);
 
-    auto& file = entry_->files()->at(first.file);
-    rex::filesystem::Seek(file, first.offset + in_first, SEEK_SET);
-    const size_t num_read = fread(out + done, 1, read_length, file);
+    // rr6-nx (2026-11-21): through the device (its P.opcm when the package is read through one).
+    const size_t num_read = static_cast<StfsContainerDevice*>(entry_->device())
+                                ->ReadAt(first.file, first.offset + in_first, out + done, read_length);
 
     done += num_read;
     pos += num_read;
@@ -140,9 +141,8 @@ X_STATUS StfsContainerFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offs
       }
       const size_t read_offset = byte_offset > old_src ? byte_offset - old_src : 0;
       const size_t n = std::min(record.length - read_offset, left);
-      auto& f = entry_->files()->at(record.file);
-      rex::filesystem::Seek(f, record.offset + read_offset, SEEK_SET);
-      old_pos += fread(old.data() + old_pos, 1, n, f);
+      old_pos += static_cast<StfsContainerDevice*>(entry_->device())
+                     ->ReadAt(record.file, record.offset + read_offset, old.data() + old_pos, n);
       old_src += record.length;
       left -= n;
     }
