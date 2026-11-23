@@ -1003,12 +1003,12 @@ if(REXGLUE_PLATFORM_SWITCH)
     if(EXISTS "${RENUT_ICON}")
         set(RENUT_ICON_ARG ICON "${RENUT_ICON}")
     endif()
-    # rr6-nx (2026-11-09, the user's request): author ChanseyIsTheBest, the version (1.0.2 since 2026-11-23), and the user's icon: Ridge Racer
+    # rr6-nx (2026-11-09, the user's request): author ChanseyIsTheBest, the version (1.0.2.1 since 2026-11-23: base port 264, the VFS index), and the user's icon: Ridge Racer
     # 6's cover art at 256x256 (tools/switch/icon/rr6_icon.jpg, a baseline JPEG as hbmenu reads it).
     rexglue_switch_add_nro(renut
         NAME "${RENUT_GAME_NAME}"  # port 193: set once, above
         AUTHOR "ChanseyIsTheBest"
-        VERSION "1.0.2"
+        VERSION "1.0.2.1"
         ${RENUT_ICON_ARG})
 endif()
 

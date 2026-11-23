@@ -27,9 +27,20 @@ class HostPathEntry : public Entry {
                 const std::filesystem::path& host_path);
   ~HostPathEntry() override;
 
+  /*
+   * Port 264 (culdcept-nx's two-size index of 2026-11-20, for every kind): what the full scan decided for a file, as
+   * the VFS index keeps it. An entry rebuilt from the index (its listing is compared with the SD's) is made from it,
+   * with no stat of a plain NAME beside a stand-in and no read of the stand-in's header.
+   */
+  static constexpr uint8_t kIndexLz4Blocks = 1, kIndexXmo = 2, kIndexXmop = 4, kIndexOpusPcm = 8, kIndexSfdHevc = 16;
+  struct IndexHint {
+    uint8_t kinds = 0;       // the kIndex* flags of a stand-in; 0 for a plain file or a directory
+    uint64_t size = 0;       // a stand-in's size as the guest sees it (the size of the file it stands for)
+    std::string guest_name;  // a stand-in's name as the guest sees it (its host name without the suffixes)
+  };
   static HostPathEntry* Create(Device* device, Entry* parent,
                                const std::filesystem::path& full_path,
-                               rex::filesystem::FileInfo file_info);
+                               rex::filesystem::FileInfo file_info, const IndexHint* hint = nullptr);
 
   const std::filesystem::path& host_path() const { return host_path_; }
   // rr6-nx (2026-11-10): host_path_ is an LZ4 block file (NAME.lz4b, rex/filesystem/lz4_blocks.h) shown as NAME with
@@ -43,6 +54,14 @@ class HostPathEntry : public Entry {
   bool sfd_hevc() const { return sfd_hevc_; }
   // Any of them: the guest's file is made from the host's one (read only, not mapped, its size the one it stands for).
   bool packed() const { return lz4_blocks_ || opus_pcm_ || sfd_hevc_; }
+  // Port 264: those flags as IndexHint's kinds (rr6-nx has no .xmo / .xmop: kIndexXmo and kIndexXmop never set).
+  uint8_t index_kinds() const {
+    return uint8_t((lz4_blocks_ ? kIndexLz4Blocks : 0) | (opus_pcm_ ? kIndexOpusPcm : 0) |
+                   (sfd_hevc_ ? kIndexSfdHevc : 0));
+  }
+  // Port 264: the file's size on the SD (a stand-in's own size, not the size it stands for), which the VFS index
+  // compares with the SD's listing.
+  uint64_t disk_size() const { return disk_size_; }
 
   /*
    * "All the children of this directory are already known."
@@ -98,6 +117,7 @@ class HostPathEntry : public Entry {
   bool lz4_blocks_ = false;
   bool opus_pcm_ = false;
   bool sfd_hevc_ = false;
+  uint64_t disk_size_ = 0;
 };
 
 }  // namespace rex::filesystem
