@@ -42,6 +42,87 @@ namespace plume {
         Deko3DDrawCounters rows[kDiagMaxDraws];
     };
     DiagCapture *g_diagCapture = nullptr;
+    }  // namespace (rr6_diag_gpu_counters)
+
+    // Port 167 (from fnxf_xiii, its note of 2026-10-27): why the GPU stopped, logged before deko3d aborts. A GPU fault
+    // (an address the GPU may not read, work that ran too long) only puts the queue in an error state; deko3d's release
+    // build then aborts at the next submission or flush with nothing but result 2359-0001. Here the channel's error
+    // notification and info are read and logged first (deko3d.log writes such a line at once), with what the faulting
+    // address is in. Logging only: what happens next is as before (deko3d's own abort, or the fence wait giving up).
+    // deko3d 0.5.0's Queue holds its NvGpuChannel at +0x18 (dkQueueIsInErrorState and Queue::checkError, disassembled by
+    // fnxf_xiii).
+    static const char *notificationName(uint32_t type) {
+        switch (type) {
+        case 8: return "FifoErrorIdleTimeout (work ran too long)";
+        case 13: return "GrErrorSwNotify";
+        case 24: return "GrSemaphoreTimeout (a semaphore wait ran too long)";
+        case 25: return "GrIllegalNotify";
+        case 31: return "FifoErrorMmuErrFlt (the GPU used an address with no memory behind it)";
+        case 32: return "PbdmaError (bad command data)";
+        case 43: return "ResetChannelVerifError";
+        case 80: return "PbdmaPushbufferCrcMismatch";
+        default: return "?";
+        }
+    }
+
+    static std::atomic<Deko3DDevice *> g_faultDevice{nullptr};
+
+    // The channel's report, logged once: the notification, the error info, what a fault's address is in. 'rc': the
+    // kickoff's result when a kickoff failed (0 otherwise).
+    static void reportChannel(NvGpuChannel *channel, const char *where, uint32_t rc) {
+        static std::atomic<bool> reported{false};
+        if (!channel || reported.exchange(true))
+            return;
+        NvNotification n{};
+        NvError e{};
+        const Result rn = channel->base.has_init ? nvGpuChannelGetErrorNotification(channel, &n) : Result(-1);
+        const Result re = channel->base.has_init ? nvGpuChannelGetErrorInfo(channel, &e) : Result(-1);
+        logf("GPU FAULT (%s, kickoff result 0x%X): notification (0x%X): type %u = %s, info16 0x%X, status 0x%X, at "
+             "%" PRIu64 "; error info (0x%X): type %u, info %08X %08X %08X %08X %08X %08X %08X %08X; %u gpfifo "
+             "entries not yet given to the GPU",
+             where, rc, rn, n.info32, notificationName(n.info32), n.info16, n.status, n.timestamp, re, e.type,
+             e.info[0], e.info[1], e.info[2], e.info[3], e.info[4], e.info[5], e.info[6], e.info[7],
+             channel->num_entries);
+        if (rc && !n.status)
+            logf("  the kickoff failed with no GPU error reported (0x%X: module %u, description %u%s)", rc, R_MODULE(rc),
+                 R_DESCRIPTION(rc), rc == MAKERESULT(Module_LibnxNvidia, LibnxNvidiaError_Timeout) ? " = Timeout: the "
+                 "driver gave up waiting" : "");
+        if (Deko3DDevice *device = g_faultDevice.load()) {
+            size_t retired = 0, guarded = 0;
+            {
+                std::lock_guard<std::mutex> lock(device->retireMutex);
+                retired = device->retired.size();
+            }
+            {
+                std::lock_guard<std::mutex> lock(device->guardMutex);
+                guarded = device->guarded.size();
+            }
+            logf("  %zu blocks waiting for their frame to be freed, %zu guarded; submissions %" PRIu64 " made, %" PRIu64
+                 " known finished", retired, guarded, device->submitSerial.load(), device->completedSerial.load());
+            // A fault's address, among the info words: is it in a buffer the device still has?
+            for (int i = 0; i + 1 < 8; i++) {
+                const DkGpuAddr address = (DkGpuAddr(e.info[i + 1]) << 32) | e.info[i];
+                if (address < 0x100000ull || (address >> 40))
+                    continue;
+                DkGpuAddr base = 0;
+                uint32_t size = 0;
+                const uint8_t *cpu = nullptr;
+                if (device->findBuffer(address, base, size, cpu))
+                    logf("  info %d-%d: GPU address 0x%" PRIX64 " is inside a live buffer 0x%" PRIX64 " (%u bytes, +0x%"
+                         PRIX64 ")", i, i + 1, address, base, size, address - base);
+                else
+                    logf("  info %d-%d: GPU address 0x%" PRIX64 " is in no live buffer (freed, an image, or not an "
+                         "address)", i, i + 1, address);
+            }
+        }
+    }
+
+    // The queue's state (a memory read, no ioctl): the channel's report when it is in error.
+    static void checkQueue(Deko3DDevice *device, const char *where) {
+        g_faultDevice.store(device, std::memory_order_relaxed);
+        if (!device || !device->queue || !dkQueueIsInErrorState(device->queue))
+            return;
+        reportChannel(reinterpret_cast<NvGpuChannel *>(reinterpret_cast<uint8_t *>(device->queue) + 0x18), where, 0);
     }
 
     // The push constants' UBO binding in every stage, and the address window's storage binding (tools/deko3d_glsl.py).
@@ -75,12 +156,56 @@ namespace plume {
             dkCmdBufDestroy(cmd);
         for (auto &m : memory)
             device->destroyBlock(m.first);
+        for (auto &m : memoryCached)  // banjo-nx (2026-11-21)
+            device->destroyBlock(m.first);
         for (auto &t : transient)
             device->destroyBlock(t.first);
     }
 
+    // banjo-nx (2026-11-21, cachedCommands): deko3d's write position in the fed block (dk::detail::CmdBuf's m_cmdPos at
+    // +112, after m_cmdChunkStart at +96 and m_cmdStart at +104: libdeko3d's CmdBuf::addMemory stores the block's CPU
+    // address into all three). Checked at every block fed (Deko3DCmdPos equals the block's address right after
+    // dkCmdBufAddMemory); a mismatch turns the option off for the rest of the run.
+    static inline uint8_t *Deko3DCmdPos(DkCmdBuf cmd) {
+        uint8_t *p;
+        memcpy(&p, reinterpret_cast<const uint8_t *>(cmd) + 112, sizeof(p));
+        return p;
+    }
+    static bool g_cachedCommandsBad = false;
+
     void Deko3DCommandList::addMemory(size_t minimum) {
         const uint32_t want = alignUp(uint32_t(std::max<size_t>(minimum, CommandBlockSize)), DK_MEMBLOCK_ALIGNMENT);
+        if (cachedList) {
+            if (cachedChunk)
+                cachedWritten.push_back({cachedChunk, Deko3DCmdPos(cmd)});  // the block deko3d leaves, as written
+            while (memoryCachedUsed < memoryCached.size() && memoryCached[memoryCachedUsed].second < want)
+                memoryCachedUsed++;
+            if (memoryCachedUsed == memoryCached.size()) {
+                DkMemBlock block = device->makeBlock(want, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached, "command memory (cached)");
+                // No line of it dirty from an earlier use of the memory (one written back later over the commands).
+                if (block)
+                    armDCacheFlush(dkMemBlockGetCpuAddr(block), want);
+                memoryCached.push_back({block, want});
+                GetDeko3DStats().commandBytes += want;
+            }
+            DkMemBlock block = memoryCached[memoryCachedUsed].first;
+            dkCmdBufAddMemory(cmd, block, 0, memoryCached[memoryCachedUsed].second);
+            memoryCachedUsed++;
+            cachedChunk = static_cast<uint8_t *>(dkMemBlockGetCpuAddr(block));
+            if (Deko3DCmdPos(cmd) == cachedChunk)
+                return;
+            // Not the layout this reads: uncached from here on (nothing was written into the cached block; a block fed
+            // with nothing pending in the one before replaces it).
+            g_cachedCommandsBad = true;
+            logf("cachedCommands: deko3d's command buffer layout is not the expected one; off");
+            for (const auto &[from, to] : cachedWritten) {  // (what earlier blocks of this list hold, to memory now)
+                if (to > from)
+                    armDCacheClean(from, size_t(to - from));
+            }
+            cachedWritten.clear();
+            cachedList = false;
+            cachedChunk = nullptr;
+        }
         while (memoryUsed < memory.size() && memory[memoryUsed].second < want)
             memoryUsed++;
         if (memoryUsed == memory.size()) {
@@ -121,7 +246,14 @@ namespace plume {
         pendingBarrier = false;  // banjo-nx (2026-10-19): nothing held over from the list before
         pendingBarrierMode = DkBarrier_None;
         pendingBarrierInvalidate = 0;
+        copyRunFenced = false;  // port 161
+        sampleMaskSet = 0xFFFFFFFFu;  // port 166
         memoryUsed = 0;
+        // banjo-nx (2026-11-21, cachedCommands): this list's kind of command memory, for all its blocks.
+        memoryCachedUsed = 0;
+        cachedList = Deko3DGetOptions().cachedCommands && !g_cachedCommandsBad;
+        cachedChunk = nullptr;
+        cachedWritten.clear();
         addMemory(0);
         // sasrt-nx (2026-11-08, Deko3DOptions::freshComputeConstants): InvalidateShaderCaches (0x369), Constant (bit 12).
         // sasrt-nx (2026-11-08): and the global-data cache (bit 4): the seeds read upload-ring addresses (CPU-written,
@@ -225,6 +357,17 @@ namespace plume {
             resolveBoundDepth(false);
         flushBarriers();
         list = dkCmdBufFinishList(cmd);
+        // banjo-nx (2026-11-21, cachedCommands): every word the list wrote, to memory before any submission reads it.
+        if (cachedList) {
+            if (cachedChunk)
+                cachedWritten.push_back({cachedChunk, Deko3DCmdPos(cmd)});
+            for (const auto &[from, to] : cachedWritten) {
+                if (to > from)
+                    armDCacheClean(from, size_t(to - from));
+            }
+            cachedWritten.clear();
+            cachedChunk = nullptr;
+        }
         open = false;
         if (Deko3DGetOptions().diagBarriers)
             bumpStat(GetDeko3DStats().diagListEnds);  // sasrt-nx (2026-11-08): the census
@@ -483,7 +626,10 @@ namespace plume {
         {
             // banjo-nx (2026-10-19): counted for the renderer's report (a load and a store: diagnostics).
             Deko3DStats &st = GetDeko3DStats();
-            auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+            auto bump = [](std::atomic<uint64_t> &c) {
+                if (g_deko3dCounts)  // banjo-nx (2026-11-20)
+                    c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            };
             bump(mode == DkBarrier_Full ? st.barriersFull : mode == DkBarrier_Fragments ? st.barriersFragments : st.barriersPrimitives);
             if (invalidate & DkInvalidateFlags_Image)
                 bump(st.barriersImageInvalidate);
@@ -541,6 +687,7 @@ namespace plume {
         pendingBarrierMode = DkBarrier_None;
         pendingBarrierInvalidate = 0;
         pendingBarrierWhy = 0;
+        copyRunFenced = mode == DkBarrier_Full;  // port 161: see beforeBufferCopy
         // sasrt-nx (2026-11-08, leanBarrierSkip): a fragment barrier, a wait for idle or a full barrier: the fragments
         // recorded before it are done before anything after it.
         if (mode == DkBarrier_Primitives || mode == DkBarrier_Full) {
@@ -1004,7 +1151,10 @@ namespace plume {
         }
         // banjo-nx (2026-10-19): a load and a store (a lost count is possible between two recording threads), not
         // an exclusive read-modify-write loop: the A57 has no LSE atomics.
-        auto bump = [](std::atomic<uint64_t> &c) { c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+        auto bump = [](std::atomic<uint64_t> &c) {
+            if (g_deko3dCounts)  // banjo-nx (2026-11-20)
+                c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        };
         bump(GetDeko3DStats().pipelineBinds);
         // Shaders: rebound when any stage differs (absent stages are disabled by the bind).
         // banjo-nx (2026-10-28, per-draw night): only the stages that differ (deko3d binds each stage on its own: its
@@ -1578,12 +1728,21 @@ namespace plume {
             framebuffer->depthTexture->depthUnresolved = true;  // sasrt-nx (2026-11-08, preciseDepthResolve)
     }
 
+    // Port 161 (from fnxf_xiii): see copyRunFenced (plume_deko3d.h).
+    void Deko3DCommandList::beforeBufferCopy() {
+        if (pendingBarrier && copyRunFenced && Deko3DGetOptions().copyRunBarriers) {
+            pendingBarrierMode = DkBarrier_Full;
+            return;
+        }
+        flushBarriersRaw();
+    }
+
     void Deko3DCommandList::copyBufferRegion(RenderBufferReference dst, RenderBufferReference src, uint64_t size) {
         const Deko3DBuffer *d = static_cast<const Deko3DBuffer *>(dst.ref);
         const Deko3DBuffer *s = static_cast<const Deko3DBuffer *>(src.ref);
         if (!d || !s || size == 0)
             return;
-        flushBarriers();
+        beforeBufferCopy();  // port 161
         GetDeko3DStats().copyBuffer.store(GetDeko3DStats().copyBuffer.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         if (g_deko3dTrace)
             Deko3DTraceToken("K");  // sasrt-nx (2026-11-08, the trace)
@@ -1808,14 +1967,27 @@ namespace plume {
             return;
         t->depthPending = false;
         flushBarriers();
+        // renut-ultimate (2026-11-13, sasrt-nx's finding merging port 45): as resolveUnboundDepth. The texture used and
+        // written now (trackedTargetWait, trackedReadWait: the read's barrier recorded next waits for this decompression);
+        // work since the last fragment wait (leanBarrierSkip); the bound targets' serial dropped (sameTargetsKept: with no
+        // framebuffer to bind again, or rebind false, the GPU has only this view bound, and the next setFramebuffer of the
+        // last bound framebuffer skipped its bind: draws with no targets); the image known decompressed
+        // (preciseDepthResolve).
+        markUsed(t);
+        if (g_deko3dTrace)
+            Deko3DTraceToken("Z");
         dkCmdBufBindRenderTargets(cmd, nullptr, 0, &t->depthPendingView);
+        boundTargetsSerial = 0;
+        workSinceFragmentWait = true;
         dkCmdBufResolveDepthValues(cmd);
+        t->depthUnresolved = false;
         if (rebind) {
             if (framebuffer) {
                 const DkImageView *colors[8];
                 for (uint32_t i = 0; i < framebuffer->colorCount; i++)
                     colors[i] = &framebuffer->colors[i];
                 dkCmdBufBindRenderTargets(cmd, colors, framebuffer->colorCount, framebuffer->hasDepth ? &framebuffer->depth : nullptr);
+                boundTargetsSerial = framebuffer->serial;
             }
             else
                 dkCmdBufBindRenderTargets(cmd, nullptr, 0, nullptr);
@@ -1901,7 +2073,7 @@ namespace plume {
         const Deko3DBuffer *s = static_cast<const Deko3DBuffer *>(src);
         if (!d || !s)
             return;
-        flushBarriers();
+        beforeBufferCopy();  // port 161
         GetDeko3DStats().copyBuffer.store(GetDeko3DStats().copyBuffer.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);  // banjo-nx (2026-10-19)
         if (g_deko3dTrace)
             Deko3DTraceToken("K");  // sasrt-nx (2026-11-08, the trace)
@@ -2119,6 +2291,15 @@ namespace plume {
         }
     }
 
+    void Deko3DSetSampleMask(RenderCommandList *commandList, uint32_t mask) {  // port 166
+        Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList);
+        mask &= 0xFFFFu;  // the hardware's mask has 16 bits (fnxf_xiii: D3D's 0xFFFFFFFF as it is was a method error)
+        if (!cl || cl->sampleMaskSet == mask)
+            return;
+        cl->sampleMaskSet = mask;
+        dkCmdBufSetSampleMask(cl->cmd, mask);
+    }
+
     void Deko3DDiscardNextDraw(RenderCommandList *commandList) {
         if (Deko3DCommandList *cl = static_cast<Deko3DCommandList *>(commandList))
             cl->discardNextDraw = true;
@@ -2228,6 +2409,21 @@ namespace plume {
         return true;
     }
 
+    void Deko3DReportCounter(RenderCommandList *commandList, const RenderQueryPool *queryPool, uint32_t index,
+                             uint32_t counter) {
+        auto *list = static_cast<Deko3DCommandList *>(commandList);
+        const auto *pool = static_cast<const Deko3DQueryPool *>(queryPool);
+        if (!list || !list->cmd || !pool || !pool->block || index >= pool->results.size())
+            return;
+        list->flushBarriers();
+        dkCmdBufReportCounter(list->cmd, DkCounter(counter), dkMemBlockGetGpuAddr(pool->block) + uint64_t(index) * 16);
+    }
+
+    const volatile uint64_t *Deko3DQueryPoolWords(const RenderQueryPool *queryPool) {
+        const auto *pool = static_cast<const Deko3DQueryPool *>(queryPool);
+        return pool && pool->block ? static_cast<const volatile uint64_t *>(dkMemBlockGetCpuAddr(pool->block)) : nullptr;
+    }
+
     bool Deko3DSetBlendConstant(RenderCommandList *commandList, const float rgba[4]) {
         if (!commandList)
             return false;
@@ -2307,10 +2503,13 @@ namespace plume {
     void Deko3DCommandQueue::executeCommandLists(const RenderCommandList **commandLists, uint32_t count, RenderCommandSemaphore **, uint32_t, RenderCommandSemaphore **, uint32_t, RenderCommandFence *signalFence) {
         // One queue: its order already serialises what semaphores order in Vulkan (acquires and presents are queue
         // operations in deko3d).
+        checkQueue(device, "before a submission");  // port 167
         for (uint32_t i = 0; i < count; i++) {
             const Deko3DCommandList *cl = static_cast<const Deko3DCommandList *>(commandLists[i]);
-            if (cl && cl->list)
+            if (cl && cl->list) {
                 dkQueueSubmitCommands(device->queue, cl->list);
+                checkQueue(device, "after a command list was submitted");  // port 167
+            }
         }
         if (signalFence) {
             Deko3DCommandFence *f = static_cast<Deko3DCommandFence *>(signalFence);
@@ -2320,7 +2519,9 @@ namespace plume {
             f->pending = true;
         }
         device->noteSubmission();
+        checkQueue(device, "before a flush");  // port 167
         dkQueueFlush(device->queue);
+        checkQueue(device, "after a flush");  // port 167
         device->checkGuards();
         device->collectRetired();
     }
@@ -2340,8 +2541,10 @@ namespace plume {
             if (failed || (waited & (waited - 1)) == 0)
                 logf("a fence has not signalled after %d s (result %d)%s", waited * 2, int(r),
                      failed ? "; the queue is in an error state: not waited for" : "");
-            if (failed)
+            if (failed) {
+                checkQueue(device, "while waiting for a fence");  // port 167: why
                 break;
+            }
         }
         f->pending = false;
     }
@@ -2361,10 +2564,17 @@ namespace plume {
 
     Deko3DSwapChain::~Deko3DSwapChain() { destroy(); }
 
+    }  // namespace plume
+    extern "C" void RexSwitchPerfPresentQuiesce(NWindow *nw);  // sdk/src/ui/switch_perf.cpp (port 145)
+    namespace plume {
+
     void Deko3DSwapChain::destroy() {
         if (!swapchain)
             return;
         dkQueueWaitIdle(device->queue);
+        // renut-ultimate (2026-11-16, port 145; tw2de_nx's, banjo_async_present): the buffer dequeued ahead goes back
+        // first (libnx does not release the window's buffers while one is dequeued).
+        RexSwitchPerfPresentQuiesce(desc.renderWindow ? desc.renderWindow : nwindowGetDefault());
         dkSwapchainDestroy(swapchain);
         swapchain = nullptr;
         textures.clear();
@@ -2435,8 +2645,10 @@ namespace plume {
             logf("dkSwapchainCreate failed");
             return false;
         }
-        dkSwapchainSetSwapInterval(swapchain, vsync ? 1 : 0);
-        logf("swapchain: %u images of %ux%u (format %d), swap interval %u", count, w, h, int(format), vsync ? 1u : 0u);
+        // port 165: Deko3DOptions::swapInterval refreshes an image with vsync
+        const uint32_t interval = std::min<uint32_t>(std::max<uint32_t>(Deko3DGetOptions().swapInterval, 1u), 4u);
+        dkSwapchainSetSwapInterval(swapchain, vsync ? interval : 0);
+        logf("swapchain: %u images of %ux%u (format %d), swap interval %u", count, w, h, int(format), vsync ? interval : 0u);
         return true;
     }
 
@@ -2451,7 +2663,7 @@ namespace plume {
     void Deko3DSwapChain::setVsyncEnabled(bool vsyncEnabled) {
         vsync = vsyncEnabled;
         if (swapchain)
-            dkSwapchainSetSwapInterval(swapchain, vsync ? 1 : 0);
+            dkSwapchainSetSwapInterval(swapchain, vsync ? std::min<uint32_t>(std::max<uint32_t>(Deko3DGetOptions().swapInterval, 1u), 4u) : 0);  // port 165
     }
 
     RenderTexture *Deko3DSwapChain::getTexture(uint32_t textureIndex) {
@@ -2478,3 +2690,11 @@ namespace plume {
 
     void Deko3DSwapChain::wait() {}
 };
+
+// Port 167 (from fnxf_xiii, its note of 2026-10-27): a kickoff that failed (sdk/src/ui/switch_perf.cpp's
+// __wrap_nvGpuChannelKickoff calls this), reported at once: deko3d turns its queue to "error" inside that flush and
+// stops the game at its next one, so a check around deko3d's calls never runs. Port 157 sends a refused submission
+// again in parts first; what fails here failed that too.
+extern "C" void RexSwitchGpuKickoffFailed(NvGpuChannel *channel, uint32_t rc) {
+    plume::reportChannel(channel, "a kickoff failed", rc);
+}

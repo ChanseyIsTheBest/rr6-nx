@@ -2,6 +2,8 @@
  * @file    gpu/render/draw.cpp
  */
 #include "renut_engine/gpu/render/draw.h"
+#include "renut_engine/gpu/stage_census.h"  // blur-nx (2026-11-17, the Renut audit's census)
+#include "renut_engine/gpu/host_batch.h"  // blur-nx (2026-11-18, the Renut host batch)
 #include "renut_engine/gpu/render/smaa.h"
 #include "renut_engine/gpu/render/ui_scale.h"  // banjo-nx (2026-10-21, internal resolution)  // banjo-nx (2026-10-21): banjo_renut_smaa
 
@@ -59,13 +61,19 @@ extern "C" char *fake_heap_end;  // libnx: the end of the malloc heap
 // renut-ultimate: the host shaders this file makes itself (sasrt-nx's 16-bit fixed-point resolve).
 #include "host_shaders/resolve_clamp_ps.spirv.h"
 #include "host_shaders/depth_restore_ps.spirv.h"
+#include "host_shaders/smaa_vs.spirv.h"  // port 179 (banjo_renut_edram_carry): the UI upscale's bilinear pass
+#include "host_shaders/ui_upscale_ps.spirv.h"
 #if defined(PLUME_DEKO3D)
 #include "host_shaders/resolve_clamp_ps.deko3d.h"
 #include "host_shaders/depth_restore_ps.deko3d.h"
+#include "host_shaders/smaa_vs.deko3d.h"
+#include "host_shaders/ui_upscale_ps.deko3d.h"
 #endif
 #if defined(_WIN32)
 #include "host_shaders/resolve_clamp_ps.dxil.h"
 #include "host_shaders/depth_restore_ps.dxil.h"
+#include "host_shaders/smaa_vs.dxil.h"
+#include "host_shaders/ui_upscale_ps.dxil.h"
 #endif
 #if defined(PLUME_DEKO3D)
 #include <plume_deko3d.h>  // banjo-nx (2026-10-17): Deko3DBindMemExport
@@ -88,6 +96,12 @@ REXCVAR_DEFINE_STRING(banjo_renut_diag_stream_dump_vs, "", "Banjo/Renut",
 REXCVAR_DEFINE_INT32(banjo_renut_diag_draw_log_s, 0, "Banjo/Renut",
                      "Diagnostic: this many seconds after the first draw, log every draw of the next two frames "
                      "([drawlog]: shaders, counts, target, state; 0 = off)");
+// culdcept-nx (2026-11-19): a window for the draw log (a fade whose second varies from run to run), clears logged too.
+REXCVAR_DEFINE_INT32(banjo_renut_diag_draw_log_until_s, 0, "Banjo/Renut",
+                     "Diagnostic: with banjo_renut_diag_draw_log_s, log one frame in every banjo_renut_diag_draw_log_every "
+                     "up to this second (0 = the two frames only); clears are logged with the draws");
+REXCVAR_DEFINE_INT32(banjo_renut_diag_draw_log_every, 6, "Banjo/Renut",
+                     "Diagnostic: the draw log's window takes one frame in this many");
 REXCVAR_DEFINE_STRING(banjo_renut_diag_blend_skip_exclude, "", "Banjo/Renut",
                       "Diagnostic: pixel shader hashes (hex, comma separated) banjo_gpu_blend_skip leaves alone");
 
@@ -119,9 +133,27 @@ REXCVAR_DEFINE_BOOL(banjo_renut_stream_mask, true, "Banjo/Enhancements",
 REXCVAR_DEFINE_BOOL(banjo_renut_texture_defaults_copy, true, "Banjo/Enhancements",
                     "Renut's renderer: a draw's default texture and sampler words are one copy of a block made once")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// renut-ultimate (2026-11-16, port 145; tw2de_nx's seen19, ON at the user's word: "port the speed ups as on by default"): RedeemQuietStream below.
+REXCVAR_DEFINE_BOOL(banjo_renut_stream_redeem, true, "Banjo/Renut",
+                    "tw2de_nx (exact): a vertex stream that turned dynamic (rewritten 3 times) becomes cacheable again "
+                    "after 60 conversions in a row found its memory unwritten (the store cards): it then takes the usual "
+                    "way to a cached copy. tw2de_nx: 7-7.7 ms of render thread a frame converting streams the game had "
+                    "stopped writing. false: dynamic for good, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// renut-ultimate (2026-11-16, port 145; tw2de_nx's, off by default at the user's word): FetchFiltersOn below.
+REXCVAR_DEFINE_BOOL(banjo_renut_fetch_filters, false, "Banjo/Renut",
+                    "tw2de_nx (exact, as the console samples): a texture is sampled with the filters its shader's fetch "
+                    "instructions give (mag / min / mip filter, anisotropy) where they give one, not only the fetch "
+                    "constant's (FINAL FANTASY XIII's light shafts: a point-sampled mask blurred into steps). The draws "
+                    "whose shaders give them go the full draw path. false: the fetch constant's alone, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_fetch_slots_skip, true, "Banjo/Enhancements",
                     "Renut's renderer on deko3d: a draw without vertex fetches skips the compare of the shared "
                     "constants' fetch slots when the last push had none either (both zero)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_deko3d_stage_swap, true, "Banjo/Enhancements",
+                    "deko3d command stage (2026-11-21, item 3): a float constant run goes into the stage's stream as the "
+                    "guest has it and the stage swaps it (no swap and no copy on the render thread). In-run A/B 184")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_repeat_census, false, "Banjo/Diagnostics",
                     "Renut's renderer (2026-10-23, batch 6b): two frames in every 32 hashed draw by draw, and the 10 s "
@@ -321,12 +353,30 @@ REXCVAR_DEFINE_BOOL(banjo_renut_whole_buffers_verify, false, "Banjo/Diagnostics"
                     "Tests (banjo_renut_whole_buffers): each whole-buffer draw's indices compared with the guest's, and "
                     "its vertices' rows with the range converted again; a difference is logged")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Port 170 (from fnxf_xiii): see SettleExportsForFence. A fix, so off by default (fnxf_xiii: on).
+REXCVAR_DEFINE_BOOL(banjo_fence_waits_exports, false, "Banjo/Renut",
+                    "A D3D fence completes only once every pending memexport result is in guest memory (fnxf_xiii: the "
+                    "game freed memory at the fence and a late GPU copy overwrote what it wrote there). A GPU sync on "
+                    "every fence while exports are pending. false: as soon as the render thread has read the work, as "
+                    "before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Port 166 (from fnxf_xiii): see SetSampleMaskLocked. Accuracy, so off by default here (fnxf_xiii: on).
+REXCVAR_DEFINE_BOOL(banjo_deko3d_sample_mask, false, "Banjo/Enhancements",
+                    "deko3d: the game's MSAA sample mask (PA_SC_AA_MASK) for each draw on a multisampled target (fnxf_xiii: "
+                    "per-sample depth restores drew every sample). false: every sample written, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(banjo_renut_fast_draw, true, "Banjo/Enhancements",
                     "Renut's renderer (2026-10-26, the record-time draw path's stage 1, docs/record-time-draw-path.md): "
                     "a draw starts from what the draw before left and redoes only what the recording's field bits and "
                     "the render thread's epochs say changed (FastDrawLocked); new targets, declarations, the "
                     "predication, Draw*UP, points, tessellation, memexport, the fur, the composite and range geometry "
                     "keep DrawStateLocked. A/B target 25. Off: DrawStateLocked for every draw")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// culdcept-nx (2026-11-19): see FastForceFields.
+REXCVAR_DEFINE_STRING(banjo_renut_diag_fast_force, "", "Banjo/Renut",
+                      "Diagnostic: 'from-to:mask;...' (seconds after the first fast-draw check, a hexadecimal DrawField "
+                      "mask): in each window every fast draw takes those field bits as changed, whatever its chain "
+                      "says; each window's start is logged ([fastforce]). Empty: off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (2026-10-27): the shadow-path census (draw.h DrawKindsReport).
 REXCVAR_DEFINE_BOOL(banjo_renut_diag_draw_kinds, false, "Banjo/Diagnostics",
@@ -427,9 +477,100 @@ REXCVAR_DEFINE_BOOL(banjo_renut_lean_diagnostics, true, "Banjo/Enhancements",
                     "draw and stream dumps' checks are made once instead of a call per draw")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(vivapinata_resolve_from_sibling, true, "Banjo/Enhancements",
+                    "vivapinata-nx (2026-11-11, the GPU round; A/B 87): a multisampled colour resolve of a target unchanged "
+                    "(but for colour clears elsewhere) since the API last resolved it to its own place, over a rect inside "
+                    "that one: into the same destination, which still holds that resolve, nothing is done (those texels "
+                    "are there); into another destination of the same format and scale that still holds it, its texels "
+                    "are copied (one sample read each) instead of resolved. Viva Pinata resolves its scene whole into a "
+                    "texture and then, nothing drawn between, per tile into the same texture, each tile cleared after "
+                    "(EndTiling). The same texels either way. Off: resolved again")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_BOOL(vivapinata_shader_round, true, "Banjo/Enhancements",
+                    "vivapinata-nx (2026-11-12, the shader round; A/B 150): the shader round's GLSL passes (samplerk, "
+                    "onexsize: vivapinata-nx's docs/shader-round.md) act in the pixel shaders, constant 975 at its default 1. Off (or the "
+                    "A/B's off half): the pipelines are built with 975 = 0 and each of those passes' code does what it did "
+                    "before the pass. The same pixels either way: a switch to measure them in one run")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+REXCVAR_DEFINE_BOOL(vivapinata_shader_noearly, false, "Banjo/Enhancements",
+                    "vivapinata-nx (2026-11-12, the shader round; A/B 151): the pixel shaders without Renut's early alpha "
+                    "test (constant 976 = 0, tools/deko3d_glsl_opt.py noearly): a quad that test would discard is "
+                    "discarded by the shader's own alpha test instead, so the same pixels. It pays where the shader after "
+                    "the test is short (the grass shells: the test is 19 of their 80 instructions). Off: as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// renut-ultimate (2026-11-12, port 99): on by default in the base (vivapinata-nx ships it on in its tomls: -0.33 ms of
+// GPU a frame in its garden, run c24, A/B 152, steady over 5-6 cycles; the same pixels. Its first number, -4.32 ms,
+// had the plain fetches off in the A/B's off half too: the A/B was then numbered 92, sasrt::gpu_round's item 2).
+REXCVAR_DEFINE_BOOL(vivapinata_shader_earlykill, true, "Banjo/Enhancements",
+                    "vivapinata-nx (2026-11-12, the shader round; A/B 152): the pixel shaders' alpha test moved up to right "
+                    "after what it needs, the colour arithmetic it does not need after it (constant 977 = 1, "
+                    "tools/deko3d_glsl_opt.py earlykill): a discarded pixel skips that arithmetic, the same pixels. Off: "
+                    "the test last, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Port 179 (from fnxf_xiii, its render/draw.cpp of 2026-10-31 and 2026-11-01): CarryEdramBeforeDrawLocked. A heuristic,
+// so off by default (the user's rule for keys that can change a game's picture): a game that shows black or noise where
+// the console shows the frame before turns it on in its toml.
+REXCVAR_DEFINE_BOOL(banjo_renut_edram_carry, false, "Banjo/Renut",
+                    "From fnxf_xiii: a colour target first drawn in a frame without being cleared in it starts with the "
+                    "picture of the target last written over the same EDRAM base in an earlier frame (the same format, at "
+                    "least as large, single-sampled), scaled to fit: the console's EDRAM kept that picture there, a host "
+                    "target only what it drew itself. Not with blur_renut_edram_inherit (the exact, tile-by-tile rule). "
+                    "false: such a target holds what it last drew, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(banjo_renut_diag_edram_carry_always, false, "Banjo/Renut",
+                    "banjo_renut_edram_carry, a test: every target's first draw in a frame takes the picture of the "
+                    "other colour target written last (the same format, at least as large), whatever its EDRAM base, "
+                    "frame and order, and the first 16 checks are logged. The picture can be wrong: it checks that the "
+                    "carry's pass runs, on a game that never needs it")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REXCVAR_DECLARE(bool, banjo_renut_neon_compare);  // banjo-nx (2026-10-20, from sa2-nx): backend/queued.cpp
 
 namespace renut::gpu {
+
+// vivapinata-nx (2026-11-11, vivapinata_resolve_from_sibling / A/B 87): a colour clear of 's' (its writes counted already): its
+// rect goes with the sibling, or the sibling ends when four are taken.
+void NoteSiblingClear(HostSurface &s, const plume::RenderRect &host_rect) {
+  ++s.rect_clears;
+  HostSurface::MsSibling &sib = s.ms_sibling;
+  if (!sib.dest_va)
+    return;
+  if (sib.cleared_count >= 4) {
+    sib = {};
+    return;
+  }
+  int32_t *r = sib.cleared[sib.cleared_count++];
+  r[0] = host_rect.left;
+  r[1] = host_rect.top;
+  r[2] = host_rect.right;
+  r[3] = host_rect.bottom;
+}
+
+bool ResolveFromSiblingOn() {
+  static const bool on = REXCVAR_GET(vivapinata_resolve_from_sibling);
+  return on && banjo::renut_gpu::g_ab_off_plain != 87;
+}
+// 'why': 0 copied from another destination, 1 not resolved (the destination holds it), 2 no record, 3 the target written
+// since (not only cleared), 4 a clear since over this rect, 5 another image or a rect outside the record's, 6 the same
+// destination changed since or elsewhere, 7 the other destination changed since or not copyable. Render thread only.
+void CountResolveFromSibling(int why) {
+  static uint64_t n[8] = {};
+  static auto last = std::chrono::steady_clock::now();
+  ++n[why & 7];
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last >= std::chrono::seconds(10)) {
+    RGPU_INFO("[renut] resolve from the last one (vivapinata_resolve_from_sibling, A/B 87) in the last {:.0f} s: {} "
+              "not resolved (in the destination already), {} copied from another destination; not: {} no record, {} "
+              "written since, {} cleared over, {} outside, {} destination changed, {} other changed",
+              std::chrono::duration<double>(now - last).count(), n[1], n[0], n[2], n[3], n[4], n[5], n[6], n[7]);
+    std::fill(std::begin(n), std::end(n), 0);
+    last = now;
+  }
+}
 
 ChainHint g_chain_hint;  // banjo-nx (2026-10-20, from sa2-nx): draw.h
 // banjo-nx (2026-10-26): the chain reuse's answers (CountChainReuse's 'what') counted in plain words on the render
@@ -459,7 +600,7 @@ static_assert(FieldsOfRange(d3d::kDeviceOffsetRenderTargets, 20) == kFieldTarget
 // banjo-nx (2026-10-26): banjo_renut_chain_reuse as configured, and not in the off half of its in-run A/B (target 20).
 inline bool ChainReuseOn() {
   static const bool on = REXCVAR_GET(banjo_renut_chain_reuse);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 20;
+  return on && banjo::renut_gpu::g_ab_off_plain != 20;
 }
 
 // sasrt-nx's game-frame count (defined further down, where SasrtNoteExport uses it): declared here for the fourth round's
@@ -1088,6 +1229,9 @@ struct HeldExport {
 };
 std::map<u32, HeldExport> g_held_exports;
 std::vector<std::shared_ptr<std::vector<u8>>> g_held_retired;
+// sasrt-nx (2026-11-12, batch C/D, item D2; port 93): retired buffers nothing points into any more (the flush), for the
+// next holds.
+std::vector<std::shared_ptr<std::vector<u8>>> g_held_pool;
 uint64_t g_held_reads = 0;
 // Keeps an export's results ('size' bytes at 'data', physical base 'base'), dropping kept ones it overlaps.
 void HoldExport(u32 base, const u8 *data, u32 size, uint64_t frame) {
@@ -1105,7 +1249,13 @@ void HoldExport(u32 base, const u8 *data, u32 size, uint64_t frame) {
     it = g_held_exports.erase(it);
   }
   HeldExport &h = g_held_exports[base];
-  h.data = std::make_shared<std::vector<u8>>(data, data + size);
+  if (!g_held_pool.empty()) {  // sasrt-nx (2026-11-12, batch C/D, item D2; port 93): a pooled buffer, the same bytes
+    h.data = std::move(g_held_pool.back());
+    g_held_pool.pop_back();
+    h.data->assign(data, data + size);
+  } else {
+    h.data = std::make_shared<std::vector<u8>>(data, data + size);
+  }
   h.frame = frame;
   h.checked = UINT64_MAX;
   h.overwritten = false;
@@ -1153,6 +1303,13 @@ uint64_t g_stream_cache_refused = 0;
 // 150 frames (2026-10-23, batch 5): 60 was 2 s at the overclocked console's 30 fps, so the pass dropped copies of the
 // scene still being drawn and they were converted again (15-50 thousand refusals every 10 s at the cap).
 constexpr uint64_t kPressureIdleFrames = 150;
+// sasrt-nx (2026-11-10; port 58): see the drain in the stream cache's idle pass.
+REXCVAR_DEFINE_BOOL(sasrt_stream_cache_drain, true, "SASRT/Graphics",
+                    "With the stream cache's pool past 1.5 times its copies (and 64 MB), its sparsest chunk is drained: "
+                    "new copies go elsewhere and its copies not drawn in the last frame are dropped (made again when "
+                    "needed), so the chunk empties and goes back (SASRT's run mem14: 104-146 MB of copies in a 288 MB "
+                    "pool)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // banjo-nx (package 28, banjo_renut_diag_resolve_trace): draws since the last change of targets.
 uint32_t g_trace_draws = 0;
 
@@ -1180,6 +1337,8 @@ public:
   PoolSpan Allocate(u32 size) {
     const uint64_t need = (uint64_t(size) + kAlign - 1) & ~(kAlign - 1);
     for (u32 i = 0; i < chunks_.size(); ++i) {
+      if (i == draining_)
+        continue;  // sasrt-nx (2026-11-10, sasrt_stream_cache_drain; port 58): taken last, below
       if (PoolSpan span = Take(i, need); span)
         return span;
     }
@@ -1191,6 +1350,10 @@ public:
     u32 index = AddChunk(need);
     if (index == UINT32_MAX && need <= kSmallChunkSize)
       index = AddChunk(0, kSmallChunkSize);  // a smaller chunk may still fit in a fragmented heap
+    if (index == UINT32_MAX && draining_ < chunks_.size()) {
+      if (PoolSpan span = Take(draining_, need); span)
+        return span;  // sasrt-nx (2026-11-10; port 58): no other room: the chunk being drained after all
+    }
     if (index == UINT32_MAX) {
       no_chunk_until_ = g_stream_cache_frame + kNoChunkFrames;
       if (chunk_failures_++ < 4)
@@ -1219,6 +1382,10 @@ public:
         chunk.free.clear();
         chunk.size = 0;
         no_chunk_until_ = 0;  // banjo-nx (2026-10-28): its memory goes back: a new chunk may fit again
+        if (span.chunk == draining_) {  // sasrt-nx (2026-11-10, sasrt_stream_cache_drain; port 58): drained
+          ++drained_;
+          draining_ = UINT32_MAX;
+        }
       }
     }
     deferred_[slot].clear();
@@ -1226,6 +1393,30 @@ public:
 
   // banjo-nx (2026-10-27, banjo_renut_fetch_cache): a chunk's size (a draw binding the chunk binds all of it).
   uint64_t ChunkBytes(u32 index) const { return index < chunks_.size() ? chunks_[index].size : 0; }
+
+  // sasrt-nx (2026-11-10, sasrt_stream_cache_drain; port 58): the chunk (not 0, which stays) with the fewest bytes in
+  // use, or UINT32_MAX; the chunk being drained (taken last by Allocate) and the drains finished.
+  u32 SparsestChunk() const {
+    u32 best = UINT32_MAX;
+    uint64_t best_used = UINT64_MAX;
+    for (u32 i = 1; i < chunks_.size(); ++i) {
+      const Chunk &c = chunks_[i];
+      if (!c.buffer)
+        continue;
+      uint64_t free = 0;
+      for (const auto &range : c.free)
+        free += range.second;
+      const uint64_t used = c.size > free ? c.size - free : 0;
+      if (used < best_used) {
+        best_used = used;
+        best = i;
+      }
+    }
+    return best;
+  }
+  u32 draining_ = UINT32_MAX;
+  u32 drain_passes_ = 0;
+  uint64_t drained_ = 0;
 
   // Host memory the chunks hold.
   uint64_t Bytes() const {
@@ -1411,6 +1602,12 @@ struct CachedStream {
   // and whether they were hashed yet.
   u8 changes = 0;
   bool hashed = false;
+  // renut-ultimate (2026-11-16, port 145; tw2de_nx's seen19; banjo_renut_stream_redeem): a dynamic stream's quiet run
+  // (RedeemQuietStream): the flush it was last converted at, how many conversions in a row found its memory unwritten
+  // since the one before, and how often it came back.
+  uint64_t quiet_flush = UINT64_MAX;
+  u32 quiet = 0;
+  u32 redeemed = 0;
 };
 using StreamCache = std::unordered_map<StreamKey, CachedStream, StreamKeyHash>;
 StreamCache g_stream_cache;
@@ -1474,7 +1671,7 @@ uint64_t g_ranges_forgotten = 0;
 
 inline bool SecondSightingOn() {
   static const bool on = REXCVAR_GET(banjo_renut_stream_second_sighting);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 71;
+  return on && banjo::renut_gpu::g_ab_off_plain != 71;
 }
 
 // The cache entry BindStreams reads a range through: null on its first sighting (no entry made).
@@ -1561,10 +1758,16 @@ u32 PhysicalOf(const u8 *data) {
 
 // banjo-nx (2026-10-23, render-thread round): the lines PagesClean reads first for a range: its first pages' cards in
 // the four views and their serials. Prefetches only.
+void PrefetchCardLines(u32 offset);
 void PrefetchCards(const u8 *data, size_t bytes) {
+  const u32 offset = StoreCards() && bytes ? PhysicalOf(data) : UINT32_MAX;
+  if (offset != UINT32_MAX)
+    PrefetchCardLines(offset);
+}
+// banjo-nx (2026-11-21, A/B 181): PrefetchCards from the physical offset (render/draw.h PrefetchCardsAt).
+void PrefetchCardLines(u32 offset) {
   u8 *cards = StoreCards();
-  const u32 offset = cards && bytes ? PhysicalOf(data) : UINT32_MAX;
-  if (offset == UINT32_MAX)
+  if (!cards)
     return;
   const u32 page = (offset >> 12) - ((offset >> 12) != 0);
   __builtin_prefetch(cards + 0xA0000u + page);
@@ -1667,6 +1870,7 @@ extern "C" uint64_t RexStoreCardsHostBytes(int which);
 // Whether the cards prove a cached copy last proven in interval 'proven' (UINT64_MAX: never, made at a flush) whose
 // guest bytes hashed 'hash' then. The cards are read, and cleared, before any hash of the range in this interval.
 bool CardsProve(const u8 *data, size_t bytes, uint64_t proven, uint64_t hash) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kCardsProve);  // blur-nx (2026-11-17)
   if (!banjo::renut_gpu::StoreCardsOn())
     return false;
   const bool clean = PagesClean(data, bytes, proven) && proven != UINT64_MAX;
@@ -1831,11 +2035,57 @@ ContentVerifier<StreamKey, HashGuestStream> g_stream_verifier;
 void DropCachedCopy(CachedStream &c) {
   if (!c.copy)
     return;
-  ++g_mesh_gen;  // banjo-nx (2026-10-27): mesh objects may name it
+  // blur-nx (2026-11-18, the Renut host batch's #36, blur_renut_mesh_gen_whole_only / A/B 240): mesh objects (and the
+  // geometry objects, the whole-repeat answer) name whole copies alone (WholeStreamCopy marks each entry it answers
+  // 'whole' before it returns), so a range copy's drop leaves them all valid. Every drop raised the generation: the
+  // console race's mesh objects missed 16,562 draws a 10 s as "of an older generation" (generation 5,555 by the end).
+  if (c.whole || !::renut::gpu::host_batch::On(::renut::gpu::host_batch::kMeshGenWhole))
+    ++g_mesh_gen;  // banjo-nx (2026-10-27): mesh objects may name it
   g_stream_cache_bytes -= c.bytes;
   g_copy_pool.Free(c.copy);
   c.copy = {};
   c.bytes = 0;
+}
+
+// renut-ultimate (2026-11-16, port 145; tw2de_nx's seen19 of 2026-11-06, banjo_renut_stream_redeem, on by default):
+// a stream turned dynamic (its guest bytes changed kMaxCacheDrops times) stays so for good and is converted at every
+// kick (tw2de_nx: 13.7-15.4 MB of streams a frame, 7-7.7 ms of the render thread): a stream the game rewrote a few
+// times (an area's first seconds) and then left alone paid that for the rest of the area. At each conversion of a
+// dynamic stream the store cards say whether its memory was written since the conversion before (PagesClean, as the
+// cached copies are proven); after kRedeemFlushes such conversions in a row it is a plain stream again (no drops, no
+// stable count) and takes the usual way to a cached copy (kStableFlushes equal hashes, then the copy and its checks:
+// exact). A stream that turns dynamic again after kMaxRedeems returns stays so.
+constexpr u32 kRedeemFlushes = 60;
+constexpr u32 kMaxRedeems = 4;
+uint64_t g_redeemed_streams = 0;
+void RedeemQuietStream(const PendingStreamFill &f) {
+  auto it = g_stream_cache.find(f.key);
+  if (it == g_stream_cache.end() || !it->second.dynamic)
+    return;
+  CachedStream &c = it->second;
+  const size_t bytes = size_t(f.count) * f.stride;
+  if (!banjo::renut_gpu::StoreCardsOn() || c.redeemed >= kMaxRedeems) {
+    c.quiet = 0;
+    return;
+  }
+  const bool clean = c.quiet_flush != UINT64_MAX && PagesClean(f.guest, bytes, c.quiet_flush);
+  c.quiet_flush = g_flush_serial;
+  if (!clean) {
+    c.quiet = 0;
+    return;
+  }
+  if (++c.quiet < kRedeemFlushes)
+    return;
+  c.dynamic = false;
+  c.drops = 0;
+  c.stable = 0;
+  c.hash = 0;
+  c.quiet = 0;
+  c.quiet_flush = UINT64_MAX;
+  ++c.redeemed;
+  if (++g_redeemed_streams <= 16 || (g_redeemed_streams & 1023) == 0)
+    RGPU_INFO("[renut] banjo_renut_stream_redeem: {} dynamic streams quiet for {} conversions made cacheable again",
+              g_redeemed_streams, kRedeemFlushes);
 }
 
 // After a flush converted 'f': count how long its bytes have held, and give a
@@ -2055,9 +2305,17 @@ plume::RenderRect ScaleRect(const plume::RenderRect &rect, RenderScale scale) {
 
 bool RestoreDepthFromColorLocked(HostSurface *depth, HostSurface *color);  // sasrt-nx (2026-10-20): below
 
+// blur-nx (2026-11-13, #55): GatherTargets on the target words (draw.h kResolveTargetWords: the four render targets,
+// then the depth-stencil surface), as a queued clear keeps them.
+bool GatherTargetsWords(const u32 *words, Targets &t);
 bool GatherTargets(const GuestDevice &device, Targets &t) {
+  u32 words[kResolveTargetWords];
+  ReadResolveTargets(device.Bytes(0), words);
+  return GatherTargetsWords(words, t);
+}
+bool GatherTargetsWords(const u32 *words, Targets &t) {
   for (u32 i = 0; i < d3d::kMaxRenderTargets; ++i) {
-    const u32 va = device.U32(d3d::kDeviceOffsetRenderTargets + i * 4);
+    const u32 va = words[i];
     if (!va)
       break;
     HostSurface *surface = GetHostSurfaceLocked(va);
@@ -2065,14 +2323,13 @@ bool GatherTargets(const GuestDevice &device, Targets &t) {
       break;
     t.colors[t.color_count++] = surface;
   }
-  HostSurface *depth = GetHostSurfaceLocked(device.U32(d3d::kDeviceOffsetDepthStencil));
+  HostSurface *depth = GetHostSurfaceLocked(words[4]);  // kDeviceOffsetDepthStencil
   if (depth && depth->depth) {
     // rr6-nx (2026-11-02, rr6_depth_covers_colour): a colour target larger than the depth surface under it.
     if (t.color_count && depth->scale == t.colors[0]->scale &&
         (depth->width < t.colors[0]->width || depth->height < t.colors[0]->height) &&
         banjo::renut_gpu::DepthCoversColourOn())
-      depth = GrowDepthToColourLocked(device.U32(d3d::kDeviceOffsetDepthStencil), depth, t.colors[0]->width,
-                                      t.colors[0]->height);
+      depth = GrowDepthToColourLocked(words[4], depth, t.colors[0]->width, t.colors[0]->height);
     t.depth = depth;
   }
   if (!t.color_count && !t.depth)
@@ -2163,6 +2420,31 @@ bool SasrtProfileVsOn() {
   static const bool on = REXCVAR_GET(sasrt_gpu_diag_profile_vs);
   return on;
 }
+// renut-ultimate (2026-11-13, sasrt-nx's resolve project: finer timing): with banjo_renut_diag_gpu_shaders and
+// sasrt_gpu_diag_profile_vs, each resolve's span splits into its parts: up to its draw (the transitions' barriers, which
+// wait for the work before them), the copy / depth draw itself, what follows it, and (a depth resolve) after its
+// destination's move to shader read; and each depth clear has its own label. Off: nothing changes.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_diag_resolve_split, false, "SASRT/Diagnostics",
+                    "Diagnostic (sasrt-nx, 2026-11-13): with banjo_renut_diag_gpu_shaders and sasrt_gpu_diag_profile_vs, "
+                    "a resolve's GPU time splits into its barriers, its draw and what follows it (with its resolves a "
+                    "frame), and every depth clear is under its own \"clears | depth WxH\" label")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+bool SasrtResolveSplitOn() {
+  static const bool on = REXCVAR_GET(sasrt_gpu_diag_resolve_split);
+  return on && banjo::renut_gpu::DiagGpuShadersOn() && SasrtProfileVsOn() && gpu_profile::Timed();
+}
+// The label for one part of a resolve: the source's kind, size and format, and which part.
+uint32_t SasrtResolvePartLabel(const HostSurface *surface, int part) {
+  static std::unordered_map<uint64_t, uint32_t> labels;
+  const uint64_t k = uint64_t(surface->width) | uint64_t(surface->height) << 14 |
+                     uint64_t(int(surface->format)) << 28 | uint64_t(surface->depth) << 40 | uint64_t(part) << 41;
+  uint32_t &label = labels[k];
+  static const char *const kParts[] = {"barriers", "draw", "after", "after the move to shader read (the clear, ...)"};
+  if (!label)
+    label = gpu_profile::Label(fmt::format("resolve parts | {} {}x{} format {}: {}", surface->depth ? "depth" : "colour",
+                                           surface->width, surface->height, int(surface->format), kParts[part])) + 1;
+  return label - 1;
+}
 // sasrt-nx (2026-11-08, sasrt_gpu_diag_profile_vs): a memexport draw's label also names its size (the draw's vertex
 // count rounded down to a power of two, its primitive type and instances): set by DrawStateLocked around the label.
 u32 g_sasrt_label_export_count = 0, g_sasrt_label_export_prim = 0, g_sasrt_label_export_inst = 0;
@@ -2214,6 +2496,7 @@ uint32_t ShaderProfileLabel(const Targets &t, const ShaderRecord *ps, const Pipe
 
 // banjo-nx (2026-10-28, GPU block): 'depth_writes': the draw it binds for writes depth or stencil (a clear's binds do).
 bool BindTargets(const Targets &t, bool depth_writes = true) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kBindTargets);  // blur-nx (2026-11-17)
   // kameo-nx (2026-11-03, banjo_deko3d_color_handover): a colour target holding a resolve left in its image; a whole clear
   // has given the image to the destination by now (ClearTargets), and a draw has drawn it (HandOverBeforeDrawLocked).
   for (uint32_t i = 0; i < t.color_count; ++i) {
@@ -2311,6 +2594,306 @@ bool BindTargets(const Targets &t, bool depth_writes = true) {
   return true;
 }
 
+// blur-nx (2026-11-11, port 76; its key 220: blur_renut_edram_inherit): before a draw that keeps part of a colour target (a
+// write mask without every channel, or blending, which reads it), the target takes what other views of its EDRAM tiles
+// wrote since its own last write (EdramInheritSourcesLocked, oldest first), through the console's tile and sample layout
+// (edram_inherit.hlsli). On the console the views are one memory; here each is its own host target, which held only what
+// it drew. Blur's environment panorama: drawn into a 512x256 4x target cleared to alpha 1, its RGB then drawn through a
+// 320x256 view of the same EDRAM with alpha left out, and that view resolved into the 256x128 texture the ground, car
+// glass and car paint read: its alpha is the clear's (and, over the tiles the panorama drew, the panorama's). A draw that
+// writes every channel without blending takes nothing (it covers what it draws; the rest stays as before this key).
+// Called by both draw paths before BindTargets; the draw's own binds follow (g_bound is reset).
+void InheritEdramBeforeDrawLocked(const Targets &t, u32 color_mask, const u32 *blend_control) {
+  if (!t.color_count || !banjo::renut_gpu::EdramInheritOn())
+    return;
+  auto &s = State();
+  static std::vector<HostSurface *> sources;
+  for (u32 i = 0; i < t.color_count; ++i) {
+    HostSurface *target = t.colors[i];
+    // Nothing written to any colour target since this one's last write or look: nothing to take (the common case, O(1)).
+    if (!target || target->depth || g_blur_color_write_last <= target->write_seq ||
+        g_blur_color_write_last <= target->blur_inherit_checked)
+      continue;
+    const u32 mask = (color_mask >> (4 * i)) & 0xF;
+    const bool blended = blend_control && (blend_control[i] & 0x1FFF1FFF) != 0x00010001;
+    // The channels the EDRAM format has: k_32_FLOAT one; k_16_16, k_16_16_FLOAT and k_32_32_FLOAT two; the rest four.
+    const u32 edram_format = (u32(target->color_info_word) >> 16) & 0xF;
+    const u32 every = edram_format == 14 ? 0x1u : (edram_format == 4 || edram_format == 6 || edram_format == 15) ? 0x3u : 0xFu;
+    if (!mask || ((mask & every) == every && !blended))
+      continue;  // writes nothing, or every channel without reading the target: looked at again by a draw that keeps
+    target->blur_inherit_checked = g_blur_color_write_last;
+    u32 skipped = 0;
+    EdramInheritSourcesLocked(target, sources, skipped);
+    if (skipped) {
+      static u32 logged = 0;
+      if (LogLimited(logged, 8))
+        RGPU_WARN("[renut] {}x{} target (EDRAM format {}) kept in part: {} other view(s) wrote its EDRAM since, of another "
+                  "format or scale: not taken (blur_renut_edram_inherit)", target->width, target->height,
+                  (u32(target->color_info_word) >> 16) & 0xF, skipped);
+    }
+    if (sources.empty())
+      continue;
+    u32 dst_bits = 0, dst_rows = 0;
+    if (!EdramInheritSpanLocked(target, dst_bits, dst_rows))
+      continue;
+    const bool dst_ms = target->samples != plume::RenderSampleCount::COUNT_1;
+    // renut-ultimate: a resolve handed over in this target's image is drawn out first; the copy writes the image.
+    if (target->handed)
+      DepthHandOverBeforeBindLocked(target, nullptr, 0);
+    HostSurface *const colors[] = {target};
+    plume::RenderFramebuffer *framebuffer = GetFramebufferLocked(colors, 1, nullptr);
+    if (!framebuffer)
+      continue;
+    u32 taken = 0;
+    for (HostSurface *source : sources) {
+      u32 src_bits = 0, src_rows = 0;
+      if (!EdramInheritSpanLocked(source, src_bits, src_rows))
+        continue;
+      const bool src_ms = source->samples != plume::RenderSampleCount::COUNT_1;
+      plume::RenderShader *ps = src_ms ? (dst_ms ? s.edram_inherit_ms_ms_ps.get() : s.edram_inherit_src_ms_ps.get())
+                                       : (dst_ms ? s.edram_inherit_dst_ms_ps.get() : s.edram_inherit_ps.get());
+      const uint32_t source_slot = ps ? SurfaceSampleSlotLocked(source) : kInvalidDescriptor;
+      if (source_slot == kInvalidDescriptor)
+        continue;
+      auto &pipeline = s.edram_inherit_pipelines[uint32_t(target->format) | (uint32_t(target->samples) << 20) |
+                                                 (src_ms ? 0x80000000u : 0u)];
+      if (!pipeline) {
+        plume::RenderGraphicsPipelineDesc desc;
+        desc.pipelineLayout = s.utility_layout.get();
+        desc.vertexShader = s.present_vs.get();
+        desc.pixelShader = ps;
+        desc.multisampling = plume::RenderMultisampling(plume::RenderSampleCounts(target->samples));
+        desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+        desc.cullMode = plume::RenderCullMode::NONE;
+        desc.renderTargetCount = 1;
+        desc.renderTargetFormat[0] = target->format;
+        desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
+        desc.depthTargetFormat = plume::RenderFormat::UNKNOWN;
+        pipeline = s.device->createGraphicsPipeline(desc);
+        if (!pipeline)
+          continue;
+        pipeline->setName("renut edram inherit");
+      }
+      plume::RenderCommandList *cmd = s.command_list;
+      TransitionSurfaceLocked(source, plume::RenderTextureLayout::SHADER_READ);
+      TransitionSurfaceLocked(target, plume::RenderTextureLayout::COLOR_WRITE);
+      cmd->setFramebuffer(framebuffer);
+      g_bound.framebuffer = framebuffer;
+      cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(target->width), float(target->height)));
+      cmd->setScissors(plume::RenderRect(0, 0, int32_t(target->width), int32_t(target->height)));
+      cmd->setGraphicsPipelineLayout(s.utility_layout.get());
+      cmd->setPipeline(pipeline.get());
+      cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
+      cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
+      UtilityPush push{};
+      std::memcpy(&push.scale[0], &dst_bits, 4);
+      std::memcpy(&push.scale[1], &src_bits, 4);
+      const u32 src_w = source->width, src_h = source->height;
+      std::memcpy(&push.translate[0], &src_w, 4);
+      std::memcpy(&push.translate[1], &src_h, 4);
+      std::memcpy(&push.param0, &src_rows, 4);
+      // blur-nx (2026-11-13, MSAA lowered): the host targets' sample counts (edram_inherit.hlsli): a 4x view made 2x by
+      // msaa_level read sample indices 2 and 3 of a 2-sample image (nothing there).
+      const u32 host_samples = (u32(target->samples) & 0xFu) | ((u32(source->samples) & 0xFu) << 4);
+      std::memcpy(&push.param1, &host_samples, 4);
+      push.texture_index = source_slot;
+      push.sampler_index = kPointClampSamplerSlot;
+#if defined(PLUME_DEKO3D)
+      // renut-ultimate (port 76, not in blur-nx): the multisampled source forms' deko3d shaders read the source as a
+      // BOUND texture (binding 0: tools/deko3d_glsl.py makes a host shader's bindless Texture2DMS dk_ms_b0), as the depth
+      // resolve's multisampled variant does (katamari-nx: Ryujinx cannot follow a bindless multisampled fetch).
+      // Without it they read whatever binding 0 last held.
+      if (src_ms && IsDeko3D())
+        banjo::renut_gpu::record::BindFragmentTextures(cmd, 0, &source_slot, 1);
+#endif
+      cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
+      cmd->drawInstanced(3, 1, 0, 0);
+      ++taken;
+      static u32 logged = 0;
+      if (LogLimited(logged, 16))
+        RGPU_INFO("[renut] {}x{} {}x target (base {:03X}, EDRAM format {}) kept in part takes what a {}x{} {}x view wrote "
+                  "over its tiles since (base {:03X}; blur_renut_edram_inherit)", target->width, target->height,
+                  u32(target->samples), u32(target->color_info_word) & 0xFFF, (u32(target->color_info_word) >> 16) & 0xF,
+                  source->width, source->height, u32(source->samples), u32(source->color_info_word) & 0xFFF);
+    }
+    if (taken) {
+      static uint64_t total = 0;  // how often: a copy of the target each time (logged as the count passes a power of two)
+      const uint64_t before = total;
+      total += taken;
+      if (std::bit_width(before) != std::bit_width(total))
+        RGPU_INFO("[renut] blur_renut_edram_inherit: {} copies so far", total);
+      ++target->writes;  // banjo-nx (banjo_renut_resolve_skip): it holds other pixels now
+      target->write_seq = ++g_surface_write_seq;
+      g_blur_color_write_last = target->write_seq;
+      target->blur_inherit_checked = g_blur_color_write_last;
+      // The draw path binds its own layout, pipeline, targets and viewport again.
+      g_bound.framebuffer = nullptr;
+      g_bound.pipeline = nullptr;
+      g_bound.layout = false;
+      g_bound.viewport_set = false;
+    }
+  }
+}
+
+// Port 179 (from fnxf_xiii, its render/draw.cpp EdramCarryLocked of 2026-10-31 and 2026-11-01; banjo_renut_edram_carry,
+// off by default). On the console a colour target is a view of EDRAM, which keeps what was last written there: a game that
+// draws into a target without clearing it leaves the pixels its geometry misses as the EDRAM held them, often another
+// target's picture from the frame before. Here each view is a host image of its own that holds only what it drew (black
+// at first: sasrt_renut_deko3d_clear_new). FINAL FANTASY XIII's Vestige, behind the crystal: no geometry there and the
+// scene's colour never cleared, so the console showed the last frame's picture (a soft light) and fnxf_xiii bright noise
+// or black. So: a colour target first drawn in a frame without a clear of it in that frame, where a different target of
+// the same EDRAM base and host format, at least as large (a smaller one does not cover this one's EDRAM), was written
+// after it in an earlier frame, starts with that target's picture scaled to its size (bilinear: smaa_vs and
+// ui_upscale_ps, the UI upscale's pass). Once a target and frame at most, across frames only (within a frame the game's
+// passes resolve what they need), single-target draws only. The base's, not fnxf_xiii's: the source single-sampled (it
+// is sampled as a 2D texture), the targets an alias clear reaches counted as cleared, a colour-only framebuffer of its
+// own rather than the draw's, and nothing while blur_renut_edram_inherit is on. Called by both draw paths before
+// BindTargets (the fast path whatever it then binds, so every draw marks its targets); the draw's own binds follow
+// (g_bound is reset).
+std::unordered_map<u32, uint64_t> g_carry_last;  // EDRAM base -> the generation of the colour target written there last
+uint64_t g_carry_order = 0;
+// banjo_renut_diag_edram_carry_always: the two colour targets written last, any base (the last first).
+uint64_t g_carry_last_any[2] = {};
+void NoteCarryAny(uint64_t generation) {
+  if (g_carry_last_any[0] != generation) {
+    g_carry_last_any[1] = g_carry_last_any[0];
+    g_carry_last_any[0] = generation;
+  }
+}
+
+inline bool EdramCarryOn() {
+  static const bool on = [] {
+    const bool v = REXCVAR_GET(banjo_renut_edram_carry);
+    if (v)
+      RGPU_INFO("[renut] banjo_renut_edram_carry on{}", REXCVAR_GET(banjo_renut_diag_edram_carry_always)
+                                                             ? ", with banjo_renut_diag_edram_carry_always (a test)"
+                                                             : "");
+    return v;
+  }();
+  return on && !banjo::renut_gpu::EdramInheritOn();
+}
+
+void NoteEdramCarryClearLocked(HostSurface *c) {
+  if (!c || c->depth)
+    return;
+  c->carry_cleared_frame = TextureFrameLocked();
+  c->carry_order = ++g_carry_order;
+  g_carry_last[u32(c->color_info_word) & 0xFFFu] = c->generation;
+  NoteCarryAny(c->generation);
+}
+
+void CarryEdramBeforeDrawLocked(const Targets &t) {
+  auto &s = State();
+  const uint64_t frame = TextureFrameLocked();
+  static const bool always = REXCVAR_GET(banjo_renut_diag_edram_carry_always);
+  for (uint32_t i = 0; i < t.color_count; ++i) {
+    HostSurface *c = t.colors[i];
+    if (!c || c->depth || c->carry_drawn_frame == frame)
+      continue;
+    uint64_t &last = g_carry_last[u32(c->color_info_word) & 0xFFFu];
+    // By generation: a target retired or rebuilt since is not found.
+    const uint64_t source =
+        !always ? last : g_carry_last_any[0] != c->generation ? g_carry_last_any[0] : g_carry_last_any[1];
+    HostSurface *from = source && source != c->generation ? SurfaceByGenerationLocked(source) : nullptr;
+    const bool carry = t.color_count == 1 && (always || c->carry_cleared_frame != frame) && from && from != c &&
+                       !from->depth && from->texture && c->texture && from->format == c->format &&
+                       from->samples == plume::RenderSampleCount::COUNT_1 &&
+                       (always || (from->carry_drawn_frame < frame && from->carry_order > c->carry_order)) &&
+                       from->width >= c->width && from->height >= c->height;
+    if (always) {  // the test logs its first checks: what each target found
+      static u32 checks = 0;
+      if (LogLimited(checks, 16))
+        RGPU_INFO("[renut] banjo_renut_diag_edram_carry_always: {}x{} target {:08X} (format {}, samples {}, base {:03X}, "
+                  "{} targets) {}: {}", c->width, c->height, c->guest_va, u32(c->format), u32(c->samples),
+                  u32(c->color_info_word) & 0xFFFu, t.color_count, carry ? "carried" : "not carried",
+                  from ? fmt::format("from {:08X} ({}x{}, format {}, samples {}, order {} against {})", from->guest_va,
+                                     from->width, from->height, u32(from->format), u32(from->samples), from->carry_order,
+                                     c->carry_order)
+                       : fmt::format("no source (generation {})", source));
+    }
+    c->carry_drawn_frame = frame;
+    c->carry_order = ++g_carry_order;
+    last = c->generation;
+    NoteCarryAny(c->generation);
+    if (!carry)
+      continue;
+    static std::unique_ptr<plume::RenderShader> vs, ps;
+    static bool tried = false;
+    if (!tried) {
+      tried = true;
+      vs = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(smaa_vs), "smaa_vs");
+      ps = CreateHostShader(s.device.get(), RENUT_HOST_SHADER(ui_upscale_ps), "ui_upscale_ps");
+      if (!vs || !ps)
+        RGPU_WARN("[renut] banjo_renut_edram_carry: its shaders could not be made, so nothing is carried");
+    }
+    if (!vs || !ps)
+      return;
+    static std::unordered_map<uint64_t, std::unique_ptr<plume::RenderPipeline>> pipelines;
+    auto &pipeline = pipelines[uint64_t(c->format) | uint64_t(u32(c->samples)) << 32];
+    if (!pipeline) {
+      plume::RenderGraphicsPipelineDesc desc;
+      desc.pipelineLayout = s.utility_layout.get();
+      desc.vertexShader = vs.get();
+      desc.pixelShader = ps.get();
+      desc.multisampling = plume::RenderMultisampling(plume::RenderSampleCounts(c->samples));
+      desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+      desc.cullMode = plume::RenderCullMode::NONE;
+      desc.renderTargetCount = 1;
+      desc.renderTargetFormat[0] = c->format;
+      desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
+      desc.depthTargetFormat = plume::RenderFormat::UNKNOWN;
+      pipeline = s.device->createGraphicsPipeline(desc);
+      if (!pipeline)
+        continue;
+      pipeline->setName("renut edram carry");
+    }
+    const uint32_t source_slot = SurfaceSampleSlotLocked(from);
+    if (source_slot == kInvalidDescriptor)
+      continue;
+    // A resolve handed over in this target's image is drawn out first: the carry writes the image.
+    if (c->handed)
+      DepthHandOverBeforeBindLocked(c, nullptr, 0);
+    HostSurface *const colors[] = {c};
+    plume::RenderFramebuffer *framebuffer = GetFramebufferLocked(colors, 1, nullptr);
+    if (!framebuffer)
+      continue;
+    plume::RenderCommandList *cmd = s.command_list;
+    TransitionSurfaceLocked(from, plume::RenderTextureLayout::SHADER_READ);
+    TransitionSurfaceLocked(c, plume::RenderTextureLayout::COLOR_WRITE);
+    cmd->setFramebuffer(framebuffer);
+    g_bound.framebuffer = framebuffer;
+    const uint32_t w = c->scale.Size(c->width), h = c->scale.Size(c->height);  // host pixels
+    cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(w), float(h)));
+    cmd->setScissors(plume::RenderRect(0, 0, int32_t(w), int32_t(h)));
+    cmd->setGraphicsPipelineLayout(s.utility_layout.get());
+    cmd->setPipeline(pipeline.get());
+    cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
+    cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
+    UtilityPush push{};
+    push.texture_index = source_slot;
+    push.sampler_index = kLinearClampSamplerSlot;
+    cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
+    cmd->drawInstanced(3, 1, 0, 0);
+    ++c->writes;  // banjo-nx (banjo_renut_resolve_skip): it holds other pixels now
+    c->write_seq = ++g_surface_write_seq;
+    g_blur_color_write_last = c->write_seq;
+    static uint64_t total = 0;
+    static u32 logged = 0;
+    ++total;
+    if (LogLimited(logged, 8))
+      RGPU_INFO("[renut] {}x{} target {:08X} (EDRAM base {:03X}, samples {}) starts from {:08X}'s picture ({}x{}), as "
+                "the console's EDRAM held it (banjo_renut_edram_carry)", c->width, c->height, c->guest_va,
+                u32(c->color_info_word) & 0xFFFu, u32(c->samples), from->guest_va, from->width, from->height);
+    else if (std::has_single_bit(total))
+      RGPU_INFO("[renut] banjo_renut_edram_carry: {} carries so far", total);
+    // The draw path binds its own layout, pipeline, targets and viewport again.
+    g_bound.framebuffer = nullptr;
+    g_bound.pipeline = nullptr;
+    g_bound.layout = false;
+    g_bound.viewport_set = false;
+  }
+}
+
 // A draw's host viewport and scissor. The game's D3D sets the viewport one of
 // two ways (N&B database):
 // - D3DDevice_SetViewport (0x821F2110) writes scale w/2, -h/2, maxZ - minZ
@@ -2340,6 +2923,18 @@ struct ViewportState {
   // relative to that tile.
   float pixel_origin[2] = {0.0f, 0.0f};
 };
+
+// blur-nx (2026-11-13, MSAA lowered; banjo_renut_alpha_to_mask_test): alpha to coverage on a single-sample target covers
+// the pixel when alpha >= 0.5 (MakeKey leaves the pipeline's alpha to coverage off for it). Combined with the game's own
+// alpha test: off (7) -> alpha >= 0.5 as before; greater (4) or greater-or-equal (6) below 0.5 -> alpha >= 0.5 (both must
+// pass); a test at 0.5 or above, or of another kind, stays the game's. Blur's foliage has alpha to coverage AND an
+// alpha test near 0: with msaa_level 1 its cards were drawn whole (the coverage dropped, only the near-zero test left).
+void AlphaToMaskTestSingleSample(u32 &func, float &threshold) {
+  if (func == 7 || ((func == 4 || func == 6) && !(threshold >= 0.5f))) {
+    func = 6;  // >=
+    threshold = 0.5f;
+  }
+}
 
 // The screen rect of the one tile a draw is predicated to while tiling
 // (SetTilesLocked); false for a draw that runs in more tiles, or none.
@@ -2403,6 +2998,37 @@ ViewportState ComputeViewport(const GuestDevice &device, const Targets &t) {
   static bool valid = false;
   if (valid && std::memcmp(key, last_key, sizeof(key)) == 0)
     return last;
+  // blur-nx (2026-11-18, the Renut host batch's #32, blur_renut_viewport_memo / A/B 239): the last eight answers by
+  // their inputs (the frame goes back and forth between a few viewports: the shadow maps, the scene, the passes after
+  // it). ComputeViewportSlow reads only what the key holds, as the single answer above assumed.
+  if (::renut::gpu::host_batch::On(::renut::gpu::host_batch::kViewportMemo)) {
+    static u32 keys[8][24];
+    static ViewportState states[8];
+    static u32 count = 0, next = 0;
+    for (u32 e = 0; e < count; ++e) {
+      if (std::memcmp(key, keys[e], sizeof(key)) == 0) {
+        if (::renut::gpu::host_batch::VerifyOn()) {  // blur-nx (2026-11-18): the kept answer against one made now
+          const ViewportState now = ComputeViewportSlow(device, t);
+          if (std::memcmp(&now, &states[e], sizeof(now)) != 0) {
+            ::renut::gpu::host_batch::VerifyDiffer("#32: a kept viewport differs from the one computed");
+            states[e] = now;
+          }
+        }
+        last = states[e];
+        std::memcpy(last_key, key, sizeof(key));
+        valid = true;
+        return last;
+      }
+    }
+    last = ComputeViewportSlow(device, t);
+    std::memcpy(keys[next], key, sizeof(key));
+    states[next] = last;
+    next = (next + 1) & 7;
+    count = std::min<u32>(count + 1, 8);
+    std::memcpy(last_key, key, sizeof(key));
+    valid = true;
+    return last;
+  }
   last = ComputeViewportSlow(device, t);
   std::memcpy(last_key, key, sizeof(key));
   valid = true;
@@ -3019,6 +3645,25 @@ constexpr u32 kConstantGroupBytes = 4 * 16;
 // kameo-nx (2026-11-04, banjo_renut_const_nan_flush; the rule from Kameo: RePowered's constant_buffers.cpp SwapConstantChunk,
 // MIT): a word with every exponent bit set goes to the shader as 0. Xenos multiplies anything by 0 to 0, NaN and infinity
 // included; the host's GPU keeps the NaN. 'held' keeps the guest's bytes (the next compare is against those).
+// banjo-nx (2026-11-21, item 3, banjo_deko3d_stage_swap): the group into the held copy and into the command stage's
+// stream as the guest has it (the stage swaps it: banjo_renut_record.h PushUniformRawBegin).
+[[gnu::always_inline]] inline void CopyGroupRaw(const u8 *guest, u8 *held, u8 *raw) {
+  static_assert(kConstantGroupBytes == 64);
+#if defined(__aarch64__)
+  const uint8x16_t a = vld1q_u8(guest), b = vld1q_u8(guest + 16), c = vld1q_u8(guest + 32), d = vld1q_u8(guest + 48);
+  vst1q_u8(held, a);
+  vst1q_u8(held + 16, b);
+  vst1q_u8(held + 32, c);
+  vst1q_u8(held + 48, d);
+  vst1q_u8(raw, a);
+  vst1q_u8(raw + 16, b);
+  vst1q_u8(raw + 32, c);
+  vst1q_u8(raw + 48, d);
+#else
+  std::memcpy(held, guest, kConstantGroupBytes);
+  std::memcpy(raw, guest, kConstantGroupBytes);
+#endif
+}
 [[gnu::always_inline]] inline void CopyAndSwapGroup(const u8 *guest, u8 *held, u8 *swapped, bool nan_flush) {
   static_assert(kConstantGroupBytes == 64);
 #if defined(__aarch64__)
@@ -3067,6 +3712,17 @@ inline void ClearFogPhaseNans(u8 *swapped) {
       lane = 0;
   }
   std::memcpy(swapped + 16, lanes, sizeof(lanes));
+}
+// rr6-nx (2026-11-22, the base sync): the same for a group as the guest has it (big-endian lanes), as the command
+// stage's raw runs carry them (the stage swaps them; port 251, banjo_deko3d_stage_swap). Zero is zero both ways.
+inline void ClearFogPhaseNansGuest(u8 *guest) {
+  u32 lanes[8];
+  std::memcpy(lanes, guest + 16, sizeof(lanes));  // registers 21 and 22
+  for (u32 &lane : lanes) {
+    if ((__builtin_bswap32(lane) & 0x7FFFFFFFu) > 0x7F800000u)
+      lane = 0;
+  }
+  std::memcpy(guest + 16, lanes, sizeof(lanes));
 }
 
 // The groups holding a register the shader reads.
@@ -3301,11 +3957,13 @@ UploadAllocation UploadFloatConstants(const FloatConstants &constants, const u32
   if (need > 256 * 16)
     std::memset(out + 256 * 16, 0, kFloatConstantsUboBytes - 256 * 16);
   // The upload memory is write-combined: written in order, never read.
+  // banjo-nx (2026-11-20): the key read once here, not a call (and its static's guard) for every group.
+  const bool nan_flush = banjo::renut_gpu::ConstNanFlushOn();
   for (uint64_t remaining = groups; remaining;) {
     const u32 group = u32(std::countl_zero(remaining));
     remaining &= ~(uint64_t(1) << (63 - group));
     CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
-                     out + group * kConstantGroupBytes, banjo::renut_gpu::ConstNanFlushOn());  // banjo-nx (2026-10-28)
+                     out + group * kConstantGroupBytes, nan_flush);  // banjo-nx (2026-10-28)
     if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn())  // rr6-nx (2026-11-03, rr6_fog_nan_zero)
       ClearFogPhaseNans(out + group * kConstantGroupBytes);
   }
@@ -3439,9 +4097,17 @@ inline void DiagPushLines(u32 first, u32 run) {
     for (u32 l = first; l < first + run && l < 22; ++l)
       ++g_diag_push_lines[l];
 }
+// banjo-nx (2026-11-21, item 3): banjo_deko3d_stage_swap and not A/B 184's off half.
+inline bool StageSwapOn() {
+  static const bool on = REXCVAR_GET(banjo_deko3d_stage_swap);
+  return on && banjo::renut_gpu::g_ab_off_plain != 184;
+}
 // One stage's float constants (see above); 'ubo' its buffer's address.
-void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &constants, const u32 used[8],
+// banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
+// constant propagation made two 6 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+[[gnu::noclone]] void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &constants, const u32 used[8],
                         ConstantUpload &last, const ShaderCacheEntry *entry, uint64_t ubo, const GroupSummary &summary) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kPushConstants);  // blur-nx (2026-11-17)
   // banjo-nx (2026-10-27, constants): whether the shader has literals and the registers it reads from its summary (the
   // record's first lines, prefetched with the shader lookup), not from its cache entry (a miss at most shader changes).
   // 'used' names the same registers as the summary's copy when it is the summary's own mask.
@@ -3454,7 +4120,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
   // 2026-10-28: banjo_renut_literals_resident, off (the console: the check cost more than the pushes it saved).
   static const bool literals_resident = REXCVAR_GET(banjo_renut_literals_resident);
   if (literals_resident && literals && last.literals != literals && summary.literal_runs &&
-      banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 34) {
+      banjo::renut_gpu::g_ab_off_plain != 34) {
     const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs);
     bool resident = !lr->runs().empty();
     for (const LiteralRuns::Run &run : lr->runs()) {
@@ -3524,14 +4190,33 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     // count instead of a test a group.
     const u32 count = u32(std::countl_one(remaining << first));
     alignas(16) u32 lanes[64 * kConstantGroupBytes / 4];
+    const bool nan_flush = banjo::renut_gpu::ConstNanFlushOn();  // banjo-nx (2026-11-20): once, not a call a group
+#if defined(PLUME_DEKO3D)
+    // banjo-nx (2026-11-21, item 3): on the command stage's proxy the run goes into its stream as the guest has it
+    // (the stage swaps it): no swap here and no copy from 'lanes'.
+    u8 *const raw = cmd == banjo::renut_gpu::record::g_proxy && StageSwapOn()
+                        ? banjo::renut_gpu::record::detail::PushUniformRawBegin(
+                              ubo, kFloatConstantsUboBytes, first * kConstantGroupBytes, count * kConstantGroupBytes,
+                              nan_flush)
+                        : nullptr;
+#else
+    u8 *const raw = nullptr;
+#endif
     for (u32 k = 0; k < count; ++k) {
       const u32 group = first + k;
       // banjo-nx (2026-10-27, render thread night): swapped on the way (a separate pass over the run before);
       // banjo-nx (2026-10-28): both copies from one NEON load (CopyAndSwapGroup).
-      CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
-                       reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)), banjo::renut_gpu::ConstNanFlushOn());
-      if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn())  // rr6-nx (2026-11-03, rr6_fog_nan_zero)
-        ClearFogPhaseNans(reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)));
+      if (raw) {
+        CopyGroupRaw(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                     raw + k * kConstantGroupBytes);
+        if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn())  // rr6-nx (2026-11-22): the stage's raw run
+          ClearFogPhaseNansGuest(raw + k * kConstantGroupBytes);
+      } else {
+        CopyAndSwapGroup(constants.Register(group * 4), last.bytes + group * kConstantGroupBytes,
+                         reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)), nan_flush);
+        if (group == kFogPhaseGroup && banjo::renut_gpu::FogNanZeroOn())  // rr6-nx (2026-11-03, rr6_fog_nan_zero)
+          ClearFogPhaseNans(reinterpret_cast<u8 *>(lanes + k * (kConstantGroupBytes / 4)));
+      }
       last.valid[group / 8] |= 0xFu << (group % 8 * 4);
       for (u32 q = 0; q < 4; ++q)
         last.lit_owner[group * 4 + q] = nullptr;  // banjo-nx (2026-10-27): the device's bytes now
@@ -3542,8 +4227,13 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
       }
       remaining &= ~(uint64_t(1) << (63 - group));
     }
-    plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, first * kConstantGroupBytes, lanes,
-                             count * kConstantGroupBytes);
+#if defined(PLUME_DEKO3D)
+    if (raw)
+      banjo::renut_gpu::record::detail::PushUniformRawEnd();
+    else
+#endif
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, first * kConstantGroupBytes, lanes,
+                                            count * kConstantGroupBytes);
     pushed_bytes += count * kConstantGroupBytes;
   }
   // The literal registers: after the groups (a group may hold one, and its update overwrote it).
@@ -3559,7 +4249,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     // would push them, and its registers' mask words.
     if (const auto *lr = static_cast<const LiteralRuns *>(summary.literal_runs)) {
       for (const LiteralRuns::Run &run : lr->runs()) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run.first * 16, lr->values() + run.value_word,
+        banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run.first * 16, lr->values() + run.value_word,
                                  run.count * 16);
         pushed_bytes += run.count * 16;
         for (u32 k = 0; k < run.count && run.first + k < 256; ++k)
@@ -3583,7 +4273,7 @@ void PushFloatConstants(plume::RenderCommandList *cmd, const FloatConstants &con
     u32 run_first = 0, run_count = 0;
     auto flush_run = [&] {
       if (run_count) {
-        plume::Deko3DPushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run_first * 16, run_values, run_count * 16);
+        banjo::renut_gpu::record::PushUniform(cmd, ubo, kFloatConstantsUboBytesAligned, run_first * 16, run_values, run_count * 16);
         pushed_bytes += run_count * 16;
         run_count = 0;
       }
@@ -3694,6 +4384,9 @@ constexpr u32 kSharedLines = (u32(sizeof(SharedConstants)) + 63) / 64;
 constexpr u32 kAllSharedLines = (1u << kSharedLines) - 1;
 static_assert(kSharedLines == 25);  // halo3-nx: 22 before the loop constants (24); renut-ultimate: the clip planes; the tail, bit 24, is still 16 bytes
 u32 g_sc_dirty = kAllSharedLines;
+// banjo-nx (2026-11-21, the spec answers kept): the lines of g_draw_sc written with a new value since the fast path last
+// made its spec answers (every push adds g_sc_dirty; a push of another block, all lines). FastDrawLocked clears it.
+u32 g_spec_lines_seen = ~0u;
 // banjo-nx (2026-10-28, per-draw night): the lines from the first to the last as one mask (a loop a line before, run at
 // every mark the compiler could not fold: FillTextures' slot words, the fields of a block passed by reference).
 constexpr u32 SharedLinesOf(size_t offset, size_t size) {
@@ -3765,6 +4458,7 @@ inline bool PersistentSharedVerifyOn() {
 
 #if defined(PLUME_DEKO3D)
 void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &sc, u32 equal_lines = 0) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kPushConstants);  // blur-nx (2026-11-17)
   constexpr u32 kLine = 64;
   constexpr u32 kSize = u32(sizeof(SharedConstants));
   // rr6-nx (2026-11-04, from sasrt-nx's debug-deko3d run): the UBO size deko3d is told is a multiple of 256 (the
@@ -3778,12 +4472,14 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
   // banjo-nx (2026-10-26, API-level stage 1): the persistent block's lines are known: those written with a new value
   // since its last push (g_sc_dirty), the held copy being the block in every other line.
   const bool tracked = &sc == &g_draw_sc;
+  g_spec_lines_seen |= tracked ? g_sc_dirty : ~0u;  // banjo-nx (2026-11-21): the spec answers kept
   if (!g_bound.pushed_shared_valid) {
+    g_spec_lines_seen = ~0u;  // banjo-nx (2026-11-21): a whole push does not need the marks, so trust none
     DiagPushLines(0, kSharedLines);  // banjo-nx (2026-10-28, diagnostic)
-    plume::Deko3DPushUniform(cmd, ubo, kUboSize, 0, now, kSize);
+    banjo::renut_gpu::record::PushUniform(cmd, ubo, kUboSize, 0, now, kSize);
     std::memcpy(held, now, kSize);
 #if defined(PLUME_DEKO3D)
-    plume::Deko3DSharedLinesWritten(cmd, ~0u);  // banjo-nx (2026-10-27): the held copy's lines bindTextures reads
+    banjo::renut_gpu::record::SharedLinesWritten(cmd, ~0u);  // banjo-nx (2026-10-27): the held copy's lines bindTextures reads
 #endif
     g_bound.pushed_shared_valid = true;
     pushed_bytes = kSize;
@@ -3794,14 +4490,14 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
     g_sc_dirty = 0;
 #if defined(PLUME_DEKO3D)
     if (differ)
-      plume::Deko3DSharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
+      banjo::renut_gpu::record::SharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
 #endif
     while (differ) {
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
       DiagPushLines(first, run);  // banjo-nx (2026-10-28, diagnostic)
-      plume::Deko3DPushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
       u32 off = at;
       for (; off + kLine <= end; off += kLine)
         std::memcpy(held + off, now + off, kLine);
@@ -3823,7 +4519,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
     differ &= ~equal_lines;
 #if defined(PLUME_DEKO3D)
     if (differ)
-      plume::Deko3DSharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
+      banjo::renut_gpu::record::SharedLinesWritten(cmd, differ);  // banjo-nx (2026-10-27)
 #endif
     if (tracked) {  // banjo-nx (2026-10-26): the verify form (banjo_renut_persistent_shared_verify)
       if (differ & ~g_sc_dirty) {
@@ -3838,7 +4534,7 @@ void PushSharedConstants(plume::RenderCommandList *cmd, const SharedConstants &s
       const u32 first = u32(std::countr_zero(differ));
       const u32 run = u32(std::countr_one(differ >> first));
       const u32 at = first * kLine, end = std::min((first + run) * kLine, kSize);
-      plume::Deko3DPushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
+      banjo::renut_gpu::record::PushUniform(cmd, ubo, kUboSize, at, now + at, end - at);
       // banjo-nx (2026-10-23, batch 6): line by line at a fixed size (inline), the tail's 16 bytes last: no C library
       // call per run.
       u32 off = at;
@@ -3901,11 +4597,24 @@ inline u32 SlotTextureVa(const GuestDevice &device, u32 r) {
 // shift, and the form Ryujinx's shader translator follows back to the constant buffer (the emulator tests).
 inline u32 SamplerWord(u32 slot) { return IsDeko3D() ? slot << 20 : slot; }
 
+}  // namespace
+
+// banjo-nx (2026-11-21, A/B 181): render/draw.h.
+void PrefetchCardsAt(u32 offset) { PrefetchCardLines(offset); }
+u32 CardOffsetOfAddress(u32 address) {
+  if (address < 0x20000000u)
+    return address;  // AddressPtr's physical memory
+  if (address >= 0xA0000000u)
+    return (address & 0x1FFFFFFFu) + (address >= 0xE0000000u ? 0x1000u : 0u);
+  if (address >= 0x7F000000u && address < 0x80000000u)
+    return address - 0x7F000000u;
+  return UINT32_MAX;
+}
+
 // banjo-nx (2026-10-27, the user's Phase A): a texture object (render/draw.h). Line 0 is its identity, written once by
 // the recording thread that makes it before it is published (and read by the others' lookups); lines 1-2 are the
 // render thread's answer for it (what a memo entry holds: the slot words, the bind's effects, what they hold for).
 // (Outside the anonymous namespace: render/draw.h declares it for command_buffers.cpp.)
-}  // namespace
 struct alignas(64) TextureObject {
   u32 va = 0;
   u32 header[6] = {};  // the header's Format words (raw), when the recording made it
@@ -4065,6 +4774,12 @@ struct SlotLast {
   // answered at (null: no skip; every other writer of the slot clears it).
   const BindEffects *obj_fx = nullptr;
   uint64_t obj_gen = 0, obj_frame = 0, obj_layout = 0;
+  // banjo-nx (2026-11-20, render-thread batch #29): g_texture_bind_gen when 'epoch' was last found to be the buckets'
+  // (TextureBindingEpoch) for a binding the buckets key (no depth words, no hand-over, A/B 35 on); ~0: not known. Every
+  // bucket raise raises the generation (textures.h BumpTexturePage / BumpTextureVa), so while it is the same the buckets
+  // are and the two table reads (8 KB apart, a miss each in the c15 profile) give the same epoch: TextureObjectHolds'
+  // checked_gen, for the slot's last answer.
+  uint64_t checked_gen = ~0ull;
 };
 SlotLast g_slot_last[d3d::kTextureFetchSlots];
 uint64_t g_tex_slot_skips = 0;  // the 10 s line's (TextureAnswersReport)
@@ -4075,12 +4790,12 @@ const BindEffects *g_skip_fx = nullptr;
 // banjo-nx (2026-10-28, per-draw night): banjo_renut_point_fast_state (A/B 59).
 inline bool PointFastStateOn() {
   static const bool on = REXCVAR_GET(banjo_renut_point_fast_state);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 59;
+  return on && banjo::renut_gpu::g_ab_off_plain != 59;
 }
 // bangaio-nx (2026-10-29): banjo_renut_point_fast_draw (A/B 80 here; 69 in bangaio-nx, katamari-nx's here).
 inline bool PointFastDrawOn() {
   static const bool on = REXCVAR_GET(banjo_renut_point_fast_draw);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 80;
+  return on && banjo::renut_gpu::g_ab_off_plain != 80;
 }
 // The point sprites' render state as point_sprite_gs reads it (SharedConstants::point_state), from the tessellator
 // packet: DrawStateLocked's and (bangaio-nx) FastDrawLocked's.
@@ -4104,7 +4819,7 @@ inline void PointStateOf(const d3d::Device &dev, float point_state[4]) {
 // with it on in the static city); kept for measuring again.
 inline bool TextureSlotSkipOn() {
   static const bool on = REXCVAR_GET(banjo_renut_texture_slot_skip);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 53;
+  return on && banjo::renut_gpu::g_ab_off_plain != 53;
 }
 
 // banjo-nx (2026-10-27, Phase A): an object's answer for this draw: the same fetch words, an epoch check at this binding
@@ -4119,7 +4834,7 @@ inline bool TextureObjectHolds(TextureObject &o, const TextureFetch &fetch, u32 
     o.checked_gen = g_texture_bind_gen;
   }
   if (o.frame != TextureFrameLocked()) {
-    if (banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 32 || !RefreshBindingLocked(va, fetch, o.fx))
+    if (banjo::renut_gpu::g_ab_off_plain == 32 || !RefreshBindingLocked(va, fetch, o.fx))
       return false;
     o.frame = TextureFrameLocked();
     refreshed = true;
@@ -4144,14 +4859,25 @@ inline void StoreTextureObject(TextureObject &o, const TextureFetch &fetch, u32 
 }
 // banjo-nx (2026-10-27, A/B 35): the epoch a memo entry or slot answer of this binding holds: the global count for one
 // through depth words or a hand-over, its page's and address's counts otherwise (textures.h TextureBindingEpoch).
-inline bool FineTextureEpochs() { return banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 35; }
+inline bool FineTextureEpochs() { return banjo::renut_gpu::g_ab_off_plain != 35; }
 inline uint64_t BindingEpoch(const BindEffects &fx, const TextureFetch &fetch, u32 va) {
   return fx.depth_source || fx.handover_surface || fx.handover_image || !FineTextureEpochs()
              ? g_texture_epoch | (uint64_t(1) << 63)
              : TextureBindingEpoch(fetch.BasePage(), va) & ~(uint64_t(1) << 63);
 }
-inline bool SlotLastHolds(const SlotLast &l, u32 va, const TextureFetch &fetch, const d3d::BaseTexture *header) {
-  return l.valid && l.va == va && header && l.frame == TextureFrameLocked() && l.epoch == BindingEpoch(l.fx, fetch, va) &&
+// banjo-nx (2026-11-20, render-thread batch #29): the slot's last epoch against BindingEpoch, without the bucket reads
+// while the binding generation is the one it was last found at (SlotLast::checked_gen).
+inline bool SlotLastEpochHolds(SlotLast &l, const TextureFetch &fetch, u32 va) {
+  const bool fine = !(l.fx.depth_source || l.fx.handover_surface || l.fx.handover_image) && FineTextureEpochs();
+  if (fine && l.checked_gen == g_texture_bind_gen && banjo::renut_gpu::g_ab_off_plain != 170)  // A/B 170
+    return true;
+  if (l.epoch != BindingEpoch(l.fx, fetch, va))
+    return false;
+  l.checked_gen = fine ? g_texture_bind_gen : ~0ull;
+  return true;
+}
+inline bool SlotLastHolds(SlotLast &l, u32 va, const TextureFetch &fetch, const d3d::BaseTexture *header) {
+  return l.valid && l.va == va && header && l.frame == TextureFrameLocked() && SlotLastEpochHolds(l, fetch, va) &&
          (!l.fx.depth_source || l.depth_epoch == g_depth_epoch) &&
          SameBytes<24>(l.device, fetch.dword) &&
          SameBytes<24>(l.header, &header->Format) &&
@@ -4301,11 +5027,59 @@ inline u32 Fetch3DMaskOf(const ShaderRecord *vs, const ShaderRecord *ps) {
   }
 }
 
-void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc, BindEffects *slot_fx = nullptr,
-                  bool *all_memo = nullptr, const TextureFetch *draw_fetches = nullptr, bool *same_as_last = nullptr) {
+// renut-ultimate (2026-11-16, port 145; tw2de_nx's fix of 2026-10-31, off by default at the user's word): the texture
+// filters the shaders' fetch instructions give (render/fetch_filters.h, read when a shader is made). The hardware
+// samples with the instruction's mag / min / mip filter and anisotropy where it gives one; Renut built every sampler
+// from the fetch constant alone (FINAL FANTASY XIII's light shafts: a linear blur of a point-sampled mask came out
+// stepped). FillTextures puts them in the slot's fetch words, so every memo after it (the slot's last answer, the
+// texture objects, the slot memo, the sampler's own) keys on them; DrawStateLocked's chain reuse keys on the shaders;
+// FastDrawLocked leaves such draws to DrawStateLocked.
+bool FetchFiltersOn() {
+  static const bool on = REXCVAR_GET(banjo_renut_fetch_filters);
+  return on;
+}
+// The draw's: the vertex shader's, the pixel shader's over them. nullptr when off or none; 'key' names the pair.
+const FetchFilterOverrides *DrawFetchFiltersLocked(const ShaderRecord *vs, const ShaderRecord *ps, uint64_t &key) {
+  key = 0;
+  if (!FetchFiltersOn() || !vs || (vs->fetch_filters.Empty() && (!ps || ps->fetch_filters.Empty())))
+    return nullptr;
+  static FetchFilterOverrides merged;  // render thread
+  merged = vs->fetch_filters;
+  if (ps)
+    MergeFetchFilters(merged, ps->fetch_filters);
+  key = ((uint64_t(vs->self_va) << 32 | (ps ? ps->self_va : 0)) ^ vs->hash ^ (ps ? ps->hash * 3 : 0)) | 1;
+  static std::atomic<int> logged{0};
+  if (logged.load(std::memory_order_relaxed) < 16 && logged.fetch_add(1, std::memory_order_relaxed) < 16)
+    RGPU_INFO("[filters] shaders {:016X} / {:016X}: their fetches give their own filters for fetch constants {:08X} "
+              "(banjo_renut_fetch_filters)", vs->hash, ps ? ps->hash : 0, merged.slots);
+  return &merged;
+}
+
+// banjo-nx (2026-11-20, N&B's render thread against renut-nx 1.0.2 in Showdown Town): one copy (noclone): LTO's
+// constant propagation made three 18-20 KB copies of it, and both ran every draw (the instruction cache; 1.0.2 had one).
+[[gnu::noclone]] void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc, BindEffects *slot_fx = nullptr,
+                  bool *all_memo = nullptr, const TextureFetch *draw_fetches = nullptr, bool *same_as_last = nullptr,
+                  const FetchFilterOverrides *filters = nullptr) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kFillTextures);  // blur-nx (2026-11-17)
   const u32 as_stacked = g_fetch_3d_mask & fetch_mask;  // kameo-nx (2026-11-03)
   if (as_stacked)
     draw_fetches = nullptr;  // made here, with those slots marked
+  // Port 145 (banjo_renut_fetch_filters): the shaders' filters in word 3 of the slots they cover (mag 19-20, min 21-22,
+  // mip 23-24, anisotropy 25-27). The draw's fetch words copied first when the caller made them.
+  if (filters && !(filters->slots & fetch_mask))
+    filters = nullptr;
+  union FilteredSlots {
+    FilteredSlots() {}
+    TextureFetch f[d3d::kTextureFetchSlots];
+  } filtered;
+  if (filters && draw_fetches) [[unlikely]] {
+    for (u32 bits = fetch_mask & ((1u << d3d::kTextureFetchSlots) - 1u); bits; bits &= bits - 1) {
+      const u32 r = u32(std::countr_zero(bits));
+      filtered.f[r] = draw_fetches[r];
+      filtered.f[r].dword[3] = filters->Apply(r, filtered.f[r].dword[3]);
+    }
+    draw_fetches = filtered.f;
+  }
   if (all_memo)
     *all_memo = banjo::renut_gpu::CpuMemosOn();
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_texture_defaults_copy): the null words as one copy of a block made once (160 stores a
@@ -4374,6 +5148,8 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
       slots.f[r] = DeviceTextureFetch(dev, r);
       if ((as_stacked >> r) & 1) [[unlikely]]
         SampleAsStacked(slots.f[r], r);
+      if (filters) [[unlikely]]  // port 145
+        slots.f[r].dword[3] = filters->Apply(r, slots.f[r].dword[3]);
     }
     const u32 va = SlotTextureVa(device, r);
     if (!va)
@@ -4389,6 +5165,33 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
     const TextureSlotMemo &m = TextureMemoSlot(va, fetches[r]);
     if (m.va == va && m.fx.transition[0])
       __builtin_prefetch(&m.fx.transition[0]->layout);
+  }
+  // blur-nx (2026-11-18, the census's #5): how often a call binds the same slots, textures and fetch words as the call
+  // before, or as one of the 16 before it (what a cache of whole texture sets would answer).
+  if (::renut::gpu::host_batch::CensusOn() && fetch_mask) {
+    uint64_t h = uint64_t(fetch_mask) * 0x9E3779B97F4A7C15ull;
+    for (u32 bits = fetch_mask; bits; bits &= bits - 1) {
+      const u32 r = u32(std::countr_zero(bits));
+      h = (h ^ SlotTextureVa(device, r)) * 0xFF51AFD7ED558CCDull;
+      for (u32 k = 0; k < 6; ++k)
+        h = (h ^ fetches[r].dword[k]) * 0xC4CEB9FE1A85EC53ull;
+    }
+    static uint64_t ring[16] = {};
+    static uint64_t last_set = 0;
+    static u32 at = 0;
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kTextureSetCalls);
+    if (h == last_set) {
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kTextureSetSame);
+    } else {
+      for (const uint64_t e : ring) {
+        if (e == h) {
+          ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kTextureSetSeen);
+          break;
+        }
+      }
+      ring[at++ & 15] = last_set;
+      last_set = h;
+    }
   }
   for (u32 bits = fetch_mask; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
@@ -4558,6 +5361,11 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
       last.depth_epoch = from.depth_epoch;
       last.fx = from.fx;
       last.layout_epoch = g_layout_epoch;  // its transitions were just applied (round 4)
+      // banjo-nx (2026-11-20, batch #29): the memo's epoch is the buckets' now (checked on a hit, made after a bind)
+      last.checked_gen = !(from.fx.depth_source || from.fx.handover_surface || from.fx.handover_image) &&
+                                 FineTextureEpochs()
+                             ? g_texture_bind_gen
+                             : ~0ull;
       last.obj = nullptr;
       last.obj_fx = nullptr;  // banjo-nx (2026-10-28)
       // banjo-nx (2026-10-27, Phase A): the answer into the slot's texture object too (when its header is the one the
@@ -4602,7 +5410,7 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
         !m.fx.depth_source && SameBytes<24>(m.device, fetch.dword) &&
         SameBytes<24>(m.header, &header->Format) &&
         !(m.fx.handover_surface && HandOverSourceIsDrawTarget(m.fx.handover_surface)) &&
-        banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 32 &&
+        banjo::renut_gpu::g_ab_off_plain != 32 &&
         RefreshBindingLocked(texture_va, fetch, m.fx)) {
       m.frame = TextureFrameLocked();
       for (HostTexture *t : m.fx.transition)
@@ -4659,6 +5467,16 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
   // banjo-nx (2026-10-23, batch 6): see same_as_last. The slots outside the mask hold the defaults in both.
   static u32 last_mask = ~0u;
   static u32 last_words[d3d::kTextureFetchSlots][4];
+  ++g_texture_fills;
+  // banjo-nx (2026-11-20, render-thread batch #18): a call that does not ask (the fast path's, the verify forms') skips
+  // the compare and the copy of every slot's words: only DrawStateLocked asks, and it takes the answer only when the
+  // call before its own was its own too (texture_fill_before == held_texture_fill: g_texture_fills counts every call).
+  // The table is marked unknown, so an answer after a skipped call is "not the same" as before such a call.
+  // A/B 170 (banjo-nx's 300; the base's targets stay below 256, port 188): its off half does both as before.
+  if (!same_as_last && banjo::renut_gpu::g_ab_off_plain != 170) {
+    last_mask = ~0u;
+    return;
+  }
   bool same = fetch_mask == last_mask;
   for (u32 bits = fetch_mask; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
@@ -4668,7 +5486,6 @@ void FillTextures(const GuestDevice &device, u32 fetch_mask, SharedConstants &sc
     std::memcpy(last_words[r], words, sizeof(words));
   }
   last_mask = fetch_mask;
-  ++g_texture_fills;
   if (same_as_last)
     *same_as_last = same;
 }
@@ -4908,7 +5725,7 @@ uint64_t g_quad_static_draws = 0;  // the 10 s line's
 
 inline bool QuadIndicesOn() {
   static const bool on = REXCVAR_GET(banjo_renut_quad_indices);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 72;
+  return on && banjo::renut_gpu::g_ab_off_plain != 72;
 }
 
 // The render thread's (namespace scope, not function statics: no guard read at every quad draw on the console).
@@ -4973,6 +5790,7 @@ struct CachedIndices {
   PoolSpan copy;
   u32 bytes = 0, index_count = 0, lo = 0, max_index = 0;
   bool wide = false;
+  bool whole = false;  // blur-nx (2026-11-18, #36): a whole buffer's entry (WholeIndexCopy), as CachedStream's
   uint64_t last_used = 0;               // g_stream_cache_frame
   uint64_t checked_frame = UINT64_MAX;  // frame the range was last hashed or checked in
   uint64_t proven_flush = UINT64_MAX;   // banjo-nx: g_flush_serial the copy was last hashed equal in
@@ -4991,7 +5809,8 @@ ContentVerifier<IndexKey, HashIndices> g_index_verifier;
 void DropCachedIndices(CachedIndices &c) {
   if (!c.copy)
     return;
-  ++g_mesh_gen;  // banjo-nx (2026-10-27): mesh objects may name it
+  if (c.whole || !::renut::gpu::host_batch::On(::renut::gpu::host_batch::kMeshGenWhole))  // blur-nx (2026-11-18, #36): as DropCachedCopy
+    ++g_mesh_gen;  // banjo-nx (2026-10-27): mesh objects may name it
   g_stream_cache_bytes -= c.bytes;
   g_copy_pool.Free(c.copy);
   c.copy = {};
@@ -5945,6 +6764,8 @@ CachedStream *WholeStreamCopy(const StreamKey &key, const HostVertexStream &hs) 
   const PoolSpan copy = g_copy_pool.Allocate(bytes);
   if (!copy)
     return WholeMiss<CachedStream>(kWhyAlloc);
+  if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #12)
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kConvertWholeBytes, bytes);
   ConvertVertices(hs, key.guest, key.stride, key.count, key.endian, static_cast<u8 *>(copy.cpu));
   c.copy = copy;
   c.bytes = bytes;
@@ -5966,6 +6787,7 @@ CachedIndices *WholeIndexCopy(const IndexKey &key) {
   }
   CachedIndices &c = *g_whole_last_index;
   c.last_used = g_stream_cache_frame;
+  c.whole = true;  // blur-nx (2026-11-18, #36): the mesh objects and the whole-repeat answer may hold it
   if (c.copy)
     return ProveIndexCopy(key, c) ? &c : WholeMiss<CachedIndices>(kWhyIndexDropped);
   if (c.dynamic || !banjo::renut_gpu::StoreCardsOn() || !banjo::renut_gpu::ExactStreamsOn())
@@ -6380,13 +7202,86 @@ void CountKindWhy(const DrawCall &call, const ShaderRecord &vs) {
 }
 
 // The draw from whole-buffer copies when every stream and the index buffer have one (see above); 'copies' the streams'.
+// blur-nx (2026-11-18, the Renut host batch's #4, blur_renut_whole_repeat / A/B 232): the last answer of
+// WholeGeometryTry's full way (its keys' lookups and proofs), kept with what it was made from. A later draw of the same
+// kick and frame (the proofs are a kick's; g_mesh_gen moves with every whole copy's drop) whose shader, strides, layout,
+// streams' words and index buffer header are the same, with no export pending, finds the same entries with the same
+// copies, proven in this kick already: it takes them without the mesh probe, the stream sources, the keys and the
+// lookups. Each copy is checked to be there and proven in this kick (a drop since would show there too).
+struct WholeRepeat {
+  bool valid = false;
+  const ShaderRecord *vs = nullptr;
+  const u32 *strides = nullptr;
+  const HostVertexLayout *layout = nullptr;
+  uint64_t layout_hash = 0, flush = 0, frame = 0, mesh_gen = 0;
+  u32 used = 0;  // the streams answered, a bit each
+  u32 words[kMaxVertexStreams][4] = {};
+  uint64_t min_vertices = 0;
+  bool indexed = false;
+  u32 ib[3] = {};
+  u32 index_total = 0;
+  plume::RenderIndexBufferView index_view{};
+  CachedIndices *ci = nullptr;
+  CachedStream *copies[kMaxVertexStreams] = {};
+};
+WholeRepeat g_whole_repeat;
+[[gnu::always_inline]] inline void WholeRepeatWords(const GuestDevice &device, u32 stream, u32 w[4]) {
+  const u32 fetch_index = d3d::kFirstVertexFetchIndex + d3d::StreamFetchIndex(stream);
+  w[0] = device.VertexFetchWord(fetch_index, 0);
+  w[1] = device.VertexFetchWord(fetch_index, 1);
+  w[2] = device.U32(d3d::kDeviceOffsetStreamSources + stream * 4);
+  w[3] = device.U8(d3d::kDeviceOffsetStreamStrides + stream);
+}
+bool WholeRepeatHit(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs, const u32 *strides,
+                    const HostVertexLayout &layout, uint64_t layout_hash, int64_t base, Geometry &g,
+                    CachedStream *copies[kMaxVertexStreams]) {
+  const WholeRepeat &r = g_whole_repeat;
+  if (!r.valid || r.vs != &vs || r.strides != strides || r.layout != &layout || r.layout_hash != layout_hash ||
+      r.flush != g_flush_serial || r.frame != g_stream_cache_frame || r.mesh_gen != g_mesh_gen ||
+      r.indexed != call.indexed || uint64_t(base) >= r.min_vertices)
+    return false;
+  for (u32 left = r.used; left; left &= left - 1) {
+    const u32 s = u32(std::countr_zero(left));
+    u32 w[4];
+    WholeRepeatWords(device, s, w);
+    if (w[0] != r.words[s][0] || w[1] != r.words[s][1] || w[2] != r.words[s][2] || w[3] != r.words[s][3])
+      return false;
+    const CachedStream *c = r.copies[s];
+    if (!c || !c->copy || c->proven_flush != g_flush_serial)
+      return false;
+  }
+  if (call.indexed) {
+    const auto *ib = GuestPtr<const d3d::IndexBuffer>(device.U32(d3d::kDeviceOffsetIndexBuffer));
+    if (!ib || u32(ib->resource.Common) != r.ib[0] || u32(ib->Address) != r.ib[1] || u32(ib->Size) != r.ib[2] ||
+        call.count > r.index_total || call.start_index > r.index_total - call.count || !r.ci || !r.ci->copy ||
+        r.ci->proven_flush != g_flush_serial)
+      return false;
+    g.indexed = true;
+    g.index_count = call.count;
+    g.first_index = call.start_index;
+    g.base_vertex = call.base_vertex;
+    g.index_view = r.index_view;
+  } else {
+    g.vertex_count = call.count;
+    g.first_vertex = call.start_vertex;
+  }
+  for (u32 left = r.used; left; left &= left - 1) {
+    const u32 s = u32(std::countr_zero(left));
+    copies[s] = r.copies[s];
+  }
+  g.whole_base = u32(base);
+  g.whole = true;
+  return true;
+}
+
 bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs,
                       const u32 *shader_strides, const HostVertexLayout &layout, uint64_t layout_hash, Geometry &g,
                       CachedStream *copies[kMaxVertexStreams]) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kWholeGeometry);  // blur-nx (2026-11-17)
   g_whole_why_last = kWhyKind;
   static const bool on = REXCVAR_GET(banjo_renut_whole_buffers);
   // A/B target 22 (banjo_renut_ab_targets) turns it off for a half.
-  if (!on || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 22 || !IsDeko3D() || call.tessellation ||
+  if (!on || banjo::renut_gpu::g_ab_off_plain == 22 || !IsDeko3D() || call.tessellation ||
       call.up_vertices || call.up_indices || !call.count || call.primitive == kTriangleFan ||
       call.primitive == kQuadList || DrawSummaryOf(vs).skin_once) {
     CountKindWhy(call, vs);
@@ -6399,6 +7294,18 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
   const int64_t base = call.indexed ? int64_t(call.base_vertex) : int64_t(call.start_vertex);
   if (base < 0)
     return WholeMiss<void>(kWhyIndexRange) != nullptr;
+  // blur-nx (2026-11-18, #4): the last full answer, when it holds (see WholeRepeat). Not with the recording's resources
+  // (the geometry objects' path), nor with exports pending, nor without the exact rule (its proofs are the kick's).
+  const bool hb_census = ::renut::gpu::host_batch::CensusOn();
+  if (hb_census)
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kWholeTries);
+  const bool repeat_on = !exports_pending && !g_draw_resources && banjo::renut_gpu::ExactStreamsOn() &&
+                         ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kWholeRepeat);
+  if (repeat_on && WholeRepeatHit(device, call, vs, shader_strides, layout, layout_hash, base, g, copies)) {
+    if (hb_census)
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kWholeRepeats);
+    return true;
+  }
   // banjo-nx (2026-10-26, the record-time draw path's round 4, ARM): in three passes, so that the cache misses of the
   // streams and the index buffer overlap instead of following one another (the console profile: the memo slots, the
   // maps' nodes and the copies' fields were most of WholeGeometryLocked's 10 % of the render thread): the keys and the
@@ -6431,7 +7338,7 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
   }
   const bool have_ib = recorded_ib || ib;
   // banjo-nx (2026-10-27, geometry objects): the buffers' objects' copies, when they all answer (GeometryObjectsHit).
-  const int geo_ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  const int geo_ab = banjo::renut_gpu::g_ab_off_plain;
   const bool geo = res && GeometryObjectsOn(geo_ab);
   if (geo && GeometryObjectsHit(call, vs, shader_strides, layout, layout_hash, base, exports_pending, *res, g, copies))
     return true;
@@ -6466,7 +7373,7 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
       LastStreamSource &ls = g_last_stream_sources[stream % kMaxVertexStreams];
       if (ls.valid && ls.w0 == w0 && ls.w1 == w1 && ls.sva == sva && ls.sbyte == sbyte && ls.vs == &vs &&
           ls.shader_strides == shader_strides && !(stream == 0 && call.up_vertices) &&
-          banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 37) {
+          banjo::renut_gpu::g_ab_off_plain != 37) {
         src = ls.src;
       } else {
         src = GetStreamSource(device, call, vs, shader_strides, stream);
@@ -6587,6 +7494,34 @@ bool WholeGeometryTry(const GuestDevice &device, const DrawCall &call, const Sha
   // banjo-nx (2026-10-27, #8): kept as the mesh's object (the probe's streams are the keys', in the same order).
   if (mesh && probe.count == key_count)
     MeshObjectKeep(call, probe, layout, layout_hash, vs, shader_strides, u32(base), keys, copies, ci, index_key);
+  // blur-nx (2026-11-18, #4): this answer for the next draws of the kick (WholeRepeat).
+  if (repeat_on) {
+    WholeRepeat &r = g_whole_repeat;
+    r.valid = true;
+    r.vs = &vs;
+    r.strides = shader_strides;
+    r.layout = &layout;
+    r.layout_hash = layout_hash;
+    r.flush = g_flush_serial;
+    r.frame = g_stream_cache_frame;
+    r.mesh_gen = g_mesh_gen;
+    r.used = 0;
+    r.min_vertices = UINT64_MAX;
+    for (u32 i = 0; i < key_count; ++i) {
+      const u32 s = key_streams[i];
+      r.used |= 1u << s;
+      WholeRepeatWords(device, s, r.words[s]);
+      r.copies[s] = copies[s];
+      r.min_vertices = std::min<uint64_t>(r.min_vertices, keys[i].count);
+    }
+    r.indexed = call.indexed;
+    if (call.indexed) {
+      std::memcpy(r.ib, ib_words, sizeof(r.ib));
+      r.index_total = index_key.count;
+      r.index_view = g.index_view;
+      r.ci = ci;
+    }
+  }
   return true;
 }
 bool WholeGeometryLocked(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs,
@@ -6704,6 +7639,7 @@ bool BindWholeStreams(const HostVertexLayout &layout, CachedStream *const copies
 bool BindStreams(const GuestDevice &device, const DrawCall &call, const ShaderRecord &vs,
                  const u32 *shader_strides, const HostVertexLayout &layout, uint64_t layout_hash,
                  const Geometry &g, const GpuStreams &gpu_streams, const StreamSource *sources = nullptr) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kBindStreams);  // blur-nx (2026-11-17)
   plume::RenderCommandList *cmd = State().command_list;
   g_bound_stream_count = 0;
   // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_stream_mask): the used streams by their mask, in the same order (16 checks a draw
@@ -6815,6 +7751,8 @@ bool BindStreams(const GuestDevice &device, const DrawCall &call, const ShaderRe
     if (fills && !reused) {
       if (call.up_vertices && stream == 0) {
         // A copy taken at the call (queued.cpp).
+        if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #12)
+          ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kConvertUpBytes, uint64_t(count) * hs.host_stride);
         ConvertVertices(hs, guest, src.stride, count, src.endian, static_cast<u8 *>(alloc.cpu));
       } else {
         PendingStreamFill fill;
@@ -7068,7 +8006,7 @@ UploadAllocation UploadVertexFetchData(const GuestDevice &device, const DrawCall
   // the chunk is the draw's fetch data and the slots count from its start. Not for a draw with Draw*UP data in a fetch
   // or a fetch of no bytes (the ring's slot for it points at the draw's other copies; the pool's would not).
   g_fetch_from_pool = false;
-  if (shared && copy_count && FetchCacheOn(banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed))) {
+  if (shared && copy_count && FetchCacheOn(banjo::renut_gpu::g_ab_off_plain)) {
     u32 offsets[32];
     uint64_t base = 0, chunk_bytes = 0;
     u8 *chunk_cpu = nullptr;
@@ -7344,11 +8282,19 @@ struct FetchSpec {
   u32 types[4];
   u32 kind;
 };
+// vivapinata-nx (2026-11-12, the shader round; A/B 150): with vivapinata_shader_round the types for every draw whose vertex
+// shader has bound fetches, not only the tessellated ones (DescribeBoundFetches wrote them before both key paths call
+// this): such a shader decodes its vertex data from memory in every format its fetches could have (98381523's vertex
+// shaders: 1,561 instructions, about 205 with the type known). The off half of A/B 150: as before (tessellated only).
 FetchSpec FetchSpecWords(const SharedConstants &sc, const ShaderRecord &vs, bool per_instance, int ab_off) {
   FetchSpec s{};
-  if (!per_instance || !banjo::renut_gpu::FetchSpecOn() || ab_off == 83)  // A/B 83 here (69 in vivapinata-nx)
+  if (!banjo::renut_gpu::FetchSpecOn() || ab_off == 83)  // A/B 83 here (69 in vivapinata-nx)
     return s;
-  s.kind = sc.tessellation[0] + 1;
+  static const bool round_on = REXCVAR_GET(vivapinata_shader_round);
+  if (per_instance)
+    s.kind = sc.tessellation[0] + 1;
+  else if (!round_on || ab_off == 150 || !IsDeko3D())  // deko3d's GLSL has the types (pass fetchspec); Vulkan's not
+    return s;
   if (DrawSummaryOf(vs).bound_fetches) {
     for (u32 k = 0; k < 4; ++k)
       s.types[k] = sc.bound_fetch[k][3] + 1;
@@ -7356,7 +8302,8 @@ FetchSpec FetchSpecWords(const SharedConstants &sc, const ShaderRecord &vs, bool
   return s;
 }
 bool FetchSpecDiffers(const PipelineKey &key, const FetchSpec &s) {
-  return key.tess_kind != s.kind || std::memcmp(key.fetch_types, s.types, sizeof(s.types)) != 0;
+  // banjo-nx (2026-11-21): inline (a memcmp call at every fast draw before)
+  return key.tess_kind != s.kind || !SameBytes<sizeof(s.types)>(key.fetch_types, s.types);
 }
 
 // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec; the second GPU round): PipelineKey::reserved bit 3, set when the draw's
@@ -7378,15 +8325,23 @@ inline u32 SasrtClipBit(const SharedConstants &sc) {
 // sasrt-nx (2026-11-08, sasrt_gpu_one_x): bit 31 (fetch constant 31 is never a pixel shader's, so never plain here): the
 // draw's targets are 1x (SharedConstants.resolution_scale) and every texture word its pixel shader samples has scale
 // code 0 (bits 26-28, kResolutionScaleShift): tools/deko3d_glsl_opt.py pass onex folds both.
-[[gnu::always_inline]] inline u32 SasrtPlainFetchMask(const SharedConstants &sc, const ShaderCacheEntry *ps_entry) {
+// vivapinata-nx (2026-11-12, the shader round): with vivapinata_shader_round, the vertex shader's fetches too (vs_entry):
+// the same words (SharedConstants is the draw's, whichever stage samples a fetch constant), so bit r says the same of
+// fetch constant r for both stages, and bit 31 also needs the vertex shader's words at scale code 0. The vertex shaders'
+// passes act on it only with constant 975 (A/B 150). The grass shells' tessellated vertex shader samples its heightmap
+// three times through fetch constant 16, which no pixel shader of theirs samples.
+[[gnu::always_inline]] inline u32 SasrtPlainFetchMask(const SharedConstants &sc, const ShaderCacheEntry *ps_entry,
+                                                      const ShaderCacheEntry *vs_entry = nullptr) {
   if (!ps_entry || !IsDeko3D())
     return 0;
   const bool plain_on = sasrt::gpu_round::On(sasrt::gpu_round::kPlainFetches);
   const bool one_x_on = sasrt::gpu_round::On(sasrt::gpu_round::kOneX);
   if (!plain_on && !one_x_on)
     return 0;
+  static const bool round_on = REXCVAR_GET(vivapinata_shader_round);
+  const u32 fetches = ps_entry->textureFetchMask | (round_on && vs_entry ? vs_entry->textureFetchMask : 0u);
   u32 mask = 0, codes = 0;
-  for (u32 bits = ps_entry->textureFetchMask & 0x7FFFFFFFu; bits; bits &= bits - 1) {
+  for (u32 bits = fetches & 0x7FFFFFFFu; bits; bits &= bits - 1) {
     const u32 r = u32(std::countr_zero(bits));
     const u32 words = sc.texture_indices[0][r] | sc.texture_indices[1][r] | sc.texture_indices[2][r];
     const u32 any = (sc.sampler_indices[r] & 0x000FE000u) | (words & 0x03F00000u);
@@ -7395,7 +8350,7 @@ inline u32 SasrtClipBit(const SharedConstants &sc) {
   }
   if (!plain_on)
     mask = 0;
-  if (one_x_on && codes == 0 && sc.resolution_scale == 1.0f && !(ps_entry->textureFetchMask >> 31))
+  if (one_x_on && codes == 0 && sc.resolution_scale == 1.0f && !(fetches >> 31))
     mask |= 1u << 31;
   return mask;
 }
@@ -7418,6 +8373,93 @@ struct SasrtSpecWords {
   u32 w[20];  // sasrt-nx (2026-11-09, the fifth round): [12]-[19] constants 950-973
 };
 static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
+// banjo-nx (2026-11-21, the user's "make the spec words cheaper"; A/B 172): the spec answers of the draw that made them
+// (FetchSpecWords, SasrtPlainFetchMask, SasrtClipBit, SasrtSpecWordsOf: ~0.15 us a draw in the c27 profile, made at
+// every fast draw), kept while all they read is the same: these lines of the persistent shared constants (no write
+// with a new value since: g_spec_lines_seen), both shaders' entries and the vertex shader record's bound_fetches (all
+// FetchSpecWords reads of it: N&B makes a record a mesh, so not its address), instancing, the A/B word
+// (every On() and A/B check they make follows it) and the targets' colour info words (the 7e3 clamp). Not for a
+// memexport vertex shader (its words read the float constants). Exact; banjo_renut_fast_draw_verify recomputes them.
+constexpr u32 kSpecLines =
+    SharedLinesOf(offsetof(SharedConstants, texture_indices), sizeof(SharedConstants::texture_indices)) |
+    SharedLinesOf(offsetof(SharedConstants, sampler_indices), sizeof(SharedConstants::sampler_indices)) |
+    SharedLinesOf(offsetof(SharedConstants, vertex_fetch_slots), sizeof(SharedConstants::vertex_fetch_slots)) |
+    SharedLinesOf(offsetof(SharedConstants, screen_space), sizeof(SharedConstants::screen_space)) |
+    SharedLinesOf(offsetof(SharedConstants, depth_remap), sizeof(SharedConstants::depth_remap)) |
+    SharedLinesOf(offsetof(SharedConstants, resolution_scale), sizeof(SharedConstants::resolution_scale)) |
+    SharedLinesOf(offsetof(SharedConstants, user_clip_planes), sizeof(SharedConstants::user_clip_planes)) |
+    SharedLinesOf(offsetof(SharedConstants, tessellation), sizeof(SharedConstants::tessellation)) |
+    SharedLinesOf(offsetof(SharedConstants, bound_fetch), sizeof(SharedConstants::bound_fetch));
+// When one of those lines was written, the words the answers read are compared, masked to the bits they read
+// (SpecInputsSame): the lines also hold what changes at most draws and the answers do not read (the fetch slots' copy
+// offsets, vertex_fetch_bytes, the texture words' slot numbers). Read, of fetch constant r of either shader:
+// texture_indices[0] and [2] bits 20-28 (exponent adjust, scale code), [1] whole (the null 3D slot compare),
+// sampler_indices bits 13-19 (signs, gamma); of the vertex shader's memory fetches i: vertex_fetch_slots[64 + i] bits
+// 0-1; and tessellation[0], bound_fetch[0-3][3], user_clip_planes[0], resolution_scale, screen_space, depth_remap[0].
+constexpr u32 kSpecTextureBits = 0x1FF00000u;
+constexpr u32 kSpecSamplerBits = 0x000FE000u;
+constexpr u32 kSpecScalars = 12;
+struct SpecKeep {
+  bool valid = false;
+  const ShaderCacheEntry *vs_entry = nullptr, *ps_entry = nullptr;
+  bool bound_fetches = false;
+  bool per_instance = false;
+  int ab = 0;
+  u32 color_count = 0;
+  u32 color_info[4] = {};
+  FetchSpec fetch{};
+  u32 plain = 0, clip = 0;
+  SasrtSpecWords words{};
+  // the words read (SpecInputsSame)
+  u32 fetches = 0, memory_fetches = 0;
+  u32 scalars[kSpecScalars] = {};
+  u32 tex0[32] = {}, tex1[32] = {}, tex2[32] = {}, sampler[32] = {}, slots[32] = {};
+};
+SpecKeep g_spec_keep;
+uint64_t g_spec_kept = 0, g_spec_by_words = 0, g_spec_made = 0, g_spec_verify_differ = 0;
+void ForgetSpecKeepLocked() { g_spec_keep.valid = false; }
+[[gnu::always_inline]] inline void SpecScalarsOf(const SharedConstants &sc, u32 out[kSpecScalars]) {
+  out[0] = sc.tessellation[0];
+  for (u32 k = 0; k < 4; ++k)
+    out[1 + k] = sc.bound_fetch[k][3];
+  std::memcpy(out + 5, sc.user_clip_planes[0], 16);
+  std::memcpy(out + 9, &sc.resolution_scale, 4);
+  out[10] = sc.screen_space;
+  std::memcpy(out + 11, &sc.depth_remap[0], 4);
+}
+// The words read, kept with the answers made (fetches and memory_fetches set).
+[[gnu::noinline]] void SpecKeepInputs(SpecKeep &k, const SharedConstants &sc) {
+  for (u32 bits = k.fetches; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    k.tex0[r] = sc.texture_indices[0][r] & kSpecTextureBits;
+    k.tex1[r] = sc.texture_indices[1][r];
+    k.tex2[r] = sc.texture_indices[2][r] & kSpecTextureBits;
+    k.sampler[r] = sc.sampler_indices[r] & kSpecSamplerBits;
+  }
+  for (u32 bits = k.memory_fetches; bits; bits &= bits - 1) {
+    const u32 i = u32(std::countr_zero(bits));
+    k.slots[i] = sc.vertex_fetch_slots[64 + i] & 3u;
+  }
+  SpecScalarsOf(sc, k.scalars);
+}
+[[gnu::noinline]] bool SpecInputsSame(const SpecKeep &k, const SharedConstants &sc) {
+  u32 d = 0;
+  for (u32 bits = k.fetches; bits; bits &= bits - 1) {
+    const u32 r = u32(std::countr_zero(bits));
+    d |= ((sc.texture_indices[0][r] & kSpecTextureBits) ^ k.tex0[r]) | (sc.texture_indices[1][r] ^ k.tex1[r]) |
+         ((sc.texture_indices[2][r] & kSpecTextureBits) ^ k.tex2[r]) |
+         ((sc.sampler_indices[r] & kSpecSamplerBits) ^ k.sampler[r]);
+  }
+  for (u32 bits = k.memory_fetches; bits; bits &= bits - 1) {
+    const u32 i = u32(std::countr_zero(bits));
+    d |= (sc.vertex_fetch_slots[64 + i] & 3u) ^ k.slots[i];
+  }
+  u32 now[kSpecScalars];
+  SpecScalarsOf(sc, now);
+  for (u32 j = 0; j < kSpecScalars; ++j)
+    d |= now[j] ^ k.scalars[j];
+  return d == 0;
+}
 // sasrt-nx (2026-11-08, sasrt_gpu_export_format_spec): [8]-[11] (cold: export shaders only).
 [[gnu::noinline]] void SasrtExportFormatWords(SasrtSpecWords &s, const ShaderCacheEntry &vs, const FloatConstants &vsc) {
   u32 n = 0;
@@ -7451,10 +8493,27 @@ static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
 }
 [[gnu::always_inline]] inline SasrtSpecWords SasrtSpecWordsOf(const SharedConstants &sc, const ShaderCacheEntry *vs_entry,
                                                               const ShaderCacheEntry *ps_entry,
-                                                              const FloatConstants *vsc = nullptr) {
+                                                              const FloatConstants *vsc = nullptr,
+                                                              const Targets *targets = nullptr) {
   SasrtSpecWords s{};
   if (!IsDeko3D())
     return s;
+  // dishonored-nx (2026-10-31, dishonored_renut_clamp_7e3; port 106): [7] bits 28-31, colour target i a
+  // 2_10_10_10_FLOAT (7e3) one with colour exponent bias 0 (RB_COLOR_INFO format 3, or 12,
+  // 2_10_10_10_FLOAT_AS_16_16_16_16, the same storage on the Xenos and here: render/format.cpp; dishonored-nx: 3 only;
+  // bits 20-25 zero): the pixel shader clamps that output to the 7e3 range (constant 990, tools/deko3d_glsl_opt.py
+  // clamp7e3). The host target is 16-bit float: Dishonored's negative light passes stayed negative (black walls) and
+  // its highlights far above 31.875 (a washed-out frame). With a bias the Xenos clamps the biased value, which Renut
+  // scales only at the resolve: left unclamped, as dishonored-nx does. In the spec words, not the key's reserved bits
+  // (all of them taken), so the fast paths' word compares see it.
+  if (ps_entry && targets && banjo::renut_gpu::Clamp7e3On()) {
+    for (u32 i = 0; i < targets->color_count && i < 4; ++i) {
+      const HostSurface *c = targets->colors[i];
+      if (c && (((c->color_info_word >> 16) & 0xFu) == 3u || ((c->color_info_word >> 16) & 0xFu) == 12u) &&
+          ((c->color_info_word >> 20) & 0x3Fu) == 0u)
+        s.w[7] |= 0x10000000u << i;
+    }
+  }
   if (vs_entry && vsc && vs_entry->memExportConstants[0] && sasrt::gpu_round::On(sasrt::gpu_round::kExportFmtSpec))
     [[unlikely]] SasrtExportFormatWords(s, *vs_entry, *vsc);
   // sasrt-nx (2026-11-08, sasrt_gpu_export_window_ubo; the fourth GPU round): [7] bit 2, a memexport vertex shader's export
@@ -7476,6 +8535,23 @@ static_assert(sizeof(SasrtSpecWords::w) == sizeof(PipelineKey::sasrt_words));
       s.w[7] |= 1u;
     else if (h == 0x9041AFF62011FC58ull && sasrt::gpu_round::On(sasrt::gpu_round::kGprCapFilter))
       s.w[7] |= 2u;
+    // vivapinata-nx (2026-11-12, the shader round; A/B 150): [7] bit 8, the pixel shader built with constant 975 = 0 (the
+    // shader round's passes as before them) when vivapinata_shader_round is off or in the A/B's off half.
+    static const bool round_on = REXCVAR_GET(vivapinata_shader_round);
+    if (!round_on || banjo::renut_gpu::g_ab_off_plain == 150)
+      s.w[7] |= 0x100u;
+    // vivapinata-nx (2026-11-12, the shader round; A/B 151): [7] bit 9, the pixel shader built with constant 976 = 0 (its
+    // early alpha test skipped, tools/deko3d_glsl_opt.py noearly) when vivapinata_shader_noearly is on, but in the A/B's
+    // off half.
+    static const bool noearly_on = REXCVAR_GET(vivapinata_shader_noearly);
+    if (noearly_on && banjo::renut_gpu::g_ab_off_plain != 151)
+      s.w[7] |= 0x200u;
+    // vivapinata-nx (2026-11-12, A/B 152): [7] bit 10, the pixel shader with constant 977 = 1 (its alpha test moved up
+    // ahead of the colour arithmetic, tools/deko3d_glsl_opt.py earlykill) when vivapinata_shader_earlykill is on, but in
+    // the A/B's off half.
+    static const bool earlykill_on = REXCVAR_GET(vivapinata_shader_earlykill);
+    if (earlykill_on && banjo::renut_gpu::g_ab_off_plain != 152)
+      s.w[7] |= 0x400u;
   }
   if (vs_entry && vs_entry->vertexFetchMemoryMask && sasrt::gpu_round::On(sasrt::gpu_round::kFetchEndianSpec)) {
     for (u32 bits = vs_entry->vertexFetchMemoryMask; bits; bits &= bits - 1) {
@@ -7648,7 +8724,7 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
   // banjo_deko3d_gpr32's A/B the pipelines are built without its constant (911 / 910): keys of their own (reserved
   // bits 0 / 1), so both halves' pipelines stay built. 0 otherwise (the keys as before).
   if (ps) {
-    const int ab_off = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+    const int ab_off = banjo::renut_gpu::g_ab_off_plain;
     if (ab_off == 15 && banjo::renut_gpu::LightBranchOn())
       key.reserved |= 1u;
     else if (ab_off == 16 && banjo::renut_gpu::Gpr32On())
@@ -7657,7 +8733,7 @@ PipelineKey MakeKey(const GuestDevice &device, const ShaderRecord *vs, const Sha
   // banjo-nx (2026-10-20, in-run A/B target 17): banjo_deko3d_skin_once's off half, for the vertex shaders it applies to
   // only (the other pipelines stay the same keys).
   if (vs && IsSkinOnceVs(vs->hash) && banjo::renut_gpu::SkinOnceOn() &&
-      banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 17)
+      banjo::renut_gpu::g_ab_off_plain == 17)
     key.reserved |= 4u;
   return key;
 }
@@ -8570,7 +9646,7 @@ bool PrepareMemExportLocked(VideoState &s, const MemExportStream *streams, u32 c
     // waits for nothing; SeedFromPendingExportsLocked's copies wait with their own barriers. Kept when a memexport draw
     // of this list has had no buffer wait since (the export draw may read that draw's windows by address).
     if (!dispatched && sasrt::gpu_round::On(sasrt::gpu_round::kSeedCpu) &&
-        !(g_sasrt_export_write.cmd == cmd && plume::Deko3DBufferWaits(cmd) <= g_sasrt_export_write.waits)) {
+        !(g_sasrt_export_write.cmd == cmd && banjo::renut_gpu::record::BufferWaits(cmd) <= g_sasrt_export_write.waits)) {
       sasrt::gpu_round::Count(sasrt::gpu_round::kSeedCpu, 1, 1);
       return SeedFromPendingExportsLocked(s, buffer, fresh, fresh_count, fresh_offsets);
     }
@@ -8634,7 +9710,7 @@ bool FinishMemExportLocked(VideoState &s, const MemExportStream *streams, u32 co
   plume::RenderCommandList *cmd = s.command_list;
 #if defined(PLUME_DEKO3D)
   if (IsDeko3D())
-    g_sasrt_export_write = {cmd, plume::Deko3DBufferWaits(cmd)};
+    g_sasrt_export_write = {cmd, banjo::renut_gpu::record::BufferWaits(cmd)};
 #endif
   if (SasrtOrderEvery() > 0 && count) [[unlikely]]  // sasrt-nx (2026-11-08, sasrt_gpu_diag_export_order)
     SasrtOrderToken(count > 1 ? fmt::format("E{:x}/{}", offsets[0] / 256, count) : fmt::format("E{:x}", offsets[0] / 256));
@@ -8643,7 +9719,7 @@ bool FinishMemExportLocked(VideoState &s, const MemExportStream *streams, u32 co
   SlotExports &slot = g_exports[s.frame];
   ++g_memexport_draws;
   static const bool batched = REXCVAR_GET(banjo_renut_batched_readbacks);
-  if (batched && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 24) {  // A/B target 24
+  if (batched && banjo::renut_gpu::g_ab_off_plain != 24) {  // A/B target 24
     for (u32 i = 0; i < count; ++i) {
       // halo3-nx (banjo_renut_export_in_place): a window written again is read back once, after all of this list's writes.
       bool deferred = false;
@@ -8727,7 +9803,7 @@ void FlushExportReadbacksLocked() {
         // global-data cache alone.
         const bool trim = sasrt::gpu_round::On(sasrt::gpu_round::kReadbackTrim);
         if (trim) {
-          plume::Deko3DBufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
+          banjo::renut_gpu::record::BufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
           sasrt::gpu_round::Count(sasrt::gpu_round::kReadbackTrim);
         } else {
           cmd->barriers(plume::RenderBarrierStage::COMPUTE, reads, n);
@@ -8776,7 +9852,7 @@ void FlushExportReadbacksLocked() {
         if (sasrt::gpu_round::On(sasrt::gpu_round::kFenceFlush))
           sasrt::gpu_round::Count(sasrt::gpu_round::kFenceFlush);
         else
-          plume::Deko3DFlushL2(cmd);
+          banjo::renut_gpu::record::FlushL2(cmd);
         // sasrt-nx (2026-11-08, sasrt_gpu_readback_barriers_trim): the list ends next (FinishRecordingLocked); the slot's
         // windows are written again only after its fence was waited (or the CPU waited for this list): no wait after.
         if (!trim) {
@@ -8837,6 +9913,27 @@ void WaitForExportsLocked(u32 slots) {
   }
 }
 
+}  // namespace
+// Port 170 (from fnxf_xiii, its note of 2026-11-16; banjo_fence_waits_exports): a D3D fence tells the game its GPU work
+// is done; the GPU's memexport results (fnxf_xiii: the game's copy kernel moving its physical heap's blocks) must be in
+// guest memory by then, or the game writes the freed memory and the late results land over it (fnxf_xiii's damaged
+// loading screens). On the render thread, before a fence completes (backend/render_thread.cpp QueueFenceCompletion):
+// every pending export brought to guest memory (submit and wait when they are this frame's). A GPU sync on every fence
+// while exports are pending, so off by default.
+void SettleExportsForFence() {
+  static const bool on = REXCVAR_GET(banjo_fence_waits_exports);
+  if (!on)
+    return;
+  std::lock_guard lock(State().mutex);
+  u32 slots = 0;
+  for (u32 slot = 0; slot < kFramesInFlight; ++slot)
+    if (!g_exports[slot].pending.empty())
+      slots |= 1u << slot;
+  if (slots)
+    WaitForExportsLocked(slots);
+}
+namespace {
+
 // banjo-nx (2026-10-26, GPU, banjo_renut_convert_reuse): the conversions made in this frame's slot, by everything
 // stream_convert_cs reads (the export slot, its offset, the vertices, both strides and the elements). The export
 // buffers change only with a new export, which raises g_export_generation; the slot's stream buffer only grows within
@@ -8886,7 +9983,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
   u32 job_count = 0;
   uint64_t total = 0;
   static const bool reuse_on = REXCVAR_GET(banjo_renut_convert_reuse);
-  const bool reuse = reuse_on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 23;  // A/B target 23
+  const bool reuse = reuse_on && banjo::renut_gpu::g_ab_off_plain != 23;  // A/B target 23
   ConvertMemo &memo = g_convert_memo;
   // sasrt-nx (2026-11-08, sasrt_gpu_convert_memo_keep; the second GPU round): with the key, a new export does not clear
   // the memo (its window is fresh: a key no entry has); a slot's exports completing, a window written again in place,
@@ -9009,7 +10106,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
   bool lead = true;
 #if defined(PLUME_DEKO3D)
   if (IsDeko3D() && sasrt::gpu_round::On(sasrt::gpu_round::kConvertLead) && g_sasrt_export_write.cmd == cmd &&
-      plume::Deko3DBufferWaits(cmd) > g_sasrt_export_write.waits) {
+      banjo::renut_gpu::record::BufferWaits(cmd) > g_sasrt_export_write.waits) {
     lead = false;
     sasrt::gpu_round::Count(sasrt::gpu_round::kConvertLead);
   }
@@ -9022,7 +10119,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
     // windows by storage-buffer loads (the global-data cache) and its push constants from fresh transient memory
     // (Deko3DOptions::freshComputeConstants): the wait drops that cache alone, not the texture and constant caches.
     if (IsDeko3D() && sasrt::gpu_round::On(sasrt::gpu_round::kConvertLeadData)) {
-      plume::Deko3DBufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
+      banjo::renut_gpu::record::BufferWait(cmd, plume::Deko3DGlobalDataInvalidate, true);
       sasrt::gpu_round::Count(sasrt::gpu_round::kConvertLeadData);
     } else
 #endif
@@ -9082,7 +10179,7 @@ bool ConvertExportedStreamsLocked(VideoState &s, const GuestDevice &device, cons
     // written past 'used' (fresh in the frame: nothing read them since the last queue flush, which dropped the texture
     // cache): no cache holds their lines, so the wait keeps the texture cache too.
     const bool keep_texture = sasrt::gpu_round::On(sasrt::gpu_round::kConvertTailNoImage);
-    plume::Deko3DBufferWait(cmd, keep_texture ? 0u : uint32_t(DkInvalidateFlags_Image), false);
+    banjo::renut_gpu::record::BufferWait(cmd, keep_texture ? 0u : uint32_t(DkInvalidateFlags_Image), false);
     sasrt::gpu_round::Count(sasrt::gpu_round::kConvertTail);
     if (keep_texture)
       sasrt::gpu_round::Count(sasrt::gpu_round::kConvertTailNoImage);
@@ -9118,6 +10215,11 @@ VertexDeclarationRecord &NoDeclaration() {
 constexpr u32 kDeviceDeclarationOffset = 0x2F98;
 constexpr u32 kDeclarationElementsOffset = 52;
 constexpr u32 kDeviceDeclarationMaxElements = 15;
+// culdcept-nx (2026-11-19): draw.h's field map counts these bytes as the declaration (FieldOfOffset).
+static_assert(kDeviceOwnDeclarationBegin == kDeviceDeclarationOffset &&
+              kDeviceOwnDeclarationEnd == kDeviceDeclarationOffset + kDeclarationElementsOffset +
+                                              kDeviceDeclarationMaxElements * 12 &&
+              kDeviceOwnDeclarationEnd <= d3d::kDeviceSnapshotSize);
 
 const VertexDeclarationRecord *DeviceDeclarationLocked(const GuestDevice &device) {
   static std::unordered_map<uint64_t, std::unique_ptr<VertexDeclarationRecord>> records;
@@ -9161,7 +10263,7 @@ bool ShadowCasterCulledLocked(const u8 *device_state, const DrawCall &call) {
   const u32 limit = ShadowCullIndices();
   if (call.count > limit || call.tessellation || call.up_vertices || call.up_indices)
     return false;
-  if (banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 44)
+  if (banjo::renut_gpu::g_ab_off_plain == 44)
     return false;  // A/B 44's off half: every shadow drawn (the same session, culled and not, 30 s each)
   // Meshes only: triangle lists, fans and strips, quad lists (no points, lines or rectangle lists).
   if (!(call.primitive == kTriangleList || call.primitive == kTriangleFan || call.primitive == kTriangleStrip ||
@@ -9348,6 +10450,9 @@ void PrefetchGeometryCopies(const GeometryObject *o, bool index) {
     }
   }
 }
+bool GeometryObjectPooled(const GeometryObject *o) {  // banjo-nx (2026-11-21): render/draw.h
+  return o >= g_geometry_objects && o < g_geometry_objects + kGeometryObjects;
+}
 bool GeometryObjectsRecorded() {
   static const bool on = REXCVAR_GET(banjo_renut_geometry_objects);
   return on;
@@ -9371,21 +10476,123 @@ void FinishRecordingLocked(VideoState &) {
 
 } // namespace detail
 
+// dishonored-nx (2026-10-30; port 101): whether the guest bytes at host pointer 'p' are committed and readable, from
+// the guest heaps' page tables. A fetch constant's range can reach past what the game committed (a stream's last vertex
+// at the end of a heap allocation, or a buffer freed between the draw and the kick): on the Xbox 360 the GPU reads
+// whatever is there, here the read faulted the render thread in ConvertVertices (dishonored-nx: guest 0x9192B000, its
+// rex_crash.log of 2026-10-29). Host memory (a draw's copied user-pointer vertices) is always readable.
+static bool GuestBytesReadable(const u8 *p, size_t len) {
+  if (!p || !len)
+    return true;
+#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && defined(__aarch64__))
+  return true;  // heaps with host offsets there: a guest pointer is not a plain sum
+#else
+  rex::memory::Memory *memory = REX_KERNEL_MEMORY();
+  const u8 *pbase = detail::GuestPhysicalBase();
+  const u8 *vbase = detail::GuestVirtualBase();
+  rex::memory::BaseHeap *heap = nullptr;
+  uint64_t address = 0;
+  if (p >= pbase && uint64_t(p - pbase) < 0x20000000ull) {
+    address = uint64_t(p - pbase);
+    heap = memory->GetPhysicalHeap();
+  } else if (p >= vbase && uint64_t(p - vbase) < 0x100000000ull) {
+    address = uint64_t(p - vbase);
+    heap = memory->LookupHeap(uint32_t(address));
+    // dishonored-nx (2026-11-01, the black objects): a view of physical memory (0xA0000000 64 KB pages, 0xC0000000
+    // 16 MB, 0xE0000000 4 KB) keeps a page table of its own allocations only; memory the game allocated through
+    // another view, or as physical memory, is committed in the physical heap and read "no access" there (Unreal's
+    // vertex buffers in the 0xC0000000 view came out all zeros: black models). The physical heap answers for every view.
+    if (heap && heap->heap_type() == rex::memory::HeapType::kGuestPhysical) {
+      const uint32_t physical = memory->GetPhysicalAddress(uint32_t(address));
+      if (physical != UINT32_MAX) {
+        address = physical;
+        heap = memory->GetPhysicalHeap();
+      }
+    }
+  } else {
+    return true;
+  }
+  if (!heap || address + len - 1 > 0xFFFFFFFFull)
+    return false;
+  return uint32_t(heap->QueryRangeAccess(uint32_t(address), uint32_t(address + len - 1))) &
+         uint32_t(rex::memory::PageAccess::kReadOnly);
+#endif
+}
+
+// dishonored-nx (2026-10-31; port 101): how many bytes from 'p' on are readable (whole 4 KB pages, as far as the first
+// page that is not). A stream whose range ran a little past its allocation keeps its real vertices; only the part past
+// the commit is zero (dishonored-nx: zeroing it all made black models at a distance).
+static size_t GuestReadablePrefix(const u8 *p, size_t len) {
+  if (!banjo::renut_gpu::VertexReadableCheckOn() || GuestBytesReadable(p, len))
+    return len;
+  constexpr size_t kPage = 4096;
+  size_t done = 0;
+  const size_t head = kPage - size_t(reinterpret_cast<uintptr_t>(p) & (kPage - 1));
+  size_t step = std::min(len, head);
+  while (done < len) {
+    if (!GuestBytesReadable(p + done, step))
+      break;
+    done += step;
+    step = std::min(kPage, len - done);
+  }
+  return done;
+}
+
 void FlushVertexFillsLocked() {
   ++g_flush_serial;  // banjo-nx: banjo_renut_exact_streams' intervals
   banjo::renut_gpu::CountKick();
+  static uint32_t unreadable_logged = 0;  // dishonored-nx (2026-10-30; port 101)
   for (const PendingStreamFill &f : g_stream_fills) {
+    // dishonored-nx (2026-10-30/31; port 101): a range with an uncommitted page: the vertices before the first such page
+    // convert, the rest are zeros, and the stream is not cached.
+    const size_t bytes = size_t(f.count) * f.stride;
+    const size_t readable = GuestReadablePrefix(f.guest, bytes);
+    if (readable < bytes) [[unlikely]] {
+      const u32 good = f.stride ? u32(readable / f.stride) : 0u;
+      if (unreadable_logged < 16) {
+        ++unreadable_logged;
+        const u8 *pbase = detail::GuestPhysicalBase();
+        const u8 *vbase = detail::GuestVirtualBase();
+        const bool physical = f.guest >= pbase && uint64_t(f.guest - pbase) < 0x20000000ull;
+        const bool virt = !physical && f.guest >= vbase && uint64_t(f.guest - vbase) < 0x100000000ull;
+        RGPU_WARN("[streams] vertex stream {} bytes (guest {} {:08X}) not committed in guest memory past {} bytes: {} of "
+                  "{} vertices converted, the rest zeros (dishonored_renut_vertex_readable_check)",
+                  bytes, physical ? "physical" : (virt ? "virtual" : "?"),
+                  physical ? uint32_t(f.guest - pbase) : (virt ? uint32_t(f.guest - vbase) : 0u), readable, good,
+                  f.count);
+      }
+      if (good)
+        ConvertVertices(g_fill_elements.data() + f.first_element, f.element_count, f.host_stride, f.guest, f.stride,
+                        good, f.endian, f.host);
+      std::memset(f.host + size_t(good) * f.host_stride, 0, size_t(f.count - good) * f.host_stride);
+      continue;
+    }
+    if (::renut::gpu::host_batch::CensusOn())  // blur-nx (2026-11-18, the census's #12): the range fills at the kick
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kConvertRangeBytes, uint64_t(f.count) * f.host_stride);
     ConvertVertices(g_fill_elements.data() + f.first_element, f.element_count, f.host_stride, f.guest, f.stride,
                     f.count, f.endian, f.host);
+    static const bool redeem = REXCVAR_GET(banjo_renut_stream_redeem);  // port 145 (tw2de_nx's), on by default
     if (f.cacheable)
       TrackConvertedStream(f);
+    else if (redeem && f.stride)
+      RedeemQuietStream(f);
   }
   g_stream_fills.clear();
   g_fill_elements.clear();
+  // sasrt-nx (2026-11-12, batch C/D, item D2; port 93): the ones only this list holds go to the pool (64 at most, up
+  // to 1 MB each)
+  for (auto &p : g_held_retired)
+    if (p && p.use_count() == 1 && g_held_pool.size() < 64 && p->capacity() <= (1u << 20))
+      g_held_pool.push_back(std::move(p));
   g_held_retired.clear();  // sasrt-nx (2026-10-21, sasrt_renut_exports_held): no fill points into them now
   ++g_queued_generation;  // banjo-nx (2026-10-19): the table emptied
   for (const PendingCopy &c : g_copy_fills) {
-    std::memcpy(c.dst, c.src, c.size);
+    // dishonored-nx (2026-10-30/31; port 101): the fetch data copies the same way: the readable part, the rest zeros.
+    const size_t readable = GuestReadablePrefix(c.src, c.size);
+    if (readable)
+      std::memcpy(c.dst, c.src, readable);
+    if (readable < c.size) [[unlikely]]
+      std::memset(c.dst + readable, 0, c.size - readable);
     g_fetch_fill_bytes += c.size;  // banjo-nx (2026-10-27): the 10 s line's
   }
   g_copy_fills.clear();
@@ -9393,11 +10600,23 @@ void FlushVertexFillsLocked() {
 }
 
 // sasrt-nx (2026-11-08, sasrt_gpu_exp_shadow_d32f): stencil used on a depth target made without a stencil plane.
-void SasrtWarnStencilOnD32f(const HostSurface *d) {
+// renut-ultimate (port 75): in this base only renut_depth_float_no_stencil makes such a target (sasrt-nx's shadow-map
+// rules are not here), so the warning names it.
+void SasrtWarnStencilOnD32f(const HostSurface *d, bool clear = false, bool first = false) {
+  // sasrt-nx (2026-11-11, port 75; its formats batch, the diagnostic: renut_diag_formats; renut_depth_float_no_stencil's
+  // question): the first stencil use of each target build, by a draw or a clear ('first': its stencil_used was still
+  // false; its audit's finding 6: no lookup on every stencil draw).
+  if (first && d && d->depth && banjo::renut_gpu::DiagFormatsOn()) {
+    static uint32_t logged = 0;
+    if (logged++ < 48)
+      RGPU_INFO("[formats] stencil {} on depth target {:08X} {}x{} (guest format {}, host format {})",
+                clear ? "cleared" : "used by a draw", d->guest_va, d->width, d->height,
+                GpuTextureFormatName(d->format_word), int(d->format));
+  }
   if (d && d->depth && d->format == plume::RenderFormat::D32_FLOAT) {
     static uint32_t logged = 0;
     if (logged++ < 16)
-      RGPU_WARN("[sasrt] stencil on a depth target without stencil: {:08X} {}x{} (sasrt_gpu_exp_shadow_d32f)",
+      RGPU_WARN("[sasrt] stencil on a depth target without stencil: {:08X} {}x{} (renut_depth_float_no_stencil)",
                 d->guest_va, d->width, d->height);
   }
 }
@@ -9440,24 +10659,46 @@ bool DrawsWithoutPixelShader(const GuestDevice &device, const Targets &t, const 
   return ((color_control >> 4) & 1) == 0;  // alpha to coverage, as MakeKey's
 }
 
+// Whether the draw log takes this frame: banjo_renut_diag_draw_log_s seconds after its first call, the next two frames;
+// culdcept-nx (2026-11-19, the battle's end fade, whose second varies from run to run): with
+// banjo_renut_diag_draw_log_until_s past it, one frame in every banjo_renut_diag_draw_log_every up to that second.
+bool DrawLogFrameLocked(uint64_t frame) {
+  static const int32_t at = REXCVAR_GET(banjo_renut_diag_draw_log_s);
+  if (at <= 0)
+    return false;
+  static const int32_t until = REXCVAR_GET(banjo_renut_diag_draw_log_until_s);
+  static const uint64_t every = uint64_t(std::max(1, REXCVAR_GET(banjo_renut_diag_draw_log_every)));
+  static const auto start = std::chrono::steady_clock::now();
+  static uint64_t first_frame = 0;
+  static bool done = false;
+  if (done)
+    return false;
+  const auto now = std::chrono::steady_clock::now();
+  if (!first_frame) {
+    if (now - start < std::chrono::seconds(at))
+      return false;
+    first_frame = frame + 1;  // from the next whole frame
+  }
+  if (frame < first_frame)
+    return false;
+  if (until > at) {
+    if (now - start >= std::chrono::seconds(until)) {
+      done = true;
+      return false;
+    }
+    return (frame - first_frame) % every == 0;
+  }
+  return frame <= first_frame + 1;
+}
+
 // banjo-nx (2026-10-18, matching RenderDoc captures of Ryujinx to the game's shaders): banjo_renut_diag_draw_log_s
 // seconds after the first draw, every draw of the next two frames: its shaders, counts, target and state, in order.
 void DrawLog(const DrawCall &call, const Geometry &geometry, const ShaderRecord *vs, const ShaderRecord *ps,
              const Targets &targets, const PipelineKey &key, const SharedConstants &sc, u32 export_count) {
-  static const int32_t at = REXCVAR_GET(banjo_renut_diag_draw_log_s);
-  if (at <= 0)
-    return;
-  static const auto start = std::chrono::steady_clock::now();
-  static uint64_t first_frame = 0;
   static uint32_t ordinal = 0;
   static uint64_t ordinal_frame = 0;
   const uint64_t frame = TextureFrameLocked();
-  if (!first_frame) {
-    if (std::chrono::steady_clock::now() - start < std::chrono::seconds(at))
-      return;
-    first_frame = frame + 1;  // from the next whole frame
-  }
-  if (frame < first_frame || frame > first_frame + 1)
+  if (!DrawLogFrameLocked(frame))
     return;
   if (frame != ordinal_frame) {
     ordinal_frame = frame;
@@ -9465,13 +10706,14 @@ void DrawLog(const DrawCall &call, const Geometry &geometry, const ShaderRecord 
   }
   const HostSurface *c0 = targets.color_count ? targets.colors[0] : nullptr;
   RGPU_INFO("[drawlog] frame {} draw {}: vs {:016X} ps {:016X} prim {} count {} -> {} {} inst {}{} target {}x{} fmt {} "
-            "x{} depth {} dc {:08X} blend {:08X} mask {:X} a2c {} vfetch {} bytes, exports {}",
+            "x{} depth {} dc {:08X} blend {:08X} mask {:X} a2c {} vfetch {} bytes, exports {}; colour at {:08X}, depth at "
+            "{:08X}",
             frame, ordinal++, vs ? vs->hash : 0, ps ? ps->hash : 0, call.primitive, call.count,
             geometry.indexed ? "indices" : "vertices", geometry.indexed ? geometry.index_count : geometry.vertex_count,
             geometry.instance_count, call.tessellation ? " tess" : "", c0 ? c0->width : 0, c0 ? c0->height : 0,
             c0 ? int(c0->format) : -1, targets.color_count, targets.depth ? int(targets.depth->format) : -1,
             key.depth_control, key.blend_control[0], key.color_mask, key.alpha_to_coverage, sc.vertex_fetch_bytes,
-            export_count);
+            export_count, c0 ? c0->guest_va : 0, targets.depth ? targets.depth->guest_va : 0);
 }
 
 #if defined(PLUME_DEKO3D)
@@ -9606,7 +10848,7 @@ u32 FurSkinLocked(VideoState &s, plume::RenderCommandList *cmd, const ShaderReco
       cmd->barriers(plume::RenderBarrierStage::GRAPHICS, &barrier, 1);
       g_skin_writes_unseen = false;
     }
-    plume::Deko3DBindStorage(cmd, 13, hit->region, bytes);
+    banjo::renut_gpu::record::BindStorage(cmd, 13, hit->region, bytes);
     banjo::renut_gpu::CountSkinOnce(other + 1);
     return 2;
   }
@@ -9684,7 +10926,7 @@ u32 FurSkinLocked(VideoState &s, plume::RenderCommandList *cmd, const ShaderReco
   for (u32 i = 0; i < fr.count; ++i)
     if (fr.copies[i].src && fr.copies[i].size)
       e.bytes.insert(e.bytes.end(), fr.copies[i].src, fr.copies[i].src + fr.copies[i].size);
-  plume::Deko3DBindStorage(cmd, 13, region, bytes);
+  banjo::renut_gpu::record::BindStorage(cmd, 13, region, bytes);
   g_skin_writes_unseen = true;
   banjo::renut_gpu::CountSkinOnce(other + 0);
   return 1;
@@ -9695,7 +10937,8 @@ u32 FurSkinLocked(VideoState &s, plume::RenderCommandList *cmd, const ShaderReco
 struct TargetsReuse {
   uint64_t seq = 0, epoch = 0;
   u32 va[d3d::kMaxRenderTargets + 1] = {};       // the device's render target words and its depth word
-  u32 desc[d3d::kMaxRenderTargets + 1][3] = {};  // each one's Size, SurfaceInfo, Format (GetHostSurfaceLocked's)
+  // each one's Size, SurfaceInfo, Format and ColorInfo (GetHostSurfaceLocked's; port 161: ColorInfo, the EDRAM base)
+  u32 desc[d3d::kMaxRenderTargets + 1][4] = {};
   Targets targets;
 };
 TargetsReuse g_targets_reuse;
@@ -9708,15 +10951,17 @@ struct ViewportReuse {
 };
 ViewportReuse g_viewport_reuse;
 
-// The descriptor words GetHostSurfaceLocked reads for a surface word of the device (0 0 0 for none).
-void SurfaceDescWords(u32 va, u32 out[3]) {
-  out[0] = out[1] = out[2] = 0;
+// The descriptor words GetHostSurfaceLocked reads for a surface word of the device (0 0 0 0 for none). Port 161 (from
+// fnxf_xiii, 2026-11-11): ColorInfo too, as the surface memo: a target pointed at another EDRAM base is another target.
+void SurfaceDescWords(u32 va, u32 out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0;
   if (!va)
     return;
   if (const auto *desc = GuestPtr<const d3d::SurfaceDesc>(va + sizeof(d3d::Resource))) {
     out[0] = desc->Size;
     out[1] = desc->SurfaceInfo;
     out[2] = desc->Format;
+    out[3] = desc->ColorInfo;
   }
 }
 
@@ -10095,6 +11340,7 @@ struct FastPipeline {
   u32 misc = 0;
   bool blend_used = true;  // banjo-nx (2026-10-27): BlendConstantUsed(key)
   bool provisional = true;  // banjo-nx (2026-10-28): the answer holds only for its prebuild epoch (LastPipelineProvisional)
+  uint8_t stamp = 0;  // blur-nx (2026-11-18, #16): g_fast_pipeline_stamp at its last use (the older way is replaced)
   KeyHot hot;
   PipelineKey key{};
 };
@@ -10127,6 +11373,7 @@ inline u32 DrawKindOf(const Targets &t, const ShaderRecord *ps) {
   return ps ? 2u : (t.color_count == 0 && t.depth ? 0u : 1u);
 }
 uint64_t g_fast_pipeline_generation = 1;  // raised by InvalidateFastDrawLocked
+uint8_t g_fast_pipeline_stamp = 0;  // blur-nx (2026-11-18, #16): one more at each use of an entry
 uint64_t g_fast_record_drops = 0;  // banjo-nx (2026-10-28): InvalidateFastDrawForRecordLocked's calls
 uint64_t g_fast_pipeline_hits = 0, g_fast_pipeline_misses = 0;  // the 10 s line's
 // banjo-nx (2026-10-28, per-draw night): the misses by what the slot held: [0] nothing, [1] another pipeline's answer
@@ -10134,6 +11381,53 @@ uint64_t g_fast_pipeline_hits = 0, g_fast_pipeline_misses = 0;  // the 10 s line
 // from before an invalidation (generation).
 uint64_t g_fast_pipeline_miss_why[4] = {};
 uint64_t g_fast_draws = 0, g_full_draws = 0, g_fast_why[16] = {};  // the 10 s line's
+// culdcept-nx (2026-11-19, the board's stale 2D panels with the fast draw): banjo_renut_diag_fast_force's windows, the
+// field bits every fast draw takes as changed in each (a bisection of the fast draw's kept state in one run).
+u32 FastForceFields() {
+  struct Window {
+    double from, to;
+    u32 mask;
+  };
+  static const std::vector<Window> windows = [] {
+    std::vector<Window> w;
+    const std::string spec = REXCVAR_GET(banjo_renut_diag_fast_force);
+    size_t at = 0;
+    while (at < spec.size()) {
+      size_t end = spec.find(';', at);
+      if (end == std::string::npos)
+        end = spec.size();
+      const std::string item = spec.substr(at, end - at);
+      at = end + 1;
+      const size_t dash = item.find('-'), colon = item.find(':');
+      if (dash == std::string::npos || colon == std::string::npos || colon < dash)
+        continue;
+      Window x;
+      x.from = std::strtod(item.substr(0, dash).c_str(), nullptr);
+      x.to = std::strtod(item.substr(dash + 1, colon - dash - 1).c_str(), nullptr);
+      x.mask = u32(std::strtoul(item.substr(colon + 1).c_str(), nullptr, 16));
+      w.push_back(x);
+    }
+    return w;
+  }();
+  if (windows.empty())
+    return 0;
+  static const auto start = std::chrono::steady_clock::now();
+  const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  int index = -1;
+  u32 mask = 0;
+  for (size_t i = 0; i < windows.size(); ++i)
+    if (t >= windows[i].from && t < windows[i].to) {
+      index = int(i);
+      mask = windows[i].mask;
+      break;
+    }
+  static int last = -2;
+  if (index != last) {
+    last = index;
+    RGPU_INFO("[fastforce] {:.1f} s after the first fast-draw check: window {} forces the fields {:05X}", t, index, mask);
+  }
+  return mask;
+}
 
 // The reasons a draw went to DrawStateLocked, by the first met (the 10 s line).
 enum FastWhy : u32 {
@@ -10174,14 +11468,14 @@ void InvalidateHostPacketsLocked() { ++g_packet_epoch; }
 uint64_t g_lazy_mips_deferred = 0, g_lazy_mips_made = 0;  // the 10 s line's
 bool LazyResolveMipsOn() {
   static const bool on = REXCVAR_GET(banjo_renut_lazy_resolve_mips);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 66;
+  return on && banjo::renut_gpu::g_ab_off_plain != 66;
 }
 // banjo-nx (2026-10-28, banjo_renut_clear_repeat; from sa2-nx's sa2_renut_clear_repeat, credit sa2-nx): ClearTargets.
 // A/B 67's off half sends every clear (what the targets hold is still followed).
 uint64_t g_clear_repeats = 0, g_clears_whole = 0;  // the 10 s line's
 bool ClearRepeatOn() {
   static const bool on = REXCVAR_GET(banjo_renut_clear_repeat);
-  return on && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 67;
+  return on && banjo::renut_gpu::g_ab_off_plain != 67;
 }
 // The levels the resolves since the last ones left, from level 0 as it is now: the same as at those resolves (only
 // resolves, each widening the region, wrote level 0 since; anything else that writes it flushes first). Outside the
@@ -10206,6 +11500,7 @@ void ForgetBoundTargetsLocked() {
 }
 
 void InvalidateFastDrawLocked() {
+  ForgetSpecKeepLocked();
   g_fast.valid = false;
   ++g_fast_pipeline_generation;
   ++g_packet_epoch;  // banjo-nx (2026-10-28, host packets)
@@ -10218,6 +11513,7 @@ void InvalidateFastDrawLocked() {
 // Every record a frame destroyed cleared both (N&B makes and drops shader objects with its meshes): the next draws took
 // the full path and made their pipeline keys again.
 void InvalidateFastDrawForRecordLocked(const void *record) {
+  ForgetSpecKeepLocked();  // banjo-nx (2026-11-21): the kept spec answers read the vertex shader record's summary
   if (g_fast.vs == record || g_fast.ps == record || g_fast.declaration == record)
     g_fast.valid = false;
   for (LastStreamSource &l : g_last_stream_sources)
@@ -10329,7 +11625,7 @@ bool FastExportReads(const GuestDevice &device, const DrawCall &call, const Shad
     // first test), else PendingExportSlots. The answers table below for the others.
     static const bool extents_verify = REXCVAR_GET(banjo_renut_record_extents_verify);
     const DrawSlotExtents *const ext =
-        g_draw_slot_extents && banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 43 ? g_draw_slot_extents
+        g_draw_slot_extents && banjo::renut_gpu::g_ab_off_plain != 43 ? g_draw_slot_extents
                                                                                                 : nullptr;
     for (u32 bits = texture_mask; bits; bits &= bits - 1) {
       const u32 r = u32(std::countr_zero(bits));
@@ -10380,7 +11676,37 @@ bool FastExportReads(const GuestDevice &device, const DrawCall &call, const Shad
   return false;
 }
 
+// Port 166 (from fnxf_xiii, its notes of 2026-10-21, 10-22 and 11-06; banjo_deko3d_sample_mask): PA_SC_AA_MASK
+// (device 0x2A00), 4 bits per pixel of a 2x2 quad (sample i of pixel p is bit 4p + i): a sample is written when any
+// pixel's bit for it is set (the D3D masks repeat it for the four). Before, no draw's mask reached the GPU (every
+// sample written). deko3d's mask is a command, not pipeline state (plume Deko3DSetSampleMask, recorded when it
+// changes): the pipeline key and its lists stay as they are. Only on a multisampled target; host sample j takes guest
+// sample j's bit (the base only ever lowers a target's count).
+void SetSampleMaskLocked(plume::RenderCommandList *cmd, const GuestDevice &device, const Targets &t) {
+#if defined(PLUME_DEKO3D)
+  static const bool on = REXCVAR_GET(banjo_deko3d_sample_mask);
+  if (!on || !cmd)
+    return;
+  const HostSurface *first = t.color_count ? t.colors[0] : t.depth;
+  const u32 samples = first ? u32(first->samples) : 1u;
+  u32 mask = 0xFFFFu;
+  if (samples > 1) {
+    const u32 aa = device.U32(0x2A00) & 0xFFFFu;
+    const u32 all = (1u << samples) - 1u;
+    mask = (aa | aa >> 4 | aa >> 8 | aa >> 12) & all;
+    if (mask == all)
+      mask = 0xFFFFu;
+  }
+  banjo::renut_gpu::record::SetSampleMask(cmd, mask);
+#else
+  (void)cmd;
+  (void)device;
+  (void)t;
+#endif
+}
+
 int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kFastDraw);  // blur-nx (2026-11-17)
   // It keeps what the persistent shared constants, the pushed constants and the chain's hints make possible.
   // banjo-nx (round 4, ARM): the switches read once, one guard a draw.
   struct Config {
@@ -10398,7 +11724,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   FastState &f = g_fast;
   g_skip_fx = f.fx;  // banjo-nx (2026-10-28): banjo_renut_texture_slot_skip's array
   // banjo-nx (2026-10-27, render thread night): the A/B half read once (it changes between frames, on this thread).
-  const int ab = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  const int ab = banjo::renut_gpu::g_ab_off_plain;
   if (!cfg.on || !IsDeko3D() || ab == 25)
     return 0;
   if (!f.valid)
@@ -10411,7 +11737,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const bool point = call.primitive == kPointList;
   if (call.tessellation || (point && !PointFastDrawOn()))
     return FastMiss(kFastCall);
-  const u32 fields = chain.fields;
+  const u32 fields = chain.fields | FastForceFields();  // culdcept-nx: banjo_renut_diag_fast_force
   // banjo-nx (2026-10-28, per-draw night): the predication is one of the viewport's inputs below (the viewport is all
   // that reads it); A/B 61's off half sends the draw the full way as before.
   if ((fields & kFieldPredication) && ab == 61)
@@ -10477,7 +11803,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     // banjo-nx (2026-10-28, cache-miss audit 2): what a shader change reads further down whatever the fields say: the
     // device snapshot's bools and alpha test lines (written by the replay only when they change), and the bound
     // declaration's first three lines (its hash, stream order and used mask; its first streams).
-    {
+    // banjo-nx (2026-11-21, A/B 177's off half: none of the shader change's prefetches here and below).
+    if (ab != 177) {
       const d3d::Device &snap = device.dev();
       __builtin_prefetch(&snap.m_Constants.VertexShaderB[0]);
       __builtin_prefetch(&snap.m_ControlPacket);
@@ -10529,13 +11856,19 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       return FastMiss(kFastExports);
     if ((device_ps && DrawSummaryOf(*device_ps).composite) || DrawSummaryOf(*vs).skin_once)
       return FastMiss(kFastSpecial);
+    // renut-ultimate (2026-11-16, port 145; banjo_renut_fetch_filters, off by default): shaders whose fetches give
+    // their own texture filters stay DrawStateLocked's, which applies them (FillTextures' filters).
+    if (FetchFiltersOn() && (!vs->fetch_filters.Empty() || (device_ps && !device_ps->fetch_filters.Empty())))
+      [[unlikely]] return FastMiss(kFastSpecial);
     // banjo-nx (2026-10-27, constants): the new shaders' literal runs, which the constants' push reads (a heap object a
     // shader, cold at a shader change), fetched while the declaration, geometry and textures are worked out.
-    if (const void *lr = DrawSummaryOf(*vs).literal_runs)
-      __builtin_prefetch(lr);
-    if (device_ps) {
-      if (const void *lr = DrawSummaryOf(*device_ps).literal_runs)
+    if (ab != 177) {  // banjo-nx (2026-11-21, A/B 177)
+      if (const void *lr = DrawSummaryOf(*vs).literal_runs)
         __builtin_prefetch(lr);
+      if (device_ps) {
+        if (const void *lr = DrawSummaryOf(*device_ps).literal_runs)
+          __builtin_prefetch(lr);
+      }
     }
     if (device_ps) {
       const uint64_t h = device_ps->hash;
@@ -10559,7 +11892,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                           ps_entry_now != (f.ps ? f.ps->entry : nullptr));
   // banjo-nx (round 4, ARM): the shader entries' lines (the texture masks, the constant summaries, the key's inputs),
   // fetched now and read after the geometry's work.
-  if (shaders_changed) {
+  if (shaders_changed && ab != 177) {  // (2026-11-21: A/B 177's off half, none)
     if (vs_entry_now) {
       __builtin_prefetch(vs_entry_now);
       __builtin_prefetch(reinterpret_cast<const char *>(vs_entry_now) + 64);
@@ -10684,7 +12017,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       fetches[r] = DeviceTextureFetch(dev, r);
       // banjo-nx (round 4, ARM): the header and the memo entry FillTextures reads for the slot, fetched now.
       // banjo-nx (2026-10-27, Phase A): the slot's object's answer lines instead, when the recording gave it.
-      if (textures_inputs && r < d3d::kTextureFetchSlots && g_draw_resources && ((g_draw_resources->mask >> r) & 1)) {
+      // banjo-nx (2026-11-21): A/B 178's off half, none of these, the headers' below nor the pipeline entry's.
+      if (ab == 178) {
+      } else if (textures_inputs && r < d3d::kTextureFetchSlots && g_draw_resources &&
+                 ((g_draw_resources->mask >> r) & 1)) {
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 64);
         __builtin_prefetch(reinterpret_cast<const char *>(g_draw_resources->slot[r]) + 128);
       } else if (textures_inputs && r < d3d::kTextureFetchSlots) {
@@ -10701,7 +12037,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // headers, below).
   const u32 tex_slots_mask = texture_mask & ((1u << d3d::kTextureFetchSlots) - 1u);
   const bool tex_objects = memo_on_objects(g_draw_resources) && (g_draw_resources->mask & tex_slots_mask) == tex_slots_mask;
-  if (!textures_inputs && !tex_objects) {
+  if (!textures_inputs && !tex_objects && ab != 178) {
     for (u32 bits = tex_slots_mask; bits; bits &= bits - 1) {
       const u32 va = f.texture_va[std::countr_zero(bits)];
       if (const auto *header = va ? GuestPtr<const d3d::BaseTexture>(va) : nullptr)
@@ -10710,7 +12046,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   }
   // banjo-nx (round 4, ARM): the pipeline cache's entry this draw most likely reads (its tag with the draw before's
   // alpha test and render-state epoch), fetched now.
-  if (entries_changed || (fields & (kFieldBools | kFieldDest | kFieldViewPackets | kFieldDecl)) || targets_changed) {
+  if ((entries_changed || (fields & (kFieldBools | kFieldDest | kFieldViewPackets | kFieldDecl)) || targets_changed) &&
+      ab != 178) {
     const ShaderCacheEntry *const guess_ps = depth_only ? nullptr : (device_ps ? device_ps->entry : nullptr);
     const u32 guess_misc = call.primitive | u32(geometry.per_instance) << 8 | f.alpha_test_func << 9 |
                            u32(ab) << 16;
@@ -10733,6 +12070,11 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
 #endif
   // From here the draw is the fast path's: the state below is this draw's.
   ++g_trace_draws;
+  if (::renut::gpu::host_batch::CensusOn()) {  // blur-nx (2026-11-18, the census's #19): the draws with no field changed
+    ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kFastDraws);
+    if (!fields)
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kFastDrawsNoFields);
+  }
   SharedConstants &sc = DrawSharedLocked();
   // What the draw before left for its next draw to put back (DrawStateLocked's own steps): the skin mode, the point
   // sprite state, the memexport windows.
@@ -10907,12 +12249,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     const u32 color_control = dev.m_ControlPacket.ColorControl;
     u32 func = (color_control & 8) ? (color_control & 7) : 7;
     float threshold = dev.m_ValuesPacket.AlphaRef;
-    if (func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
+    if (((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
       const HostSurface *first = targets.color_count ? targets.colors[0] : targets.depth;
-      if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1) {
-        func = 6;
-        threshold = 0.5f;
-      }
+      if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1)
+        AlphaToMaskTestSingleSample(func, threshold);  // blur-nx (2026-11-13): with the game's own test too
     }
     threshold = banjo::renut_gpu::AlphaNearOne(func, threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
     if (verify && !((fields & (kFieldBools | kFieldViewPackets)) || entries_changed || depth_only != f.depth_only ||
@@ -11039,7 +12379,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     if (sc.vertex_fetch_data) {
       const uint64_t address = sc.vertex_fetch_data;
       const uint64_t base = address & ~uint64_t(0xFF);
-      plume::Deko3DBindFetchData(cmd, base, u32(address - base) + sc.vertex_fetch_bytes);
+      banjo::renut_gpu::record::BindFetchData(cmd, base, u32(address - base) + sc.vertex_fetch_bytes);
       sc.vertex_fetch_data = old_data;  // the word as it was, so that SetShared marks its line only if it changes
       SetShared(sc, sc.vertex_fetch_data, address - base);
     } else if (old_data != 0) {
@@ -11100,7 +12440,7 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     memexport_address = memexport->getDeviceAddress();
   }
   SetShared(sc, sc.memexport_address, memexport_address);
-  plume::Deko3DBindMemExport(cmd, memexport);
+  banjo::renut_gpu::record::BindMemExport(cmd, memexport);
   PushSharedConstants(cmd, sc);
   banjo::renut_gpu::CountSharedConstants(false);
 #endif
@@ -11130,34 +12470,112 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                                                   : RenderStateIdLocked(f.rs, targets);
   const uint64_t prebuild_epoch = PrebuildEpochLocked();
   const u32 misc = call.primitive | u32(geometry.per_instance) << 8 | alpha_test_func << 9 | u32(ab_off) << 16;
-  const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
+  // banjo-nx (2026-11-21, A/B 172): the spec answers kept (SpecKeep) or made.
+  SpecKeep &sk = g_spec_keep;
+  const u32 sk_colors = std::min<u32>(targets.color_count, 4u);
+  const bool sk_cacheable = !(vs->entry && vs->entry->memExportConstants[0]) && ab_off != 172;
+  const bool sk_bound = DrawSummaryOf(*vs).bound_fetches;
+  bool sk_hit = sk_cacheable && sk.valid && sk.bound_fetches == sk_bound &&
+                sk.vs_entry == vs->entry && sk.ps_entry == ps_entry && sk.per_instance == geometry.per_instance &&
+                sk.ab == ab_off && sk.color_count == targets.color_count;
+  for (u32 i = 0; i < sk_colors && sk_hit; ++i)
+    sk_hit = sk.color_info[i] == (targets.colors[i] ? targets.colors[i]->color_info_word : 0u);
+  bool sk_by_words = false;
+  if (sk_hit && (g_spec_lines_seen & kSpecLines) != 0) {
+    sk_hit = sk_by_words = SpecInputsSame(sk, sc);  // a line they read was written: the words they read
+    if (sk_hit)
+      g_spec_lines_seen = 0;  // the words kept are the block's again
+  }
+  if (sk_hit && verify) [[unlikely]] {
+    const FetchSpec vf = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);
+    const SasrtSpecWords vw = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);
+    if (vf.kind != sk.fetch.kind || std::memcmp(vf.types, sk.fetch.types, sizeof(vf.types)) != 0 ||
+        SasrtPlainFetchMask(sc, ps_entry, vs->entry) != sk.plain || SasrtClipBit(sc) != sk.clip ||
+        std::memcmp(vw.w, sk.words.w, sizeof(vw.w)) != 0) {
+      ++g_spec_verify_differ;
+      static uint32_t logged = 0;
+      if (logged++ < 16)
+        RGPU_WARN("banjo_renut_fast_draw_verify: the kept spec answers differ from the draw's (made again)");
+      sk_hit = false;
+    }
+  }
+  if (sk_hit) {
+    ++(sk_by_words ? g_spec_by_words : g_spec_kept);
+  } else {
+    ++g_spec_made;
+    sk.fetch = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
+    sk.plain = SasrtPlainFetchMask(sc, ps_entry, vs->entry);  // sasrt-nx (2026-11-08); vivapinata-nx: vs
+    sk.clip = SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+    sk.words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);  // sasrt-nx (third round)
+    sk.valid = sk_cacheable;
+    sk.bound_fetches = sk_bound;
+    sk.vs_entry = vs->entry;
+    sk.ps_entry = ps_entry;
+    sk.per_instance = geometry.per_instance;
+    sk.ab = ab_off;
+    sk.color_count = targets.color_count;
+    for (u32 i = 0; i < 4; ++i)
+      sk.color_info[i] = i < sk_colors && targets.colors[i] ? targets.colors[i]->color_info_word : 0u;
+    if (sk_cacheable) {
+      sk.fetches = (ps_entry ? ps_entry->textureFetchMask : 0u) | (vs->entry ? vs->entry->textureFetchMask : 0u);
+      sk.memory_fetches = vs->entry ? vs->entry->vertexFetchMemoryMask : 0u;
+      SpecKeepInputs(sk, sc);
+    }
+    g_spec_lines_seen = 0;
+  }
+  const FetchSpec &fetch_spec = sk.fetch;
   // banjo-nx (2026-10-27, shadow sort): the key reads the shaders through their cache entries and the declaration
   // through its layout hash (MakeKey, BoolSpecMask), so another shader object of the same contents (N&B makes one per
   // mesh: a new address at 69 % of the shadow draws) keeps the key and the pipeline; compared with the key's own.
-  const u32 plain_fetches = SasrtPlainFetchMask(sc, ps_entry);  // sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches)
-  const u32 clip_bit = SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-  const SasrtSpecWords spec_words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants);  // sasrt-nx (third round)
+  const u32 plain_fetches = sk.plain;  // sasrt-nx (2026-11-08); vivapinata-nx: vs (kept or made above)
+  const u32 clip_bit = sk.clip;  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+  const SasrtSpecWords &spec_words = sk.words;  // sasrt-nx (third round)
   const bool key_inputs = f.key_rs_epoch != f.rs_epoch || !f.pipeline || !f.kp || depth_only != f.depth_only ||
-                          std::memcmp(f.kp->sasrt_words, spec_words.w, sizeof(spec_words.w)) != 0 ||  // sasrt-nx
+                          !SameBytes<sizeof(spec_words.w)>(f.kp->sasrt_words, spec_words.w) ||  // sasrt-nx; inline
                           misc != f.key_misc || f.prebuild_epoch != prebuild_epoch ||
                           f.kp->fetch_pad != (f.kp->pixel_shader ? plain_fetches : 0u) ||
                           (f.kp->reserved & 8u) != clip_bit ||  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
                           ((shaders_changed || (fields & kFieldDecl)) &&
                            (vs->entry != f.kp->vertex_shader || ps_entry != f.kp->pixel_shader ||
                             declaration->layout_hash != f.kp->layout_hash || ab_off == 41)) ||  // A/B 41: as before
-                          (geometry.per_instance && FetchSpecDiffers(*f.kp, fetch_spec));  // banjo_gpu_fetch_spec
+                          FetchSpecDiffers(*f.kp, fetch_spec);  // banjo_gpu_fetch_spec; vivapinata-nx (2026-11-12): every draw
   if (key_inputs) {
-    FastPipeline &c = g_fast_pipelines[FastPipelineIndex(f.rs_epoch, vs->entry, ps_entry, declaration->layout_hash,
-                                                         misc)];
+    // blur-nx (2026-11-18, the Renut host batch's #16, blur_renut_fast_pipeline_two_way / A/B 235): the entry and its
+    // neighbour. An entry answers when it was made from this draw's inputs (same_inputs: all that MakeKey reads and the
+    // words set after it) in this generation and prebuild epoch (or not provisional); a miss fills the way with this
+    // draw's inputs from an earlier epoch, else an empty one, else the one used longer ago. The race had 7,652
+    // conflicts a 10 s (27 a frame), each a MakeKey and GetPipelineLocked.
+    const u32 fp_index = FastPipelineIndex(f.rs_epoch, vs->entry, ps_entry, declaration->layout_hash, misc);
+    const auto same_inputs = [&](const FastPipeline &e) {
+      return e.pipeline && e.rs_epoch == f.rs_epoch && e.vs == vs->entry && e.ps == ps_entry &&
+             e.layout_hash == declaration->layout_hash && e.misc == misc &&
+             e.key.fetch_pad == (e.key.pixel_shader ? plain_fetches : 0u) &&  // sasrt-nx
+             (e.key.reserved & 8u) == clip_bit &&  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+             SameBytes<sizeof(spec_words.w)>(e.key.sasrt_words, spec_words.w) &&  // sasrt-nx (the third round); inline
+             !FetchSpecDiffers(e.key, fetch_spec);  // banjo_gpu_fetch_spec; vivapinata-nx (2026-11-12): every draw
+    };
     // banjo-nx (2026-10-28, per-draw night, A/B 63): the prebuild epoch only for a provisional answer.
-    if (c.pipeline && c.rs_epoch == f.rs_epoch && c.vs == vs->entry && c.ps == ps_entry &&
-        c.layout_hash == declaration->layout_hash && c.misc == misc &&
-        (c.prebuild_epoch == prebuild_epoch || (!c.provisional && ab_off != 63)) &&
-        c.generation == g_fast_pipeline_generation && c.key.fetch_pad == (c.key.pixel_shader ? plain_fetches : 0u) &&  // sasrt-nx
-        (c.key.reserved & 8u) == clip_bit &&  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-        std::memcmp(c.key.sasrt_words, spec_words.w, sizeof(spec_words.w)) == 0 &&  // sasrt-nx (the third round)
-        (!geometry.per_instance || !FetchSpecDiffers(c.key, fetch_spec))) {  // banjo_gpu_fetch_spec
+    const auto answers = [&](const FastPipeline &e) {
+      return same_inputs(e) && (e.prebuild_epoch == prebuild_epoch || (!e.provisional && ab_off != 63)) &&
+             e.generation == g_fast_pipeline_generation;
+    };
+    FastPipeline *cp = &g_fast_pipelines[fp_index];
+    bool hit = answers(*cp);
+    if (!hit && ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kPipelineTwoWay)) {
+      FastPipeline &other = g_fast_pipelines[fp_index ^ 1u];
+      if (answers(other)) {
+        cp = &other;
+        hit = true;
+      } else if (!same_inputs(*cp) &&
+                 (same_inputs(other) || !other.pipeline ||
+                  (cp->pipeline && uint8_t(g_fast_pipeline_stamp - other.stamp) > uint8_t(g_fast_pipeline_stamp - cp->stamp)))) {
+        cp = &other;
+      }
+    }
+    FastPipeline &c = *cp;
+    c.stamp = ++g_fast_pipeline_stamp;
+    if (hit) {
       ++g_fast_pipeline_hits;
       f.kp = &c.key;
       f.kp_hot = c.hot;
@@ -11171,13 +12589,20 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
                                      ? 1
                                  : c.generation == g_fast_pipeline_generation ? 2
                                                                               : 3];
-      c.key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
-                      sc.alpha_test_func, fetch_spec);
-      c.key.fetch_pad = c.key.pixel_shader ? plain_fetches : 0u;  // sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches)
-      c.key.reserved = (c.key.reserved & ~8u) | clip_bit;  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
-      std::memcpy(c.key.sasrt_words, spec_words.w, sizeof(spec_words.w));  // sasrt-nx (the third round)
-      c.blend_used = BlendConstantUsed(c.key);
-      c.hot = KeyHot::Of(c.key);
+      // blur-nx (2026-11-18, the Renut host batch's #18, blur_renut_provisional_key_kept / A/B 237): an entry made from
+      // this draw's inputs in this generation (a provisional answer of an earlier prebuild epoch) holds the key MakeKey
+      // would make again: looked up again with it.
+      const bool keep_key = c.generation == g_fast_pipeline_generation && same_inputs(c) &&
+                            ::renut::gpu::host_batch::On(::renut::gpu::host_batch::kProvisionalKey);
+      if (!keep_key) {
+        c.key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
+                        sc.alpha_test_func, fetch_spec);
+        c.key.fetch_pad = c.key.pixel_shader ? plain_fetches : 0u;  // sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches)
+        c.key.reserved = (c.key.reserved & ~8u) | clip_bit;  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
+        std::memcpy(c.key.sasrt_words, spec_words.w, sizeof(spec_words.w));  // sasrt-nx (the third round)
+        c.blend_used = BlendConstantUsed(c.key);
+        c.hot = KeyHot::Of(c.key);
+      }
       f.kp = &c.key;
       f.kp_hot = c.hot;
       f.blend_used = c.blend_used;
@@ -11232,12 +12657,19 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   const u32 fast_dc = f.kp_hot.depth_control;
   const bool fast_depth_writes = ((fast_dc & 2) && (fast_dc & 4)) ||
                                  ((fast_dc & 1) && ((f.kp_hot.stencil_ref_mask >> 16) & 0xFF) != 0);
+  // Port 179 (from fnxf_xiii; banjo_renut_edram_carry, off): before the bind test, so every draw marks its targets this
+  // frame; a carry draws with its own framebuffer and resets g_bound, so the targets are bound again below.
+  if (EdramCarryOn()) [[unlikely]]
+    CarryEdramBeforeDrawLocked(targets);
   if (targets_changed || !g_bound.framebuffer || g_bound.framebuffer != f.bound_framebuffer ||
       f.bind_layout_epoch != g_layout_epoch || f.framebuffer_epoch != FramebufferEpochLocked() ||
       (targets.depth && targets.depth->handed && (fast_depth_writes || !banjo::renut_gpu::DepthHandOverReadOnlyOn())) ||
       // kameo-nx (2026-11-03, banjo_deko3d_depth_read_layout): a draw that writes a depth target left in the read layout.
       (fast_depth_writes && targets.depth && targets.depth->layout != plume::RenderTextureLayout::DEPTH_WRITE) ||
       (gpu_profile::Timed() && !banjo::renut_gpu::DiagGpuShadersOn())) {
+    // blur-nx (2026-11-11, port 76; its key 220: blur_renut_edram_inherit): what other views wrote over a target this
+    // draw keeps in part.
+    InheritEdramBeforeDrawLocked(targets, f.kp_hot.color_mask, f.kp ? f.kp->blend_control : nullptr);
     if (!BindTargets(targets, fast_depth_writes))
       return -1;
     f.bound_framebuffer = g_bound.framebuffer;
@@ -11267,7 +12699,10 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   if (g_bound.pipeline != pipeline) {
     if (!g_bound.pipeline)
       g_bound.depth_bias_set = false;  // rr6-nx: after an internal pass, whose pipeline set its own bias
-    cmd->setPipeline(pipeline);
+    {
+      ::renut::gpu::census::Scope pipeline_scope(::renut::gpu::census::kSetPipeline);  // blur-nx (2026-11-17)
+      cmd->setPipeline(pipeline);
+    }
     g_bound.pipeline = pipeline;
   }
   SetDrawDepthBias(cmd, dev);  // rr6-nx (2026-11-03, rr6_depth_bias)
@@ -11287,15 +12722,15 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
   // banjo-nx (2026-10-27, render thread night): once while they stay (plume found them bound at every draw after the
   // first: three calls a draw).
   if (!g_bound.pushed_ubos) {
-    plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
-    plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
-    plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
-                             (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
+    banjo::renut_gpu::record::BindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
+    banjo::renut_gpu::record::BindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
+    banjo::renut_gpu::record::BindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
+                                          (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
     std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);
     g_bound.pushed_ubos = true;
   }
   if (!g_bound.shared_words_set) {
-    plume::Deko3DSetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
+    banjo::renut_gpu::record::SetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
     g_bound.shared_words_set = true;
   }
 #endif
@@ -11317,6 +12752,8 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
     if ((f.kp_hot.color_mask >> (4 * i)) & 0xF) {
       ++targets.colors[i]->writes;
       targets.colors[i]->write_seq = ++g_surface_write_seq;  // sasrt-nx: the EDRAM depth restore
+      targets.colors[i]->blur_draw_seq = g_surface_write_seq;  // blur-nx (2026-11-10, port 76; its key 216)
+      g_blur_color_write_last = g_surface_write_seq;  // blur-nx (2026-11-11, port 76; its key 220)
     }
   if (targets.depth) {
     const u32 dc = f.kp_hot.depth_control;
@@ -11325,11 +12762,15 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       targets.depth->write_seq = ++g_surface_write_seq;  // sasrt-nx: the EDRAM depth restore
     }
     if (dc & 1) {  // sasrt-nx's SasrtWarnStencilOnD32f inside it (rr6-nx, 2026-11-09)
+      const bool first_stencil = !targets.depth->stencil_used;  // sasrt-nx (2026-11-11, port 75; renut_diag_formats)
       targets.depth->stencil_used = true;
-      SasrtWarnStencilOnD32f(targets.depth);
+      SasrtWarnStencilOnD32f(targets.depth, false, first_stencil);
     }
   }
   ++s.list_draws;  // Video::NoteDrawLocked
+  if (vs->entry && vs->entry->textureFetchMask)
+    VertexTextureBarrierLocked();  // port 161 (banjo_deko3d_vertex_texture_barrier)
+  SetSampleMaskLocked(cmd, device, targets);  // port 166 (banjo_deko3d_sample_mask)
   if (geometry.indexed) {
     // banjo-nx (2026-10-27, render thread night, A/B 38): a whole index copy is a piece of a pool chunk: the chunk bound at
     // its start and the copy's place given as the first index, so the draws of every copy in one chunk keep one binding
@@ -11347,9 +12788,11 @@ int FastDrawLocked(const u8 *device_state, const DrawCall &call, const ReplayCon
       }
     }
     SetIndexBuffer(cmd, index_view);
+    ::renut::gpu::census::Scope draw_scope(::renut::gpu::census::kHostDraw);  // blur-nx (2026-11-17)
     cmd->drawIndexedInstanced(geometry.index_count, geometry.instance_count, first_index,
                               base_draw ? int32_t(geometry.whole_base) : 0, 0);
   } else {
+    ::renut::gpu::census::Scope draw_scope(::renut::gpu::census::kHostDraw);  // blur-nx (2026-11-17)
     cmd->drawInstanced(geometry.vertex_count, geometry.instance_count, base_draw ? geometry.whole_base : 0u, 0);
   }
   f.seq = chain.seq;
@@ -11475,7 +12918,7 @@ void StoreFastStateLocked(const DrawCall &call, ShaderRecord *vs, ShaderRecord *
   f.rs_valid = false;  // taken again at the next fast draw (a new epoch, unless the words are the same)
   f.key_rs_epoch = 0;  // the next fast draw takes its key from the cache or makes it
   f.key_misc = call.primitive | u32(per_instance) << 8 | alpha_test_func << 9 |
-               u32(banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed)) << 16;
+               u32(banjo::renut_gpu::g_ab_off_plain) << 16;
   f.pipeline = pipeline;
   f.pipeline_lookups = PipelineLookupsLocked();
   f.prebuild_epoch = PrebuildEpochLocked();
@@ -11832,6 +13275,11 @@ std::string FastDrawReport() {
     out += fmt::format(" host packets (banjo_renut_host_packets): {} found, {} not, {} stale, {} made,",
                        std::exchange(g_packet_hits, 0), std::exchange(g_packet_misses, 0),
                        std::exchange(g_packet_stale, 0), std::exchange(g_packet_made, 0));
+  // banjo-nx (2026-11-21): the spec answers kept (A/B 172)
+  out += fmt::format(" spec answers kept {} of {} ({} by their words){},", g_spec_kept + g_spec_by_words,
+                     g_spec_kept + g_spec_by_words + g_spec_made, g_spec_by_words,
+                     g_spec_verify_differ ? fmt::format(" (verify: {} differ)", g_spec_verify_differ) : std::string());
+  g_spec_kept = g_spec_by_words = g_spec_made = 0;
   return out;
 }
 
@@ -11844,9 +13292,15 @@ struct FastCensus {
   std::unordered_map<u32, uint64_t> combos;
   uint64_t last_seq = 0;
 } g_fast_census;
+// blur-nx (2026-11-10, port 76; the Ryujinx crashes of its emu2 / emu3: FastCensusDraw read a pointer made of log text):
+// with a queued back end (deko3d) the draws reach FastCensusDraw on the render thread while FastCensusReport, on the
+// game's frame thread (StatsGameFrame), walks and replaces the same map. Both now hold this. Diagnostics only (the census
+// key, banjo_renut_diag_fast_census).
+std::mutex g_fast_census_mutex;
 
 void FastCensusDraw(const DrawCall &call, const ShaderRecord &vs, const ShaderRecord *ps, u32 export_count,
                     const ReplayConstants *replay) {
+  std::lock_guard census_lock(g_fast_census_mutex);
   FastCensus &c = g_fast_census;
   ++c.draws;
   const ChainHint &h = g_chain_hint;
@@ -12035,7 +13489,92 @@ void SasrtNoteExport(uint64_t sig, uint64_t moved_sig, const MemExportStream *ex
   }
 }
 
+// sasrt-nx (2026-11-11, port 82; its GPU list's row 4; UNTESTED), sasrt_gpu_skip_cull_both: a triangle draw culling
+// both faces, built as FRONT_AND_BACK (banjo_renut_cull_both, pipeline.cpp), rasterises nothing; left out when neither
+// shader exports memory (an export draw's vertex shader still runs). Points have no facing and lines are not culled:
+// only triangle kinds. renut-ultimate (port 82): not rectangle lists or tessellated draws either, which sasrt-nx's form
+// took: MakeKey clears their cull bits (they are drawn unculled), so leaving them out would drop what is drawn now.
+// Direct3D 12 has no such cull mode and draws both faces: there these draws now draw nothing, as on Vulkan, deko3d and
+// the console. Counted in the 10 s "[renut] untested GPU rows" line.
+[[gnu::noinline]] bool SasrtCullBothLocked(const u8 *device_state, const DrawCall &call) {
+  if (call.tessellation || (call.primitive != kTriangleList && call.primitive != kTriangleFan &&
+                            call.primitive != kTriangleStrip && call.primitive != kQuadList))
+    return false;
+  const GuestDevice device(device_state);
+  if (!device.valid() || (u32(device.dev().m_ControlPacket.ModeControl) & 3u) != 3u)
+    return false;
+  const auto exports = [](const ShaderRecord *r) {
+    if (!r->entry)
+      return true;
+    for (const u32 m : r->entry->memExportConstants)
+      if (m)
+        return true;
+    return false;
+  };
+  const ShaderRecord *vs = FindShaderLocked(device.U32(d3d::kDeviceOffsetVertexShader), RecordKind::VertexShader);
+  if (!vs || exports(vs))
+    return false;
+  if (const u32 ps_va = device.U32(d3d::kDeviceOffsetPixelShader)) {
+    const ShaderRecord *ps = FindShaderLocked(ps_va, RecordKind::PixelShader);
+    if (!ps || exports(ps))
+      return false;
+  }
+  std::atomic<uint64_t> &skipped = sasrt::gpu_round::g_census_cull_both_skipped;  // a load and a store (one writer)
+  skipped.store(skipped.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  return true;
+}
+
+// blur-nx (2026-11-17, the Renut audit's #24): DrawStateLocked's keys, read at the render thread's first draw
+// (DrawStateLocked runs on the render thread only: a plain flag, no guard's acquire load per key per draw).
+namespace {
+struct DrawStateKeys {
+  bool cull_both = false;
+  bool keep_fetches = false;
+  bool fetch_verify = false;
+  bool fast_census = false;
+  bool export_verify = false;
+  bool targets_verify = false;
+  bool persistent_sc = false;
+  bool persistent_verify = false;
+  bool partial_clear = false;
+  bool whole_verify = false;
+  bool fetch_none_skip = false;
+  bool fetch_data_unread = false;
+  bool export_dupes = false;
+  bool fetch_slots_skip = false;
+  bool export_twice = false;
+};
+DrawStateKeys g_ds_keys;
+bool g_ds_keys_ready = false;
+[[gnu::noinline, gnu::cold]] void ReadDrawStateKeys() {
+  g_ds_keys.cull_both = sasrt::gpu_round::SkipCullBothOn();
+  g_ds_keys.keep_fetches = REXCVAR_GET(banjo_renut_keep_fetches);
+  g_ds_keys.fetch_verify = REXCVAR_GET(banjo_renut_chain_reuse_verify);
+  g_ds_keys.fast_census = REXCVAR_GET(banjo_renut_diag_fast_census);
+  g_ds_keys.export_verify = REXCVAR_GET(banjo_renut_chain_reuse_verify);
+  g_ds_keys.targets_verify = REXCVAR_GET(banjo_renut_chain_reuse) && REXCVAR_GET(banjo_renut_chain_reuse_verify);
+  g_ds_keys.persistent_sc = REXCVAR_GET(banjo_renut_persistent_shared);
+  g_ds_keys.persistent_verify = g_ds_keys.persistent_sc && REXCVAR_GET(banjo_renut_persistent_shared_verify);
+  g_ds_keys.partial_clear = REXCVAR_GET(banjo_renut_shared_partial_clear);
+  g_ds_keys.whole_verify = REXCVAR_GET(banjo_renut_whole_buffers_verify);
+  g_ds_keys.fetch_none_skip = REXCVAR_GET(banjo_renut_fetch_data_unread);
+  g_ds_keys.fetch_data_unread = REXCVAR_GET(banjo_renut_fetch_data_unread);
+  g_ds_keys.export_dupes = REXCVAR_GET(sasrt_gpu_diag_export_dupes);
+  g_ds_keys.fetch_slots_skip = REXCVAR_GET(banjo_renut_fetch_slots_skip);
+  g_ds_keys.export_twice = REXCVAR_GET(sasrt_gpu_exp_export_twice);
+  g_ds_keys_ready = true;
+}
+}  // namespace
+
 bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayConstants *replay) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kDrawState);  // blur-nx (2026-11-17)
+  if (!g_ds_keys_ready) [[unlikely]]  // blur-nx (2026-11-17, audit #24)
+    ReadDrawStateKeys();
+  {  // sasrt-nx (2026-11-11, port 82; its GPU list's row 4; UNTESTED), sasrt_gpu_skip_cull_both: before everything else
+    const bool cull_both = g_ds_keys.cull_both;
+    if (cull_both && SasrtCullBothLocked(device_state, call)) [[unlikely]]
+      return true;
+  }
   // sasrt-nx (2026-11-08, sasrt_gpu_skip_inert_draws): before the fast path and the targets (SasrtInertDrawLocked). The
   // chain's next draw then finds no kept state of this one (its sequence number is not the last kept + 1): the full path.
   if (sasrt::gpu_round::On(sasrt::gpu_round::kInertDraws)) {
@@ -12050,8 +13589,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     const int mb = banjo::renut_gpu::SplitFrameMb();
     return mb > 0 && IsDeko3D() ? std::max<size_t>(size_t(mb) / 16, 1) : ~size_t(0);
   }();
-  if (Video::UploadsLocked().CurrentChunk() >= split_chunks) [[unlikely]]  // kameo-nx (2026-11-04)
-    SplitLongFrameLocked();
+  // sasrt-nx (2026-11-09 night, sasrt_memory_governor; port 58): at 48 MB (3 chunks) while memory is low (SASRT's
+  // load frames grew the rings to 160-240 MB in its docked crashes); a frame split is submitted, the same pixels.
+  if (const size_t chunk = Video::UploadsLocked().CurrentChunk();
+      chunk >= split_chunks || (chunk >= 3 && split_chunks != ~size_t(0) && banjo::renut_gpu::MemoryLow())) [[unlikely]]
+    SplitLongFrameLocked();  // kameo-nx (2026-11-04)
   // banjo-nx (2026-10-26, the record-time draw path): the lean executor first; 0: this draw is DrawStateLocked's.
   if (const int fast = FastDrawLocked(device_state, call, replay))
     return fast > 0;
@@ -12131,7 +13673,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   static uint64_t fetches_seq = 0;
   {
     const ChainHint &fetch_hint = g_chain_hint;
-    static const bool keep_fetches = REXCVAR_GET(banjo_renut_keep_fetches);
+    const bool keep_fetches = g_ds_keys.keep_fetches;
     if (!keep_fetches || !(fetch_hint.seq && fetch_hint.seq == fetches_seq + 1 && !(fetch_hint.fields & (kFieldFetch | kFieldVertexFetch))))
       fetches_valid = 0;
     const bool texture_words_changed = !keep_fetches || !fetch_hint.seq || (fetch_hint.fields & kFieldTexWords);
@@ -12153,7 +13695,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
         draw_fetches.f[r] = DeviceTextureFetch(pdev, r);
         fetches_valid |= 1u << r;
       }
-      static const bool fetch_verify = REXCVAR_GET(banjo_renut_chain_reuse_verify);
+      const bool fetch_verify = g_ds_keys.fetch_verify;
       if (fetch_verify && !fresh) {
         const TextureFetch made = DeviceTextureFetch(pdev, r);
         if (std::memcmp(made.dword, draw_fetches.f[r].dword, sizeof(made.dword)) != 0) {
@@ -12215,7 +13757,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     return true;  // sasrt-nx (2026-11-08): an EXPERIMENT, not identical (sasrt_gpu_exp_no_exports)
   if (ps && DrawSummaryOf(*ps).exports)
     GatherMemExportStreams(ps->entry, ps_constants, exports, export_count);
-  static const bool fast_census = REXCVAR_GET(banjo_renut_diag_fast_census);
+  const bool fast_census = g_ds_keys.fast_census;
   if (fast_census)
     FastCensusDraw(call, *vs, ps, export_count, replay);
   // Waiting for an older slot's results leaves the current slot's, which the
@@ -12239,7 +13781,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   export_none.seq = 0;
   if (export_none_held) {
     export_none.seq = export_hint.seq;
-    static const bool export_verify = REXCVAR_GET(banjo_renut_chain_reuse_verify);
+    const bool export_verify = g_ds_keys.export_verify;
     if (export_verify && AnyPendingExports()) {
       u32 slots = 0;
       if (DrawNeedsExportFlush(device, call, *vs, ps, *declaration, shader_strides, exports, export_count, slots,
@@ -12284,7 +13826,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // 12440-12459 in N&B, 12816-12835 in SA2) did not change, no target was built, retired or rebound since (the surface epoch), and the targets'
   // descriptor words (which GetHostSurfaceLocked reads in guest memory) are the same.
   const bool targets_reuse_on = ChainReuseOn();  // banjo-nx (2026-10-26): with its A/B
-  static const bool targets_verify = REXCVAR_GET(banjo_renut_chain_reuse) && REXCVAR_GET(banjo_renut_chain_reuse_verify);
+  const bool targets_verify = g_ds_keys.targets_verify;
   const ChainHint &chain = g_chain_hint;
   Targets targets;
   bool targets_reused = false;
@@ -12302,7 +13844,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       (!(chain.fields & kFieldTargets) || target_words_same()) && g_targets_reuse.epoch == SurfaceEpochLocked()) {
     targets_reused = true;
     for (u32 i = 0; targets_reused && i <= d3d::kMaxRenderTargets; ++i) {
-      u32 words[3];
+      u32 words[4];
       SurfaceDescWords(g_targets_reuse.va[i], words);
       targets_reused = std::memcmp(words, g_targets_reuse.desc[i], sizeof(words)) == 0;
     }
@@ -12447,15 +13989,15 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // Everything that records copies or barriers comes before the framebuffer.
   // banjo-nx (2026-10-26, Unleashed-style step 1, banjo_renut_persistent_shared): the block kept from the draw before
   // (g_draw_sc), or a new one.
-  static const bool persistent_sc = REXCVAR_GET(banjo_renut_persistent_shared);
-  static const bool persistent_verify = persistent_sc && REXCVAR_GET(banjo_renut_persistent_shared_verify);
+  const bool persistent_sc = g_ds_keys.persistent_sc;
+  const bool persistent_verify = g_ds_keys.persistent_verify;
   SharedConstants local_sc;
   SharedConstants &sc = persistent_sc ? DrawSharedLocked() : local_sc;
   if (!persistent_sc) {
     // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_shared_partial_clear): FillTextures writes all 128 texture and 32 sampler words (its
     // first loop, or the chain's copy of a previous draw's), so only what follows them is zeroed (848 of 1,360 bytes).
     static_assert(offsetof(SharedConstants, booleans) == sizeof(sc.texture_indices) + sizeof(sc.sampler_indices));
-    static const bool partial_clear = REXCVAR_GET(banjo_renut_shared_partial_clear);
+    const bool partial_clear = g_ds_keys.partial_clear;
     if (partial_clear)
       std::memset(&sc.booleans, 0, sizeof(sc) - offsetof(SharedConstants, booleans));
     else
@@ -12494,6 +14036,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   };
   static TexturesReuse treuse;
   static u32 treuse_fetch_3d = 0;  // kameo-nx (2026-11-03): the same device words bind otherwise for another shader
+  // renut-ultimate (2026-11-16, port 145; banjo_renut_fetch_filters, off by default): the shaders' own texture filters,
+  // and which shaders gave the words the chain would reuse (the same device words sample otherwise for them).
+  uint64_t filters_key = 0;
+  const FetchFilterOverrides *const draw_filters = DrawFetchFiltersLocked(vs, ps, filters_key);
+  static uint64_t treuse_filters_key = 0;
   // banjo-nx (2026-10-23, batch 6): FillTextures' words the same as its previous call's, and the fill count before it
   // (see the shared constants' push below).
   bool texture_words_same = false;
@@ -12501,7 +14048,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   bool textures_reused = targets_reuse_on && chain.seq && chain.seq == treuse.seq + 1 && treuse.mask == texture_mask &&
                          treuse.frame == TextureFrameLocked() && treuse.epoch == g_texture_epoch &&
                          treuse.depth_epoch == g_depth_epoch && treuse.depth == targets.depth &&
-                         treuse_fetch_3d == g_fetch_3d_mask;
+                         treuse_fetch_3d == g_fetch_3d_mask && treuse_filters_key == filters_key;
   // banjo-nx (2026-10-26): each bound slot's fetch constant and texture word compared (FillTextures reads those of the
   // mask's slots only; the others' words are its defaults), not every fetch constant's and texture word's chunk.
   // banjo-nx (2026-10-26, Unleashed-style step 1): the fetch constants and texture words compared only when the
@@ -12548,7 +14095,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     }
     if (targets_verify) {
       SharedConstants made{};
-      FillTextures(device, texture_mask, made);
+      FillTextures(device, texture_mask, made, nullptr, nullptr, nullptr, nullptr, draw_filters);
       if (std::memcmp(made.texture_indices, sc.texture_indices, sizeof(sc.texture_indices)) != 0 ||
           std::memcmp(made.sampler_indices, sc.sampler_indices, sizeof(sc.sampler_indices)) != 0) {
         static uint32_t logged = 0;
@@ -12568,9 +14115,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     bool all_memo = false;
     texture_fill_before = g_texture_fills;
     FillTextures(device, texture_mask, sc, targets_reuse_on ? treuse.fx : nullptr,
-                 targets_reuse_on ? &all_memo : nullptr, draw_fetches.f, &texture_words_same);
+                 targets_reuse_on ? &all_memo : nullptr, draw_fetches.f, &texture_words_same, draw_filters);
     if (targets_reuse_on)
       treuse.seq = all_memo ? chain.seq : 0;
+    treuse_filters_key = filters_key;  // port 145
     // banjo-nx (2026-10-26): the words copied only for a draw the next one may take them from (a hint, every slot
     // through the memo): the copies (headers, 512 bytes of words) were made at every draw.
     if (targets_reuse_on && all_memo && chain.seq) {
@@ -12623,15 +14171,14 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   float alpha_threshold = dev.m_ValuesPacket.AlphaRef;
   // banjo-nx (2026-10-26): this draw's function (the kept block's sc.alpha_test_func is the draw before's: read here
   // since API-level stage 1, every other alpha-to-coverage draw lost its test, the console's title-screen grass cards).
-  if (alpha_test_func == 7 && ((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
+  if (((color_control >> 4) & 1) && banjo::renut_gpu::AlphaToMaskTestOn()) {
     // banjo-nx (banjo_renut_alpha_to_mask_test, 2026-10-18): alpha to coverage on a single-sample target is an alpha
     // test at 0.5 (MakeKey leaves the pipeline's alpha to coverage off for it). NVIDIA GPUs dither alpha to coverage
     // without samples: the checker-patterned grass, fur and foliage edges of the console and Ryujinx runs.
+    // blur-nx (2026-11-13): also when the game has its own alpha test (AlphaToMaskTestSingleSample).
     const HostSurface *first = targets.color_count ? targets.colors[0] : targets.depth;
-    if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1) {
-      alpha_test_func = 6;  // >=
-      alpha_threshold = 0.5f;
-    }
+    if (ps && first && first->samples == plume::RenderSampleCount::COUNT_1)
+      AlphaToMaskTestSingleSample(alpha_test_func, alpha_threshold);
   }
   alpha_threshold = banjo::renut_gpu::AlphaNearOne(alpha_test_func, alpha_threshold);  // rr6-nx (2026-11-03, rr6_alpha_near_one, A/B 74)
   SetShared(sc, sc.alpha_test_func, alpha_test_func);  // banjo-nx (2026-10-26)
@@ -12708,7 +14255,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   whole_seq = whole ? index_hint.seq : 0;  // banjo-nx (2026-10-26, stage 4): see likely_whole
   if (whole) {
     ++g_whole_draws;
-    static const bool whole_verify = REXCVAR_GET(banjo_renut_whole_buffers_verify);
+    const bool whole_verify = g_ds_keys.whole_verify;
     if (whole_verify)
       VerifyWholeGeometry(device, call, *vs, shader_strides, declaration->layout, geometry, whole_copies);
   } else {
@@ -12775,7 +14322,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // banjo-nx (2026-10-26, Unleashed-style step 2): a draw that fetches nothing by address on deko3d (fetch_mask 0, its
   // data address and size left 0 below) makes no allocation: it took 16 bytes at a 256-byte alignment of the upload
   // ring at every such draw (most draws: about 1.3 MB of ring a frame) and wrote the fetch record nothing reads then.
-  static const bool fetch_none_skip = REXCVAR_GET(banjo_renut_fetch_data_unread);
+  const bool fetch_none_skip = g_ds_keys.fetch_none_skip;
   const bool fetch_none = IsDeko3D() && fetch_mask == 0 && fetch_none_skip && !g_dump_fetch;
   UploadAllocation fetch_alloc;
   if (fetch_none) {
@@ -12806,14 +14353,14 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // the vertex shader's memory fetches and its bound fetches) never reads the fetch data's address or size: they stay
   // 0 instead of this draw's new allocation, so the shared constants' line with them does not change at every draw,
   // and no binding is made.
-  static const bool fetch_data_unread = REXCVAR_GET(banjo_renut_fetch_data_unread);
+  const bool fetch_data_unread = g_ds_keys.fetch_data_unread;
   if (IsDeko3D() && fetch_mask == 0 && fetch_data_unread) {
     SetShared(sc, sc.vertex_fetch_data, uint64_t(0));
     SetShared(sc, sc.vertex_fetch_bytes, 0u);
   } else if (IsDeko3D() && sc.vertex_fetch_data) {
     const uint64_t address = sc.vertex_fetch_data;
     const uint64_t base = address & ~uint64_t(0xFF);
-    plume::Deko3DBindFetchData(s.command_list, base, u32(address - base) + sc.vertex_fetch_bytes);
+    banjo::renut_gpu::record::BindFetchData(s.command_list, base, u32(address - base) + sc.vertex_fetch_bytes);
     SetShared(sc, sc.vertex_fetch_data, address - base);
     fetch_window = base;
     // banjo-nx (2026-10-20): the 16-byte multiples tools/deko3d_glsl_opt.py's aw4 pass relies on.
@@ -12884,7 +14431,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   if (export_count)
     MarkShared(sc, sc.memexport_streams, sizeof(sc.memexport_streams));  // banjo-nx (2026-10-26): set below
   if (export_count) {  // sasrt-nx (2026-11-08, sasrt_gpu_diag_export_dupes)
-    static const bool export_dupes = REXCVAR_GET(sasrt_gpu_diag_export_dupes);
+    const bool export_dupes = g_ds_keys.export_dupes;
     if (export_dupes) [[unlikely]] {
       ++g_sasrt_export_prims[call.primitive & 15][call.indexed ? 1 : 0];
       g_sasrt_export_vertices += call.count;
@@ -12911,7 +14458,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 #if defined(PLUME_DEKO3D)
   // banjo-nx (deko3d renderer): the deko3d shaders write memexport through a binding of the buffer itself.
   if (memexport && IsDeko3D())
-    plume::Deko3DBindMemExport(s.command_list, memexport);
+    banjo::renut_gpu::record::BindMemExport(s.command_list, memexport);
 #endif
   UploadAllocation sc_alloc;
   if (pushed) {
@@ -12924,7 +14471,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
                                     g_bound.pushed_shared_valid;
     // banjo-nx (2026-10-20, from sa2-nx, banjo_renut_fetch_slots_skip): no fetches in this draw and none in the last push: both have
     // the fetch slots zero (sc is zeroed there; only UploadVertexFetchData writes them, for the fetch mask's bits).
-    static const bool fetch_slots_skip = REXCVAR_GET(banjo_renut_fetch_slots_skip);
+    const bool fetch_slots_skip = g_ds_keys.fetch_slots_skip;
     const bool fetch_slots_equal = fetch_slots_skip && fetch_mask == 0 && g_held_fetch_slots_zero &&
                                    g_bound.pushed_shared_valid;
     // banjo-nx (2026-10-23, batch 6): the texture and sampler lines also when FillTextures wrote the words its previous
@@ -12988,7 +14535,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   const bool reuse_verify = targets_verify;
   const ChainHint &hint = chain;
   const ShaderCacheEntry *const ps_entry = ps ? ps->entry : nullptr;
-  const int ab_off = banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed);
+  const int ab_off = banjo::renut_gpu::g_ab_off_plain;
   const uint64_t surface_epoch = SurfaceEpochLocked();
   bool reused = reuse_on && hint.seq && hint.seq == reuse.seq + 1 &&
                 !(hint.fields & (kFieldBools | kFieldDest | kFieldViewPackets)) &&  // banjo-nx (2026-10-26): 10112-10599
@@ -13000,7 +14547,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   for (u32 i = 0; reused && i < targets.color_count; ++i)
     reused = reuse.colors[i] == targets.colors[i];
   const FetchSpec fetch_spec = FetchSpecWords(sc, *vs, geometry.per_instance, ab_off);  // banjo-nx (banjo_gpu_fetch_spec)
-  if (reused && geometry.per_instance && FetchSpecDiffers(reuse.key, fetch_spec))
+  if (reused && FetchSpecDiffers(reuse.key, fetch_spec))  // vivapinata-nx (2026-11-12): every draw (the shader round)
     reused = false;
   // sasrt-nx (2026-11-08, sasrt_gpu_export_raster_discard; decided here since the fourth round): an export draw recorded
   // with the rasterizer off. The export-only draws this tree can tell: vivapinata-nx's export-mode shaders, or a memexport
@@ -13038,7 +14585,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     key = MakeKey(device, vs, ps, declaration, targets, call.primitive, geometry.per_instance, sc.booleans,
                   sc.alpha_test_func, fetch_spec);
   }
-  key.fetch_pad = key.pixel_shader ? SasrtPlainFetchMask(sc, ps_entry) : 0u;  // sasrt-nx (2026-11-08, sasrt_gpu_plain_fetches)
+  key.fetch_pad = key.pixel_shader ? SasrtPlainFetchMask(sc, ps_entry, vs->entry) : 0u;  // sasrt-nx; vivapinata-nx: vs
   if (call.primitive == kPointList && State().point_sprite_gs) {  // sasrt-nx (2026-11-09, sasrt_gpu_export_no_point_gs)
     key.point_sprite = sasrt_no_point_gs ? 0 : 1;  // (a reused key holds the decision of the draw it came from)
     if (sasrt_no_point_gs)
@@ -13046,7 +14593,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   }
   key.reserved = (key.reserved & ~8u) | SasrtClipBit(sc);  // sasrt-nx (2026-11-08, sasrt_gpu_clip_spec)
   {  // sasrt-nx (2026-11-08, the third round: SasrtSpecWordsOf)
-    const SasrtSpecWords words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants);
+    const SasrtSpecWords words = SasrtSpecWordsOf(sc, vs->entry, ps_entry, &vs_constants, &targets);
     std::memcpy(key.sasrt_words, words.w, sizeof(words.w));
   }
   if (reuse_on) {
@@ -13082,6 +14629,21 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       partial |= m != 0 && m != 0xF;
     }
     const bool exports = (vs->entry && vs->entry->memExportConstants[0]) || (ps && ps->entry && ps->entry->memExportConstants[0]);
+    {  // blur-nx (2026-11-13, #47's census): shaders indexing their float constants (all bits set), else the reads
+      const auto all_set = [](const uint32_t *m) {
+        for (int w = 0; w < 8; ++w)
+          if (m[w] != ~0u) return false;
+        return true;
+      };
+      const bool vs_all = vs->entry && all_set(vs->entry->floatConstants);
+      const bool ps_all = ps && ps->entry && all_set(ps->entry->floatConstants);
+      uint32_t regs = 0;
+      if (vs->entry && !vs_all)
+        for (int w = 0; w < 8; ++w) regs += uint32_t(__builtin_popcount(vs->entry->floatConstants[w]));
+      if (ps && ps->entry && !ps_all)
+        for (int w = 0; w < 8; ++w) regs += uint32_t(__builtin_popcount(ps->entry->floatConstants[w]));
+      banjo::renut_gpu::CountConstantUse(vs_all, ps_all, regs);
+    }
     banjo::renut_gpu::CountDrawKind(no_colour && depth, no_colour && depth && sc.alpha_test_func == 7 &&
                                     !key.alpha_to_coverage && ps != nullptr,
                                     no_colour && !depth_writes && !stencil_writes && !exports, partial);
@@ -13091,11 +14653,12 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   struct PipelineReuse {
     uint64_t seq = 0, lookups = 0, epoch = 0;
     plume::RenderPipeline *pipeline = nullptr;
-    // rr6-nx (2026-11-10, the base's port 58; SASRT's octopus): the words the key takes from each draw after the base key
+    // port 58 (2026-11-10; RR6's diagnosis, SASRT's octopus): the words the key takes from each draw after the base key
     // was reused (sasrt_words, fetch_pad, the clip bit in reserved, point_sprite). The pipeline was handed back whenever
     // the base key was reused, so with sasrt_gpu_fetch_endian_spec a skinning draw whose bone fetch had another byte
     // order than the draw before ran the draw before's specialised pipeline: SASRT's Ocean View octopus came apart under
-    // a heavy GPU. Now the reuse needs them the same too. Console check: SASRT's run octo_fix38, right in all ten shots.
+    // a heavy GPU (more draws in a row without a lookup between them). Now the reuse needs them the same too (every
+    // sasrt_words item goes through here). Console check: SASRT's run octo_fix38, the octopus right in all ten shots.
     uint32_t sasrt_words[20] = {};
     uint32_t fetch_pad = 0, reserved = 0, point_sprite = 0;
   };
@@ -13132,7 +14695,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     preuse.lookups = PipelineLookupsLocked();
     preuse.epoch = prebuild_epoch;
     preuse.pipeline = pipeline;
-    std::memcpy(preuse.sasrt_words, key.sasrt_words, sizeof(key.sasrt_words));  // rr6-nx (2026-11-10, port 58)
+    std::memcpy(preuse.sasrt_words, key.sasrt_words, sizeof(key.sasrt_words));  // port 58
     preuse.fetch_pad = key.fetch_pad;
     preuse.reserved = key.reserved;
     preuse.point_sprite = key.point_sprite;
@@ -13144,6 +14707,13 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // banjo-nx (2026-10-28, banjo_deko3d_depth_handover_readonly): whether this draw writes depth or stencil.
   const bool draw_depth_writes = ((key.depth_control & 2) && (key.depth_control & 4)) ||
                                  ((key.depth_control & 1) && ((key.stencil_ref_mask >> 16) & 0xFF) != 0);
+  // Port 179 (from fnxf_xiii; banjo_renut_edram_carry, off): a target first drawn this frame without a clear.
+  if (pipeline && EdramCarryOn()) [[unlikely]]
+    CarryEdramBeforeDrawLocked(targets);
+  // blur-nx (2026-11-11, port 76; its key 220: blur_renut_edram_inherit): what other views wrote over a target this draw
+  // keeps in part.
+  if (pipeline)
+    InheritEdramBeforeDrawLocked(targets, key.color_mask, key.blend_control);
   if ((!pipeline || !BindTargets(targets, draw_depth_writes)) && ++g_dropped_draws[kDropPipeline])
     return false;
 #if defined(PLUME_DEKO3D)
@@ -13172,7 +14742,7 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
   // whose render state writes nothing (SasrtInertDrawLocked with the vertex shader's exports allowed: no colour channel, no
   // depth write, no stencil operation, no pixel shader exports).
   if (sasrt_export_discard) {  // (export_only_draw implies it)
-    plume::Deko3DDiscardNextDraw(cmd);
+    banjo::renut_gpu::record::DiscardNextDraw(cmd);
     sasrt::gpu_round::Count(sasrt::gpu_round::kExportDiscard);
     // sasrt-nx (2026-11-08, sasrt_gpu_export_list_topology; the fourth GPU round): a point list drawn this way (the
     // skinning exports) as a triangle list (count a multiple of 3) or a line list (even): with the rasterizer off only
@@ -13181,10 +14751,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     if (call.primitive == 1 && sasrt::gpu_round::On(sasrt::gpu_round::kExportListTopology)) {
       const u32 n = geometry.indexed ? geometry.index_count : geometry.vertex_count;
       if (n >= 3 && n % 3 == 0) {
-        plume::Deko3DSetNextPrimitive(cmd, DkPrimitive_Triangles);
+        banjo::renut_gpu::record::SetNextPrimitive(cmd, DkPrimitive_Triangles);
         sasrt::gpu_round::Count(sasrt::gpu_round::kExportListTopology);
       } else if (n >= 2 && n % 2 == 0) {
-        plume::Deko3DSetNextPrimitive(cmd, DkPrimitive_Lines);
+        banjo::renut_gpu::record::SetNextPrimitive(cmd, DkPrimitive_Lines);
         sasrt::gpu_round::Count(sasrt::gpu_round::kExportListTopology);
       }
     }
@@ -13211,7 +14781,10 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       banjo::renut_gpu::BeforePipelineBind(pipeline);
     if (!g_bound.pipeline)
       g_bound.depth_bias_set = false;  // rr6-nx: after an internal pass, whose pipeline set its own bias
-    cmd->setPipeline(pipeline);
+    {
+      ::renut::gpu::census::Scope pipeline_scope(::renut::gpu::census::kSetPipeline);  // blur-nx (2026-11-17)
+      cmd->setPipeline(pipeline);
+    }
     g_bound.pipeline = pipeline;
     // Vulkan: a pipeline without the constant as dynamic state overwrites it.
     if (IsVulkan())
@@ -13245,20 +14818,20 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
 #if defined(PLUME_DEKO3D)
       // banjo-nx (2026-10-19, banjo_deko3d_push_constants): the three fixed buffers (bindings 0, 1, 2), and bound
       // textures read from the renderer's copy of the shared constants.
-      plume::Deko3DBindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
-      plume::Deko3DBindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
-      plume::Deko3DBindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
-                             (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
+      banjo::renut_gpu::record::BindUniform(cmd, 0, g_pushed_buffers.address, kFloatConstantsUboBytesAligned);
+      banjo::renut_gpu::record::BindUniform(cmd, 1, g_pushed_buffers.address + kPushedFloatStride, kFloatConstantsUboBytesAligned);
+      banjo::renut_gpu::record::BindUniform(cmd, 2, g_pushed_buffers.address + kPushedSharedOffset,
+                                            (u32(sizeof(SharedConstants)) + 255u) & ~255u);  // rr6-nx (2026-11-04): 256-rounded
       std::fill(std::begin(g_bound.constant_sets), std::end(g_bound.constant_sets), nullptr);  // rebind after
       if (!g_bound.shared_words_set) {
-        plume::Deko3DSetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
+        banjo::renut_gpu::record::SetSharedWords(cmd, &g_bound.pushed_shared, u32(sizeof(SharedConstants)));
         g_bound.shared_words_set = true;
       }
 #endif
     } else {
 #if defined(PLUME_DEKO3D)
       if (g_bound.shared_words_set) {
-        plume::Deko3DSetSharedWords(cmd, nullptr, 0);
+        banjo::renut_gpu::record::SetSharedWords(cmd, nullptr, 0);
         g_bound.shared_words_set = false;
       }
 #endif
@@ -13319,6 +14892,8 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     if ((key.color_mask >> (4 * i)) & 0xF) {
       ++targets.colors[i]->writes;
       targets.colors[i]->write_seq = ++g_surface_write_seq;  // sasrt-nx: the EDRAM depth restore
+      targets.colors[i]->blur_draw_seq = g_surface_write_seq;  // blur-nx (2026-11-10, port 76; its key 216)
+      g_blur_color_write_last = g_surface_write_seq;  // blur-nx (2026-11-11, port 76; its key 220)
     }
   if (targets.depth) {
     const u32 dc = key.depth_control;
@@ -13329,8 +14904,9 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
       targets.depth->write_seq = ++g_surface_write_seq;  // sasrt-nx: the EDRAM depth restore
     }
     if (dc & 1) {  // sasrt-nx's SasrtWarnStencilOnD32f inside it (rr6-nx, 2026-11-09)
+      const bool first_stencil = !targets.depth->stencil_used;  // sasrt-nx (2026-11-11, port 75; renut_diag_formats)
       targets.depth->stencil_used = true;
-      SasrtWarnStencilOnD32f(targets.depth);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
+      SasrtWarnStencilOnD32f(targets.depth, false, first_stencil);  // banjo-nx (2026-10-19, banjo_deko3d_depth_handover)
     }
   }
   CensusDraw(device_state, call, targets, vs, ps, vs_constants, ps_constants, prefetch_streams, prefetch_stream_count,
@@ -13339,8 +14915,11 @@ bool DrawStateLocked(const u8 *device_state, const DrawCall &call, const ReplayC
     UnleashedCensusDraw(device, call, texture_mask, declaration->layout.used_mask, prefetch_streams,
                         prefetch_stream_count, prefetch_indexed ? &prefetch_index : nullptr);
   Video::NoteDrawLocked();  // banjo-nx (2026-10-19, banjo_deko3d_kick_submit): the open list's draws
+  if (vs->entry && vs->entry->textureFetchMask)
+    VertexTextureBarrierLocked();  // port 161 (banjo_deko3d_vertex_texture_barrier)
+  SetSampleMaskLocked(cmd, device, targets);  // port 166 (banjo_deko3d_sample_mask)
   // sasrt-nx (2026-11-08, sasrt_gpu_exp_export_twice): a memexport draw drawn twice (the second writes the same bytes).
-  static const bool export_twice = REXCVAR_GET(sasrt_gpu_exp_export_twice);
+  const bool export_twice = g_ds_keys.export_twice;
   for (int pass = 0; pass < (export_count && export_twice ? 2 : 1); ++pass) {
   if (geometry.indexed) {
     SetIndexBuffer(cmd, geometry.index_view);
@@ -13461,7 +15040,7 @@ void QueueResolveReadbackLocked(VideoState &s, HostTexture *dest, uint32_t slice
       if (sasrt::gpu_round::On(sasrt::gpu_round::kFenceFlush))
         sasrt::gpu_round::Count(sasrt::gpu_round::kFenceFlush);
       else
-        plume::Deko3DFlushL2(cmd);
+        banjo::renut_gpu::record::FlushL2(cmd);
       list.push_back({dest->base_page << 12, offset});
       sasrt::gpu_round::Count(sasrt::gpu_round::kTexelReadback);
       g_bound.pipeline = nullptr;
@@ -13665,6 +15244,7 @@ void UnleashedCensusDraw(const GuestDevice &device, const DrawCall &call, u32 te
 
 // banjo-nx (2026-10-26, banjo_renut_diag_fast_census): the 10 s line.
 std::string FastCensusReport() {
+  std::lock_guard census_lock(g_fast_census_mutex);  // blur-nx (2026-11-10, port 76): see g_fast_census_mutex
   FastCensus &c = g_fast_census;
   if (!c.draws)
     return {};
@@ -13885,7 +15465,7 @@ void DropReplacedRanges() {
   // kameo-nx (2026-11-04): every frame while past the limit (WholeCopyFits): 16 frames are 5 s at the 3 fps it is for.
   const bool over_limit = g_stream_cache_bytes > banjo::renut_gpu::StreamCacheMaxBytes(kStreamCacheMaxBytes);
   if (!over_limit && g_stream_cache_frame % kWholeReplacePeriod &&
-      banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) != 54)
+      banjo::renut_gpu::g_ab_off_plain != 54)
     return;  // banjo-nx (2026-10-28): kWholeReplacePeriod (A/B 54: every frame, as before)
   const auto ready = std::find_if(g_whole_spans.begin(), g_whole_spans.end(), [](const WholeSpan &w) {
     return g_stream_cache_frame - w.frame < kWholeReplaceFrames;
@@ -13932,7 +15512,7 @@ void DropReplacedRanges() {
     g_index_memo.Clear();
     // banjo-nx (2026-10-28, per-draw night): every answer voided only when a whole entry went (answers, mesh objects
     // and the last pointers hold whole entries alone).
-    if (whole_gone || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 60)
+    if (whole_gone || banjo::renut_gpu::g_ab_off_plain == 60)
       ClearWholeLast();
   }
   g_replaced_bytes += dropped;
@@ -13995,6 +15575,7 @@ void AgeRanges() {
 
 void AdvanceStreamCacheFrameLocked() {
   banjo::renut_gpu::ResolveTraceFrameStart();
+  SweepUnusedTargetsLocked();  // port 145 (tw2de_nx's, banjo_renut_keep_unused_targets): nothing kept when off
   ForgetChangingRanges();  // bangaio-nx (2026-10-29, v5)
   if (SecondSightingOn())
     AgeRanges();  // bangaio-nx (2026-10-29, v6)
@@ -14114,6 +15695,10 @@ void AdvanceStreamCacheFrameLocked() {
   const uint64_t bytes_before = g_stream_cache_bytes;
   if (pressure)
     idle_frames = kPressureIdleFrames;
+  // sasrt-nx (2026-11-09, sasrt_memory_governor; port 58): critical: the copies no draw read for 60 frames go (made
+  // again from guest memory when drawn)
+  if (banjo::renut_gpu::MemoryCritical() && banjo::renut_gpu::StreamCachePressureOn() && idle_frames > 60)
+    idle_frames = 60;
   bool whole_gone = false;  // banjo-nx (2026-10-28): a whole entry among them (see DropReplacedRanges)
   // bangaio-nx (2026-10-29, v5, banjo_renut_stream_second_sighting): a range entry with no copy holds only its count of
   // stable kicks: it goes after kRangeIdleFrames unused, not idle_frames (20 s), and only its memo slot is forgotten.
@@ -14137,6 +15722,46 @@ void AdvanceStreamCacheFrameLocked() {
         return true;
       });
   g_ranges_forgotten += ranges_gone;
+  // sasrt-nx (2026-11-10, sasrt_stream_cache_drain; port 58; SASRT's run mem14: 104-146 MB of copies in a 288 MB pool, a
+  // chunk going back only once every copy in it has gone, and the copies spread over all of them). With the pool past
+  // 1.5 times its copies and 64 MB, its sparsest chunk is drained: new copies go elsewhere (CopyPool::Allocate takes it
+  // last) and its copies no draw used in the last frame are dropped at each pass (their entries stay: a stream is
+  // converted into the upload ring meanwhile and copied again when it holds, as after any drop); empty, the chunk goes
+  // back (ReleaseSlot). Whole-buffer copies (objects hold them) stay; a drain not done in 10 passes is given up. The
+  // same pixels. SASRT: one chunk back in its first run, the pool refilled (copies spread with small holes): weak.
+  {
+    static const bool drain_on = REXCVAR_GET(sasrt_stream_cache_drain);
+    CopyPool &pool = g_copy_pool;
+    if (drain_on && pool.draining_ == UINT32_MAX &&
+        pool.Bytes() > g_stream_cache_bytes + g_stream_cache_bytes / 2 + (uint64_t(64) << 20)) {
+      pool.draining_ = pool.SparsestChunk();
+      pool.drain_passes_ = 0;
+    }
+    if (pool.draining_ != UINT32_MAX) {
+      uint64_t dropped = 0;
+      for (auto &[skey, c] : g_stream_cache) {
+        if (c.copy && c.copy.chunk == pool.draining_ && !c.whole && g_stream_cache_frame - c.last_used >= 1) {
+          dropped += c.bytes;
+          DropCachedCopy(c);
+        }
+      }
+      for (auto &[ikey, c] : g_index_cache) {
+        if (c.copy && c.copy.chunk == pool.draining_ && ikey.primitive != kWholeIndexPrimitive &&
+            g_stream_cache_frame - c.last_used >= 1) {
+          dropped += c.bytes;
+          DropCachedIndices(c);
+        }
+      }
+      static uint32_t drain_logged = 0;
+      if (dropped && drain_logged++ < 16)
+        RGPU_INFO("[renut] stream cache: chunk {} drained ({:.1f} MB of copies dropped; {:.0f} MB of copies in a {:.0f} MB "
+                  "pool; {} chunks given back so far by draining, sasrt_stream_cache_drain)", pool.draining_,
+                  double(dropped) / 1048576.0, double(g_stream_cache_bytes) / 1048576.0,
+                  double(pool.Bytes()) / 1048576.0, pool.drained_);
+      if (++pool.drain_passes_ >= 10)
+        pool.draining_ = UINT32_MAX;  // whole copies or ones used every frame keep it: given up
+    }
+  }
   const size_t indices_gone = std::erase_if(g_index_cache, [idle_frames, &whole_gone](auto &entry) {
     if (g_stream_cache_frame - entry.second.last_used < idle_frames)
       return false;
@@ -14150,7 +15775,7 @@ void AdvanceStreamCacheFrameLocked() {
   if (streams_gone > ranges_gone || indices_gone) {  // bangaio-nx: the short-idle ones forgot their own slots
     g_stream_memo.Clear();
     g_index_memo.Clear();
-    if (whole_gone || banjo::renut_gpu::g_ab_off.load(std::memory_order_relaxed) == 60)  // banjo-nx (2026-10-28)
+    if (whole_gone || banjo::renut_gpu::g_ab_off_plain == 60)  // banjo-nx (2026-10-28)
       ClearWholeLast();
   }
   DropIdleFetchCopies(idle_frames);  // banjo-nx (2026-10-27, banjo_renut_fetch_cache)
@@ -14208,6 +15833,17 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
     }
     return;
   }
+  // renut-ultimate (2026-11-13, sasrt-nx's sasrt_gpu_diag_resolve_split): a depth clear's GPU time under its own label
+  // (SASRT's cascades' and scene depth's clears are full-bandwidth writes on deko3d whatever the image's state).
+  if (t.depth && (flags & 0x30) && SasrtResolveSplitOn()) [[unlikely]] {
+    static std::unordered_map<uint64_t, uint32_t> labels;
+    const uint64_t k = uint64_t(t.depth->width) | uint64_t(t.depth->height) << 16 | uint64_t(flags & 0x30) << 32;
+    uint32_t &label = labels[k];
+    if (!label)
+      label = gpu_profile::Label(fmt::format("clears | depth {}x{}{}", t.depth->width, t.depth->height,
+                                             (flags & 0x30) == 0x30 ? " and stencil" : "")) + 1;
+    gpu_profile::Mark(State(), label - 1);
+  }
   // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): before the target is bound for the clear.
   if (t.depth && t.depth->handed)
     DepthHandOverBeforeBindLocked(t.depth, &rect, flags);
@@ -14217,8 +15853,9 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
       DepthHandOverBeforeBindLocked(t.colors[i], &rect, (flags >> i) & 1u);
   }
   if (t.depth && (flags & 0x20)) {  // sasrt-nx's SasrtWarnStencilOnD32f inside it (rr6-nx, 2026-11-09)
+    const bool first_stencil = !t.depth->stencil_used;  // sasrt-nx (2026-11-11, port 75; renut_diag_formats)
     t.depth->stencil_used = true;
-    SasrtWarnStencilOnD32f(t.depth);
+    SasrtWarnStencilOnD32f(t.depth, true, first_stencil);  // a clear
   }
   if (!BindTargets(t))
     return;
@@ -14253,7 +15890,11 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
     const bool repeat = repeat_on && is_whole && c->clear_known && c->clear_generation == c->generation &&
                         c->clear_writes == c->writes && std::memcmp(c->clear_color, color, sizeof(c->clear_color)) == 0;
     ++c->writes;  // banjo-nx (banjo_renut_resolve_skip)
+    NoteSiblingClear(*c, host_rect);  // vivapinata-nx (2026-11-11, vivapinata_resolve_from_sibling)
     c->write_seq = ++g_surface_write_seq;  // sasrt-nx: the EDRAM depth restore
+    g_blur_color_write_last = c->write_seq;  // blur-nx (2026-11-11, port 76; its key 220)
+    if (EdramCarryOn()) [[unlikely]]
+      NoteEdramCarryClearLocked(c);  // port 179 (from fnxf_xiii; banjo_renut_edram_carry)
     g_clears_whole += is_whole;
     if (repeat)
       ++g_clear_repeats;
@@ -14274,6 +15915,7 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
       ColorEdramWipedLocked(c, rect, found);
       for (HostSurface *wiped : found) {
         wiped->edram_wiped = true;
+        wiped->blur_wiped_seq = g_surface_write_seq;  // blur-nx (2026-11-10, port 76; its key 218)
         wiped->edram_wiped_generation = wiped->generation;
         wiped->edram_wiped_writes = wiped->writes;
         std::memcpy(wiped->edram_wiped_color, color, sizeof(wiped->edram_wiped_color));
@@ -14328,8 +15970,11 @@ void ClearTargets(const Targets &t, u32 flags, const plume::RenderRect &rect, co
       continue;
     const plume::RenderRect alias_host = ScaleRect(alias_rect, a.scale);
     ++alias->writes;  // banjo-nx (banjo_renut_resolve_skip)
+    NoteSiblingClear(*alias, alias_host);  // vivapinata-nx (2026-11-11, vivapinata_resolve_from_sibling)
     alias->clear_known = false;  // banjo-nx (banjo_renut_clear_repeat): not followed through aliases
     cmd->clearColor(0, clear_color, &alias_host, 1);
+    if (EdramCarryOn()) [[unlikely]]
+      alias->carry_cleared_frame = TextureFrameLocked();  // port 179: cleared through another view: nothing carried in
   }
 }
 
@@ -14351,9 +15996,16 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
   plume::RenderCommandList *cmd = s.command_list;
   static const uint32_t kProfileLabel = gpu_profile::Label("depth resolves");
   gpu_profile::Mark(s, kProfileLabel);
+  const bool split = SasrtResolveSplitOn();  // renut-ultimate (2026-11-13, sasrt_gpu_diag_resolve_split)
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 0));
   TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
   TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
   TransitionTextureLocked(dest->words.get(), plume::RenderTextureLayout::COLOR_WRITE);
+  if (split) [[unlikely]] {
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 1));
+    gpu_profile::CountDraw(s, SasrtResolvePartLabel(surface, 1));  // its resolves a frame
+  }
   cmd->setFramebuffer(dest->depth_framebuffer.get());
   // Pixel coordinates are destination texels.
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width),
@@ -14400,12 +16052,16 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
   // 0, and Beautiful Katamari's depth of field, which reads this resolve of its 4x depth, blurred the whole scene.
   if (variant == 1 && IsDeko3D()) {
     const uint32_t slots[2] = {source_slot, push.param1 != 0.0f ? push.sampler_index : source_slot};
-    plume::Deko3DBindFragmentTextures(cmd, 0, slots, 2);
+    banjo::renut_gpu::record::BindFragmentTextures(cmd, 0, slots, 2);
   }
 #endif
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 2));
   TransitionTextureLocked(dest, plume::RenderTextureLayout::SHADER_READ);
+  if (split) [[unlikely]]  // the move to shader read apart from the clear and what follows
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 3));
 
   // The draw path binds its own layout, pipeline, targets and viewport again.
   g_bound.framebuffer = nullptr;
@@ -14435,8 +16091,29 @@ bool ResolveDepth(HostSurface *surface, HostTexture *dest, const ClearRect &src,
 // writes every texel back with its bits (its formats only). The resolve is drawn after all before a draw writes the target,
 // before anything other than a whole clear binds it, and before it goes. A whole clear of the target gives the image to the
 // destination instead: the render-to-texture loop's resolve-and-clear and the frame's last resolve are never copied.
+// blur-nx (2026-11-10, port 76; its keys 212 and 219): 'convert', a destination ResolveTarget kept in another format;
+// 'color_scale', the resolve's exponent bias as 2^bias.
 bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::RenderRect &rect, uint32_t host_x,
-                     uint32_t host_y);
+                     uint32_t host_y, bool convert = false, float color_scale = 1.0f);
+// blur-nx (2026-11-10, port 76; its key 212: blur_renut_resolve_keep_dest): colour formats a converting draw writes and
+// reads exactly (textures.cpp has the same list for ResolveTarget; R10G10B10A2_UNORM: port 75's 2_10_10_10).
+static bool ConvertibleResolveFormat(plume::RenderFormat f) {
+  switch (f) {
+  case plume::RenderFormat::R8G8B8A8_UNORM:
+  case plume::RenderFormat::B8G8R8A8_UNORM:
+  case plume::RenderFormat::R16G16B16A16_UNORM:
+  case plume::RenderFormat::R10G10B10A2_UNORM:
+  case plume::RenderFormat::R16G16B16A16_FLOAT:
+  case plume::RenderFormat::R16G16_UNORM:
+  case plume::RenderFormat::R16G16_FLOAT:
+  case plume::RenderFormat::R16_FLOAT:
+  case plume::RenderFormat::R32_FLOAT:
+  case plume::RenderFormat::R32G32_FLOAT:
+    return true;
+  default:
+    return false;
+  }
+}
 bool ResolveCopyPossible(const HostSurface *surface, const HostTexture *dest);
 
 std::vector<HostTexture *> g_handed;  // destinations whose content is a target's current image
@@ -14511,6 +16188,41 @@ bool MaterialiseLocked(HostTexture &d, bool words) {
   return ok;
 }
 
+// blur-nx (2026-11-10, port 76; its key 212: blur_renut_resolve_keep_dest): how many pixels a single-sampled colour
+// resolve of 'surface' writes (its rect within the surface), for ResolveTarget; 0 for a multisampled source (resolved by
+// the API, which wants one format) or an empty rect.
+uint32_t ResolveCoverPixels(const HostSurface *surface, const ClearRect *source_rect) {
+  if (surface->samples != plume::RenderSampleCount::COUNT_1)
+    return 0;
+  int32_t w = int32_t(surface->width), h = int32_t(surface->height);
+  if (source_rect) {
+    const int32_t x1 = std::clamp(source_rect->x1, 0, w), y1 = std::clamp(source_rect->y1, 0, h);
+    const int32_t x2 = std::clamp(source_rect->x2, x1, w), y2 = std::clamp(source_rect->y2, y1, h);
+    w = x2 - x1;
+    h = y2 - y1;
+  }
+  return w > 0 && h > 0 ? uint32_t(w) * uint32_t(h) : 0;
+}
+
+// blur-nx (2026-11-17, G1: the colour hand-over in Blur): ResolveTarget draws this resolve from the view's sample grid
+// (blur_renut_sample_grid_resolve, port 76's key 216; the same test as there): the console's resolve averages the samples
+// of a 4x (2x) view, which are the 2x2 (1x2) blocks of the single-sampled target of twice its pitch, drawn after the view.
+// The view's own image is not what that resolve reads, so the resolve is never left in it. Blur's 640x360 half-size scene,
+// the motion blur's source, is such a view over its 1280x720 post target: left in the view's image it was black, and with
+// the colour hand-over on (sasrt_gpu_handover_with_smaa, or SMAA off) the race darkened with speed and the mirror went
+// black in Ryujinx, and the console flickered at the mirror and the car's back.
+// The grid's target that resolve reads, or null (a level-0, slice-0 resolve, as ResolveTarget's grid path).
+const HostSurface *SampleGridSourceLocked(const HostSurface *s, const HostTexture *d) {
+  if (s->depth || !banjo::renut_gpu::SampleGridResolveOn() || d->host_format != s->format ||
+      ((u32(s->info_word) >> 16) & 3) == 0)
+    return nullptr;
+  const HostSurface *grid = SampleGridAliasLocked(s);
+  return grid && grid->blur_draw_seq > s->blur_draw_seq ? grid : nullptr;
+}
+bool SampleGridResolveWantedLocked(const HostSurface *s, const HostTexture *d) {
+  return SampleGridSourceLocked(s, d) != nullptr;
+}
+
 // A resolve into 'd' left in the target's image when it can be (true). Otherwise (false, the resolve is drawn) a
 // destination still holding other content gets it first when the resolve does not cover it.
 bool HandOverResolveLocked(HostSurface *s, HostTexture *d, const ClearRect &src, i32 dest_x, i32 dest_y,
@@ -14524,11 +16236,21 @@ bool HandOverResolveLocked(HostSurface *s, HostTexture *d, const ClearRect &src,
                                       ResolveCopyPossible(s, d) &&
                                       !(s->sasrt_fixed16 && banjo::renut_gpu::Fixed16ClampOn()) &&  // its resolve clamps
                                       !detail::ReadbackDestination(d);  // the CPU reads it (sasrt_renut_resolve_readback)
-  const bool can = IsDeko3D() && kind_on && whole && s->texture &&
-                   s->samples == plume::RenderSampleCount::COUNT_1 && d->width == s->width &&
-                   d->height == s->height && d->scale == s->scale && d->alloc_width == s->scale.Size(s->width) &&
-                   d->alloc_height == s->scale.Size(s->height) && d->dimension == TextureDimension::Tex2D &&
-                   !d->stacked && d->extra_levels == 0 && d->mip_levels == 1;
+  bool can = IsDeko3D() && kind_on && whole && s->texture &&
+             s->samples == plume::RenderSampleCount::COUNT_1 && d->width == s->width &&
+             d->height == s->height && d->scale == s->scale && d->alloc_width == s->scale.Size(s->width) &&
+             d->alloc_height == s->scale.Size(s->height) && d->dimension == TextureDimension::Tex2D &&
+             !d->stacked && d->extra_levels == 0 && d->mip_levels == 1;
+  // blur-nx (2026-11-17): a resolve drawn from the view's sample grid is not left in the view's image (above). Looked at
+  // only for a resolve that could be left there otherwise (the hand-over on: G1 with SMAA, or SMAA off).
+  if (can && !s->depth && SampleGridResolveWantedLocked(s, d)) [[unlikely]] {
+    can = false;
+    static u32 logged = 0;
+    if (LogLimited(logged, 4))
+      RGPU_INFO("[renut] colour hand-over: the resolve of a {}x{} {}x view is drawn from its sample grid, not left in the "
+                "view's image (blur_renut_sample_grid_resolve)", s->width, s->height,
+                ((u32(s->info_word) >> 16) & 3) == 2 ? 4 : 2);
+  }
   // kameo-nx (2026-11-03, diagnostic): why a colour resolve was drawn (the colour hand-over's 10 s line).
   if (!can && !s->depth) {
     const bool same_size = d->width == s->width && d->height == s->height && d->scale == s->scale;
@@ -14659,8 +16381,15 @@ bool ResolveFixed16Locked(HostSurface *surface, HostTexture *dest, const plume::
       return false;
   }
   plume::RenderCommandList *cmd = s.command_list;
+  const bool split = SasrtResolveSplitOn();  // renut-ultimate (2026-11-13, sasrt_gpu_diag_resolve_split)
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 0));
   TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
   TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
+  if (split) [[unlikely]] {
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 1));
+    gpu_profile::CountDraw(s, SasrtResolvePartLabel(surface, 1));
+  }
   cmd->setFramebuffer(dest->copy_framebuffer.get());
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width), float(dest->alloc_height)));
   cmd->setScissors(plume::RenderRect(int32_t(host_x), int32_t(host_y), int32_t(host_x) + (rect.right - rect.left),
@@ -14677,6 +16406,8 @@ bool ResolveFixed16Locked(HostSurface *surface, HostTexture *dest, const plume::
   push.sampler_index = kPointClampSamplerSlot;
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 2));
   // The draw path binds its own layout, pipeline, targets and viewport again.
   g_bound.framebuffer = nullptr;
   g_bound.pipeline = nullptr;
@@ -14786,6 +16517,10 @@ bool ResolveCopyPossible(const HostSurface *surface, const HostTexture *dest) {
   case plume::RenderFormat::R8G8B8A8_UNORM:
   case plume::RenderFormat::B8G8R8A8_UNORM:
   case plume::RenderFormat::R16G16B16A16_UNORM:
+  // sasrt-nx (2026-11-11, port 75; its formats batch, rows 6, 8, 10, 74, 93 and 7, 66, 73, 95, 96; its audit's
+  // finding 1)
+  case plume::RenderFormat::R10G10B10A2_UNORM:
+  case plume::RenderFormat::R11G11B10_FLOAT:
   case plume::RenderFormat::R16G16B16A16_FLOAT:
   case plume::RenderFormat::R16G16_UNORM:
   case plume::RenderFormat::R8G8_UNORM:
@@ -14802,15 +16537,83 @@ bool ResolveCopyPossible(const HostSurface *surface, const HostTexture *dest) {
   }
 }
 
-bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::RenderRect &rect, uint32_t host_x,
-                     uint32_t host_y) {
+// blur-nx (2026-11-10, port 76; its key 216: blur_renut_sample_grid_resolve): the resolve of 'rect' of a multisampled view
+// into dest at (host_x, host_y), from the single-sampled target of its sample grid (sample_grid_resolve_ps: each view
+// pixel the average of its samples_x x samples_y block there), times color_scale (its key 219). The caller has checked
+// the formats.
+bool DrawSampleGridResolveLocked(HostSurface *grid, HostTexture *dest, const plume::RenderRect &rect, uint32_t host_x,
+                                 uint32_t host_y, uint32_t samples_x, uint32_t samples_y, float color_scale) {
   auto &s = State();
-  if (!ResolveCopyPossible(surface, dest))
+  if (!s.sample_grid_resolve_ps || !dest->texture || !dest->render_target || dest->dimension != TextureDimension::Tex2D ||
+      dest->stacked)
     return false;
-  const uint32_t source_slot = SurfaceSampleSlotLocked(surface);
+  const uint32_t source_slot = SurfaceSampleSlotLocked(grid);
   if (source_slot == kInvalidDescriptor)
     return false;
-  auto &pipeline = s.resolve_copy_pipelines[uint32_t(surface->format)];
+  auto &pipeline = s.sample_grid_pipelines[uint32_t(dest->host_format)];
+  if (!pipeline) {
+    plume::RenderGraphicsPipelineDesc desc;
+    desc.pipelineLayout = s.utility_layout.get();
+    desc.vertexShader = s.present_vs.get();
+    desc.pixelShader = s.sample_grid_resolve_ps.get();
+    desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
+    desc.cullMode = plume::RenderCullMode::NONE;
+    desc.renderTargetCount = 1;
+    desc.renderTargetFormat[0] = dest->host_format;
+    desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
+    desc.depthTargetFormat = plume::RenderFormat::UNKNOWN;
+    pipeline = s.device->createGraphicsPipeline(desc);
+    if (!pipeline)
+      return false;
+    pipeline->setName("renut sample grid resolve");
+  }
+  if (!dest->copy_framebuffer) {
+    const plume::RenderTexture *targets[] = {dest->texture.get()};
+    dest->copy_framebuffer = s.device->createFramebuffer(plume::RenderFramebufferDesc(targets, 1));
+    if (!dest->copy_framebuffer)
+      return false;
+  }
+  plume::RenderCommandList *cmd = s.command_list;
+  TransitionSurfaceLocked(grid, plume::RenderTextureLayout::SHADER_READ);
+  TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
+  cmd->setFramebuffer(dest->copy_framebuffer.get());
+  cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width), float(dest->alloc_height)));
+  cmd->setScissors(plume::RenderRect(int32_t(host_x), int32_t(host_y), int32_t(host_x) + (rect.right - rect.left),
+                                     int32_t(host_y) + (rect.bottom - rect.top)));
+  cmd->setGraphicsPipelineLayout(s.utility_layout.get());
+  cmd->setPipeline(pipeline.get());
+  cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
+  cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
+  UtilityPush push{};
+  push.scale[0] = color_scale;  // the resolve's colour scale (blur_renut_resolve_exp_bias)
+  push.scale[1] = 1.0f;
+  push.translate[0] = float(rect.left - int32_t(host_x));
+  push.translate[1] = float(rect.top - int32_t(host_y));
+  push.texture_index = source_slot;
+  push.sampler_index = kPointClampSamplerSlot;
+  push.param0 = float(samples_x);
+  push.param1 = float(samples_y);
+  cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
+  cmd->drawInstanced(3, 1, 0, 0);
+  g_bound.framebuffer = nullptr;
+  g_bound.pipeline = nullptr;
+  g_bound.layout = false;
+  g_bound.viewport_set = false;
+  return true;
+}
+
+// blur-nx (2026-11-10, port 76; its keys 212 and 219): the copy draw itself, from a bindless slot (a target's sample view
+// or a staging image): dest's region at (host_x, host_y) from the source texels at rect's corner, times color_scale
+// (resolve_copy_ps). The caller has made the source readable. The pipeline is the destination format's (the source's
+// when not converting).
+// renut-ultimate (2026-11-13, sasrt-nx's sasrt_gpu_diag_resolve_split): 'split_surface', DrawResolveCopy's source with
+// the split diagnostic on (its parts 1 and 2 are marked here, part 0 there); null for none (the staging sources).
+bool DrawCopyFromSlotLocked(uint32_t source_slot, HostTexture *dest, const plume::RenderRect &rect, uint32_t host_x,
+                            uint32_t host_y, float color_scale, const HostSurface *split_surface = nullptr) {
+  auto &s = State();
+  if (source_slot == kInvalidDescriptor || !s.resolve_copy_ps || !dest->texture || !dest->render_target)
+    return false;
+  auto &pipeline = s.resolve_copy_pipelines[uint32_t(dest->host_format)];
   if (!pipeline) {
     plume::RenderGraphicsPipelineDesc desc;
     desc.pipelineLayout = s.utility_layout.get();
@@ -14819,7 +16622,7 @@ bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::Rende
     desc.primitiveTopology = plume::RenderPrimitiveTopology::TRIANGLE_LIST;
     desc.cullMode = plume::RenderCullMode::NONE;
     desc.renderTargetCount = 1;
-    desc.renderTargetFormat[0] = surface->format;
+    desc.renderTargetFormat[0] = dest->host_format;
     desc.renderTargetBlend[0] = plume::RenderBlendDesc::Copy();
     desc.depthTargetFormat = plume::RenderFormat::UNKNOWN;
     pipeline = s.device->createGraphicsPipeline(desc);
@@ -14834,8 +16637,13 @@ bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::Rende
       return false;
   }
   plume::RenderCommandList *cmd = s.command_list;
-  TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
+  const HostSurface *const surface = split_surface;
+  const bool split = surface != nullptr;  // renut-ultimate (2026-11-13, sasrt_gpu_diag_resolve_split)
   TransitionTextureLocked(dest, plume::RenderTextureLayout::COLOR_WRITE);
+  if (split) [[unlikely]] {
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 1));
+    gpu_profile::CountDraw(s, SasrtResolvePartLabel(surface, 1));  // its resolves a frame
+  }
   cmd->setFramebuffer(dest->copy_framebuffer.get());
   cmd->setViewports(plume::RenderViewport(0.0f, 0.0f, float(dest->alloc_width), float(dest->alloc_height)));
   cmd->setScissors(plume::RenderRect(int32_t(host_x), int32_t(host_y), int32_t(host_x) + (rect.right - rect.left),
@@ -14845,13 +16653,16 @@ bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::Rende
   cmd->setGraphicsDescriptorSet(s.texture_set.get(), 0);
   cmd->setGraphicsDescriptorSet(s.sampler_set.get(), 1);
   UtilityPush push{};
-  push.scale[0] = push.scale[1] = 1.0f;
+  push.scale[0] = color_scale;  // resolve_copy_ps: the colour scale (1: a plain copy)
+  push.scale[1] = 1.0f;
   push.translate[0] = float(rect.left - int32_t(host_x));
   push.translate[1] = float(rect.top - int32_t(host_y));
   push.texture_index = source_slot;
   push.sampler_index = kPointClampSamplerSlot;
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 2));
   banjo::renut_gpu::CountDrawnResolve();
   // The draw path binds its own layout, pipeline, targets and viewport again.
   g_bound.framebuffer = nullptr;
@@ -14859,6 +16670,27 @@ bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::Rende
   g_bound.layout = false;
   g_bound.viewport_set = false;
   return true;
+}
+
+bool DrawResolveCopy(HostSurface *surface, HostTexture *dest, const plume::RenderRect &rect, uint32_t host_x,
+                     uint32_t host_y, bool convert, float color_scale) {
+  auto &s = State();
+  // blur-nx (2026-11-10, port 76; its key 212: blur_renut_resolve_keep_dest): 'convert', a destination kept in another
+  // format (ResolveTarget): the texel load gives the source's values, the target's format stores them.
+  if (convert ? !(s.resolve_copy_ps && dest->texture && dest->render_target &&
+                  dest->dimension == TextureDimension::Tex2D && !dest->stacked &&
+                  surface->samples == plume::RenderSampleCount::COUNT_1 && ConvertibleResolveFormat(surface->format) &&
+                  ConvertibleResolveFormat(dest->host_format))
+              : !ResolveCopyPossible(surface, dest))
+    return false;
+  const uint32_t source_slot = SurfaceSampleSlotLocked(surface);
+  if (source_slot == kInvalidDescriptor)
+    return false;
+  const bool split = SasrtResolveSplitOn();  // renut-ultimate (2026-11-13, sasrt_gpu_diag_resolve_split)
+  if (split) [[unlikely]]
+    gpu_profile::Mark(s, SasrtResolvePartLabel(surface, 0));
+  TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
+  return DrawCopyFromSlotLocked(source_slot, dest, rect, host_x, host_y, color_scale, split ? surface : nullptr);
 }
 
 // halo3-nx (2026-11-03): a resolve about to read 'surface', when another format's target over the same EDRAM view was drawn to
@@ -14932,12 +16764,18 @@ void SyncColorViewLocked(HostSurface *surface) {
   push.sampler_index = kPointClampSamplerSlot;
   // RB_COLOR_INFO bits 20-25: the signed exponent the console applies when it writes the colour.
   push.param0 = std::ldexp(1.0f, int32_t(latest->color_info_word << 6) >> 26);
+  // blur-nx (2026-11-17, blur_renut_target_bias_rgb): with the colour scaled by the target's bias as it is drawn
+  // (shader_common.h banjoTrim, constant 927), the float target holds the biased value, as the console's EDRAM does: the
+  // words are made from it as it is. 2^bias here as well scaled it twice (Halo 3's last pass has a bias).
+  if (banjo::renut_gpu::TargetBiasRgbOn())
+    push.param0 = 1.0f;
   cmd->setGraphicsPushConstants(0, &push, 0, sizeof(push));
   cmd->drawInstanced(3, 1, 0, 0);
   surface->synced_view = latest;
   surface->synced_writes = latest->writes;
   ++surface->writes;  // banjo-nx (banjo_renut_resolve_skip): it holds other pixels now
   surface->write_seq = ++g_surface_write_seq;  // sasrt-nx (port 29): the EDRAM depth restore's order
+  g_blur_color_write_last = surface->write_seq;  // blur-nx (2026-11-11, port 76; its key 220)
   // The draw path binds its own layout, pipeline, targets and viewport again.
   g_bound.framebuffer = nullptr;
   g_bound.pipeline = nullptr;
@@ -14957,23 +16795,50 @@ plume::RenderRect ClampRect(const ClearRect *rect, uint32_t width, uint32_t heig
 
 } // namespace
 
+void ReadClearViewport(const u8 *device_state, float viewport[4]) {  // blur-nx (2026-11-13, #55)
+  const GuestDevice device(device_state);
+  for (u32 i = 0; i < 4; ++i)
+    viewport[i] = device.F32(kClearViewportOffset + i * 4);
+}
+
 void ClearStateLocked(const u8 *device_state, u32 flags, const ClearRect *rect,
                       const float color[4], float depth, u32 stencil) {
+  if (!device_state) {  // (as before: a null device clears nothing; the command list and SyncBound first)
+    ClearTargetsLocked(nullptr, nullptr, flags, rect, color, depth, stencil);
+    return;
+  }
+  u32 targets[kResolveTargetWords];
+  float viewport[4];
+  ReadResolveTargets(device_state, targets);
+  ReadClearViewport(device_state, viewport);
+  ClearTargetsLocked(targets, viewport, flags, rect, color, depth, stencil);
+}
+
+void ClearTargetsLocked(const u32 *target_words, const float *viewport, u32 flags, const ClearRect *rect,
+                        const float color[4], float depth, u32 stencil) {
   auto &s = State();
   if (!Video::EnsureCommandListLocked())
     return;
   SyncBound(s);
-  const GuestDevice device(device_state);
-  if (!device.valid())
+  if (!target_words)  // blur-nx (2026-11-13, #55): was a null device state
     return;
   Targets targets;
-  if (!GatherTargets(device, targets))
+  if (!GatherTargetsWords(target_words, targets))
     return;
+  if (DrawLogFrameLocked(TextureFrameLocked())) {  // culdcept-nx (2026-11-19): the draw log's window takes clears too
+    const HostSurface *c0 = targets.color_count ? targets.colors[0] : nullptr;
+    RGPU_INFO("[drawlog] frame {} clear flags {:X} (colour {:.3f} {:.3f} {:.3f} {:.3f}, depth {:.4f}, stencil {}) rect {} {} "
+              "{} {}: colour at {:08X} {}x{}, depth at {:08X}",
+              TextureFrameLocked(), flags, color ? color[0] : 0.0f, color ? color[1] : 0.0f, color ? color[2] : 0.0f,
+              color ? color[3] : 0.0f, depth, stencil, rect ? rect->x1 : -1, rect ? rect->y1 : -1, rect ? rect->x2 : -1,
+              rect ? rect->y2 : -1, c0 ? c0->guest_va : 0, targets.width, targets.height,
+              targets.depth ? targets.depth->guest_va : 0);
+  }
 
-  // D3D clamps clears to the viewport (CDevice viewport floats at 0x3170).
+  // D3D clamps clears to the viewport (CDevice viewport floats at 0x3170; blur-nx: 0x3218, kClearViewportOffset).
   ClearRect r = rect ? *rect : ClearRect{0, 0, int32_t(targets.width), int32_t(targets.height)};
-  const float vx = device.F32(0x3160), vy = device.F32(0x3164);  // katamari-nx: 0x3170->0x3160, 0x3174->0x3164
-  const float vw = device.F32(0x3168), vh = device.F32(0x316C);  // katamari-nx: 0x3178->0x3168, 0x317C->0x316C
+  const float vx = viewport[0], vy = viewport[1];
+  const float vw = viewport[2], vh = viewport[3];
   if (vw > 0.0f && vh > 0.0f) {
     int32_t vx2 = int32_t(vx + vw), vy2 = int32_t(vy + vh);
     // A target grown for tiling: D3D bounds the viewport by the tile-sized
@@ -14997,7 +16862,74 @@ void ClearStateLocked(const u8 *device_state, u32 flags, const ClearRect *rect,
 // banjo-nx (2026-10-19, banjo_renut_depth_words_lazy): a destination's first resolves write the words either way.
 constexpr uint32_t kDepthWordsProbe = 300;
 
+// renut-ultimate (2026-11-13, sasrt-nx's resolve project R1; logging only, off by default): per depth resolve destination
+// (guest address and size, the first 16), its resolves asked with and without the words, the reads of its words
+// (EnsureDepthWordsLocked: a fetch of the words), and whether a read set words_wanted this run. The 10 s line tells which
+// destinations' words nothing reads (banjo_renut_depth_words_lazy, sasrt_gpu_words_probe_kept), sasrt-nx's base for R2.
+// Render thread; the line is the stats thread's: a mutex.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_diag_depth_words, false, "SASRT/Diagnostics",
+                    "Diagnostic (sasrt-nx's resolve project R1), logging only, every 10 s: per depth resolve destination, "
+                    "its resolves with and without the depth words, how often the words were read, and whether a read "
+                    "first asked for them")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+namespace {
+struct DepthWordsCensus {
+  u32 va = 0, w = 0, h = 0;
+  uint64_t with_words = 0, without = 0, reads = 0;
+  bool wanted_by_read = false;  // a read set words_wanted (this run)
+};
+std::mutex g_depth_words_census_mutex;
+std::vector<DepthWordsCensus> g_depth_words_census;
+bool DepthWordsCensusOn() {
+  static const bool on = REXCVAR_GET(sasrt_gpu_diag_depth_words);
+  return on;
+}
+DepthWordsCensus *DepthWordsCensusOf(const HostTexture &d) {  // under the mutex
+  for (auto &c : g_depth_words_census)
+    if (c.va == d.guest_va && c.w == d.width && c.h == d.height)
+      return &c;
+  if (g_depth_words_census.size() >= 16)
+    return nullptr;
+  g_depth_words_census.push_back({d.guest_va, d.width, d.height});
+  return &g_depth_words_census.back();
+}
+void DepthWordsCensusResolve(const HostTexture &d, bool words) {
+  if (!DepthWordsCensusOn()) [[likely]]
+    return;
+  std::lock_guard lock(g_depth_words_census_mutex);
+  if (DepthWordsCensus *c = DepthWordsCensusOf(d))
+    ++(words ? c->with_words : c->without);
+}
+void DepthWordsCensusRead(const HostTexture &d) {
+  if (!DepthWordsCensusOn()) [[likely]]
+    return;
+  std::lock_guard lock(g_depth_words_census_mutex);
+  if (DepthWordsCensus *c = DepthWordsCensusOf(d)) {
+    ++c->reads;
+    if (!d.words_wanted)
+      c->wanted_by_read = true;
+  }
+}
+}  // namespace
+
+std::string DepthWordsCensusReport() {
+  if (!DepthWordsCensusOn())
+    return {};
+  std::lock_guard lock(g_depth_words_census_mutex);
+  std::string out = "[renut] depth resolve words by destination (sasrt_gpu_diag_depth_words):";
+  if (g_depth_words_census.empty())
+    out += " none";
+  for (auto &c : g_depth_words_census) {
+    out += fmt::format(" {:08X} {}x{}: {} with words, {} without, read {}, first wanted by {};", c.va, c.w, c.h,
+                       c.with_words, c.without, c.reads, c.wanted_by_read ? "a read" : "nothing (this run)");
+    c.with_words = c.without = c.reads = 0;
+  }
+  return out;
+}
+
 void EnsureDepthWordsLocked(HostTexture &dest) {
+  DepthResolveReadLocked(dest, 2);  // vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread)
+  DepthWordsCensusRead(dest);  // renut-ultimate (2026-11-13, sasrt-nx's R1)
   if (!banjo::renut_gpu::DepthWordsLazyOn())
     return;
   dest.words_wanted = true;
@@ -15019,6 +16951,51 @@ void EnsureDepthWordsLocked(HostTexture &dest) {
   }
   // The source has changed since: these words are older ones. From now on this destination writes them each time.
   banjo::renut_gpu::CountLazyWords(2);
+}
+
+// vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread; the owner's call: "skip them but make sure they turn
+// back on if anything else reads them"). The destinations read so far, by guest address: a destination made again at
+// one of them is never skipped either.
+std::unordered_set<u32> g_depth_resolve_read_va;
+
+void DepthResolveReadLocked(HostTexture &d, int path) {
+  if (d.depth_read) [[likely]]
+    return;
+  d.depth_read = true;
+  {  // which destinations are read, and how (the first read of each)
+    static uint32_t logged_reads = 0;
+    if (logged_reads++ < 48)
+      RGPU_INFO("[renut] depth resolve destination {:08X} ({}x{}) read for the first time ({}, after {} resolves, frame "
+                "{}){}", d.guest_va, d.width, d.height, path == 0 ? "sampled at its address" : path == 1 ? "sampled "
+                "through another header" : "its words", d.resolves, TextureFrameLocked(), d.depth_skipped ? ", its last resolve "
+                "left out" : "");
+  }
+  g_depth_resolve_read_va.insert(d.guest_va);
+  if (!d.depth_skipped)
+    return;
+  // Its last resolve was left out: drawn now, from the source if that is unchanged since (the same pixels), else from
+  // the target's newer content (this once not what the game resolved). Every resolve into it is drawn from now on.
+  d.depth_skipped = false;
+  HostSurface *surface = SurfaceByGenerationLocked(d.last_source_generation);
+  const bool unchanged = surface && surface->writes == d.last_source_writes;
+  bool drawn = false;
+  if (surface) {
+    const ClearRect src{d.last_src[0], d.last_src[1], d.last_src[2], d.last_src[3]};
+    drawn = ResolveDepth(surface, &d, src, d.last_dest_x, d.last_dest_y, true);
+    if (drawn)
+      d.words_current = true;
+  }
+  if (!(drawn && unchanged))
+    d.resolve_signature = 0;
+  banjo::renut_gpu::CountDepthResolveSkip(drawn && unchanged ? 1 : 2);
+  static uint32_t logged = 0;
+  if (logged++ < 16)
+    RGPU_WARN("[renut] vivapinata_depth_resolve_skip_unread: depth resolve destination {:08X} ({}x{}) read; its "
+              "resolves are drawn from now on; the one left out {}",
+              d.guest_va, d.width, d.height,
+              drawn && unchanged ? "drawn now from its unchanged source (the same pixels)"
+                                 : drawn ? "drawn now from the target's newer content (NOT the same pixels, this once)"
+                                         : "could not be drawn (its source is gone; NOT the same pixels, this once)");
 }
 
 // banjo-nx (2026-10-19, banjo_deko3d_depth_handover): see "Depth hand-over".
@@ -15111,10 +17088,57 @@ static uint64_t ResolveSignature(const HostSurface *surface, const ClearRect &sr
   return h ? h : 1;
 }
 
+// blur-nx (2026-11-13, M-35): draw.h kResolveTargetWords.
+static_assert(d3d::kDeviceOffsetDepthStencil == d3d::kDeviceOffsetRenderTargets + 16);
+static_assert(d3d::kDeviceOffsetRenderTargets + kResolveTargetWords * 4 <= d3d::kDeviceSnapshotSize);
+
+void ReadResolveTargets(const u8 *device_state, u32 targets[kResolveTargetWords]) {
+  const GuestDevice device(device_state);
+  for (u32 i = 0; i < kResolveTargetWords; ++i)
+    targets[i] = device.U32(d3d::kDeviceOffsetRenderTargets + i * 4);
+}
+
 void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *source_rect,
                         u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
                         i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
                         const float clear_color[4], float clear_depth, u32 clear_stencil) {
+  u32 targets[kResolveTargetWords];
+  if (device_state)
+    ReadResolveTargets(device_state, targets);
+  ResolveTargetsLocked(device_state ? targets : nullptr, flags, source_rect, dest_texture_va, dest_format, dest_x,
+                       dest_y, dest_level, dest_slice, clear_color, clear_depth, clear_stencil);
+}
+
+// blur-nx (2026-11-18, the census's #6): a resolve's time, and how much of it finding its destination.
+struct HbResolveScope {
+    bool on = false;
+    uint64_t t0 = 0, dest = 0;
+    template <typename F>
+    auto Time(F f) {
+      if (!on)
+        return f();
+      const uint64_t t = ::renut::gpu::host_batch::Ticks();
+      auto r = f();
+      dest += ::renut::gpu::host_batch::Ticks() - t;
+      return r;
+    }
+    ~HbResolveScope() {
+      if (!on)
+        return;
+      const uint64_t total = ::renut::gpu::host_batch::Ticks() - t0;
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kResolveCalls);
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kResolveTicksDest, dest);
+      ::renut::gpu::host_batch::Add(::renut::gpu::host_batch::kResolveTicksWork, total > dest ? total - dest : 0);
+    }
+};
+void ResolveTargetsLocked(const u32 *targets, u32 flags, const ClearRect *source_rect,
+                          u32 dest_texture_va, const d3d::TextureFetchConstant *dest_format,
+                          i32 dest_x, i32 dest_y, u32 dest_level, u32 dest_slice,
+                          const float clear_color[4], float clear_depth, u32 clear_stencil) {
+  ::renut::gpu::census::Scope census_scope(::renut::gpu::census::kResolveSetup);  // blur-nx (2026-11-17)
+  HbResolveScope hb_rs;  // blur-nx (2026-11-18, the census's #6)
+  hb_rs.on = ::renut::gpu::host_batch::CensusOn();
+  hb_rs.t0 = hb_rs.on ? ::renut::gpu::host_batch::Ticks() : 0;
   auto &s = State();
   static const uint32_t kProfileLabel = gpu_profile::Label("resolves");
   gpu_profile::Mark(s, kProfileLabel);
@@ -15123,13 +17147,12 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
   if (!Video::EnsureCommandListLocked())
     return;
   SyncBound(s);
-  const GuestDevice device(device_state);
-  if (!device.valid())
+  if (!targets)  // blur-nx (2026-11-13, M-35): was a null device state
     return;
 
   const u32 source = flags & 7;
-  const u32 source_va = source == 4 ? device.U32(d3d::kDeviceOffsetDepthStencil)
-                                    : device.U32(d3d::kDeviceOffsetRenderTargets + source * 4);
+  // blur-nx (2026-11-13, M-35): word 4 is the depth-stencil surface (kDeviceOffsetDepthStencil), as before.
+  const u32 source_va = targets[source];
   HostSurface *surface = GetHostSurfaceLocked(source_va);
   // sasrt-nx (2026-11-09, sasrt_gpu_diag_profile_vs; the fourth round): with the shaders' breakdown, each resolve's own
   // label: its source's size and format, colour or depth, and whether it clears after.
@@ -15148,8 +17171,17 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
   // nothing has written here since (ClearTargets): the resolve reads that clear. Viva Pinata blanks its 1280x720 mask this way at a
   // fade (the scene's tile clears, then a resolve of the mask's target into the mask's texture).
   if (surface && surface->edram_wiped) {
-    const bool still = surface->edram_wiped_generation == surface->generation && surface->edram_wiped_writes == surface->writes;
+    bool still = surface->edram_wiped_generation == surface->generation && surface->edram_wiped_writes == surface->writes;
     surface->edram_wiped = false;
+    // blur-nx (2026-11-10, port 76; its key 218: blur_renut_wipe_overwritten): written over through another view since
+    // the wipe: on the console that write is in the EDRAM the resolve reads.
+    if (still && banjo::renut_gpu::WipeOverwrittenOn() && OverlapWrittenSinceLocked(surface, surface->blur_wiped_seq)) {
+      still = false;
+      static u32 logged = 0;
+      if (LogLimited(logged, 4))
+        RGPU_INFO("[renut] resolve of {}x{}: its EDRAM wipe was drawn over through another view since; not applied "
+                  "(blur_renut_wipe_overwritten)", surface->width, surface->height);
+    }
     if (still) {
       Targets wiped;
       wiped.colors[wiped.color_count++] = surface;
@@ -15171,6 +17203,11 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
               surface->depth ? "depth" : "colour", source_va, surface->width, surface->height, u32(surface->format),
               u32(surface->samples), dest_texture_va, dest_x, dest_y, dest_level, dest_slice, r.x1, r.y1, r.x2, r.y2,
               flags, (flags & 0x100) ? "clear colour after " : "", (flags & 0x200) ? "clear depth after" : "");
+  }
+  if (surface && DrawLogFrameLocked(TextureFrameLocked())) [[unlikely]] {  // culdcept-nx (2026-11-19): the draw log's window
+    RGPU_INFO("[drawlog] frame {} resolve {} at {:08X} ({}x{}) -> texture {:08X}, flags {:X}{}{}", TextureFrameLocked(),
+              surface->depth ? "depth" : "colour", surface->guest_va, surface->width, surface->height, dest_texture_va,
+              flags, (flags & 0x100) ? ", clears the colour after" : "", (flags & 0x200) ? ", clears depth after" : "");
   }
   plume::RenderCommandList *cmd = s.command_list;
   static uint32_t depth_logged = 0;
@@ -15195,7 +17232,7 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
     if (surface->depth) {
       HostTexture *dest =
           dest_level == 0 && dest_slice == 0
-              ? GetDepthResolveTextureLocked(dest_texture_va, surface->scale, dest_format)
+              ? hb_rs.Time([&] { return GetDepthResolveTextureLocked(dest_texture_va, surface->scale, dest_format); })
               : nullptr;
       ClearRect src;
       if (!dest) {
@@ -15214,10 +17251,25 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
         // probing a new destination).
         const bool lazy = banjo::renut_gpu::DepthWordsLazyOn();
         const bool words = !lazy || dest->words_wanted || dest->words_probe < kDepthWordsProbe;
+        DepthWordsCensusResolve(*dest, words);  // renut-ultimate (2026-11-13, sasrt-nx's R1)
+        // vivapinata-nx (2026-11-12, vivapinata_depth_resolve_skip_unread; NOT exact in principle, the owner's call): a
+        // resolve of a multisampled depth target into a destination nothing has read yet (neither its float nor its
+        // words, nor a destination at its address before) is left out; DepthResolveReadLocked draws it when one is
+        // read, and every later one. Viva's garden resolves its 2-sample scene depth twice a frame into two
+        // destinations nothing samples (1.56 ms a frame in run c23), each followed by a draw writing the target, so
+        // they cannot wait. Not a 1x1 destination (sasrt_renut_resolve_readback), not one handed over.
+        if (!dest->depth_read && g_depth_resolve_read_va.contains(dest->guest_va))
+          dest->depth_read = true;
+        const bool skip_unread = !words && !dest->depth_read && surface->samples != plume::RenderSampleCount::COUNT_1 &&
+                                 !(dest->width == 1 && dest->height == 1) && !dest->handed_from &&
+                                 !dest->held_current && banjo::renut_gpu::DepthResolveSkipUnreadOn();
         if (banjo::renut_gpu::ResolveSkipOn() && dest->resolve_signature == sig) {
           banjo::renut_gpu::CountSkippedResolve(true);
-        } else if (HandOverResolveLocked(surface, dest, src, dest_x, dest_y, words) ||
+        } else if (skip_unread || HandOverResolveLocked(surface, dest, src, dest_x, dest_y, words) ||
                    ResolveDepth(surface, dest, src, dest_x, dest_y, words)) {
+          dest->depth_skipped = skip_unread;  // vivapinata-nx (2026-11-12)
+          if (skip_unread)
+            banjo::renut_gpu::CountDepthResolveSkip(0);
           dest->resolve_signature = sig;
           dest->words_current = words;
           if (!dest->words_wanted && dest->words_probe < kDepthWordsProbe)
@@ -15236,8 +17288,10 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
           dest->resolve_signature = 0;
         }
       }
-    } else if (HostTexture *dest = GetResolveTextureLocked(dest_texture_va, surface->format,
-                                                           surface->scale, dest_format)) {
+    } else if (HostTexture *dest = hb_rs.Time([&] {
+                 return GetResolveTextureLocked(dest_texture_va, surface->format, surface->scale, dest_format,
+                                                ResolveCoverPixels(surface, source_rect));  // port 76 (212)
+               })) {
       SyncColorViewLocked(surface);  // halo3-nx (2026-11-03)
       ClearRect src;
       // A volume's slices are depth; stacked textures and cubes have layers.
@@ -15253,11 +17307,31 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
                                     int(dest->host_format), int(dest->guest_format), dest_x, dest_y,
                                     dest_level || dest_slice ? "l" : "", ResolveCopyPossible(surface, dest) ? "" : "x",
                                     dest->stacked || dest->dimension != TextureDimension::Tex2D ? "s" : ""));
-      const uint64_t sig = fits ? ResolveSignature(surface, src, dest_x, dest_y, dest_level, dest_slice) : 0;
+      // blur-nx (2026-11-10, port 76; its key 219: blur_renut_resolve_exp_bias): the colour's exponent bias, the Resolve
+      // flags' top six bits, signed (D3DRESOLVE_EXPONENTBIAS; the game's D3D moves them to RB_COPY_DEST_INFO's
+      // copy_dest_exp_bias).
+      const int exp_bias = banjo::renut_gpu::ResolveExpBiasOn() ? int(int32_t(flags) >> 26) : 0;
+      const float exp_scale = std::ldexp(1.0f, exp_bias);
+      uint64_t sig = fits ? ResolveSignature(surface, src, dest_x, dest_y, dest_level, dest_slice) : 0;
+      if (sig && exp_bias)
+        sig ^= (uint64_t(uint32_t(exp_bias) & 63u) + 1u) * 0x9E3779B97F4A7C15ull;  // a biased resolve is another one
+      // blur-nx (2026-11-17, the menu backdrop): a resolve the sample grid draws (below) reads the grid's target, not the
+      // view, which the game never draws into (its writes and image never change). Its signature takes the grid target's
+      // image, writes and last draw too: with the view's alone, banjo_renut_resolve_skip kept the first resolve for good.
+      // Blur's 640x360 half-size scene behind the menus (a view at a fixed address) stayed the sky of the frame it was
+      // first made in, and its depth-of-field composite blended the city's buildings and trees away.
+      if (sig && slice == 0 && z == 0 && dest_level == 0) {
+        if (const HostSurface *grid = SampleGridSourceLocked(surface, dest)) {
+          sig ^= (uint64_t(grid->generation) * 0xC2B2AE3D27D4EB4Full) ^ (uint64_t(grid->writes) * 0x165667B19E3779F9ull) ^
+                 (uint64_t(grid->blur_draw_seq) * 0x27D4EB2F165667C5ull);
+          if (!sig)
+            sig = 1;
+        }
+      }
       if (fits && banjo::renut_gpu::ResolveSkipOn() && dest->resolve_signature == sig) {
         // banjo-nx (2026-10-19, banjo_renut_resolve_skip): the same resolve of an unchanged source is in dest already.
         banjo::renut_gpu::CountSkippedResolve(false);
-      } else if (fits && slice == 0 && z == 0 && dest_level == 0 &&
+      } else if (fits && slice == 0 && z == 0 && dest_level == 0 && exp_bias == 0 &&
                  HandOverResolveLocked(surface, dest, src, dest_x, dest_y, false)) {
         // kameo-nx (2026-11-03, banjo_deko3d_color_handover): left in the target's image; the target stays bound
         // (banjo_deko3d_resolve_keeps_target): nothing was drawn and no target changed.
@@ -15269,6 +17343,7 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
         // path's HandOverResolveLocked does; a level or slice of a stacked destination never holds any.)
         if ((dest->handed_from || dest->held_current) && (slice != 0 || z != 0 || dest_level != 0))
           MaterialiseLocked(*dest, false);
+        const uint64_t prev_sig = dest->resolve_signature;  // vivapinata-nx (2026-11-12, A/B 87): what dest held before
         dest->resolve_signature = sig;
         g_bound.framebuffer = nullptr;
         // The destination is of the surface's scale.
@@ -15284,7 +17359,74 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
                                           int32_t(host_x) + (rect.right - rect.left),
                                           int32_t(host_y) + (rect.bottom - rect.top));
         const bool multisampled = surface->samples != plume::RenderSampleCount::COUNT_1;
-        if (multisampled && dest->extra_levels && IsVulkan()) {
+        // blur-nx (2026-11-10, port 76; its key 216: blur_renut_sample_grid_resolve): a 4x view over a single-sampled
+        // target of twice its pitch (2x: the same pitch), drawn after the view was (its own clears aside): the console's
+        // resolve averages each pixel's samples, which are that target's 2x2 (1x2) blocks. Blur's 640x360 half-size scene
+        // comes from its 1280x720 post target this way (the reference's capture: the motion blur's source is that image;
+        // here it was black).
+        // blur-nx (2026-11-13, MSAA lowered): decided by the console's sample count (the header's): with msaa_level 1 or
+        // 2 the 4x view is single-sampled or 2x here, but its samples are still the grid target's 2x2 blocks on the
+        // console (Blur's half-size scene was black or wrong without this).
+        const u32 guest_msaa = (u32(surface->info_word) >> 16) & 3;  // 0: 1x, 1: 2x, 2: 4x
+        HostSurface *grid_alias = nullptr;
+        if (guest_msaa != 0 && slice == 0 && z == 0 && dest_level == 0 && banjo::renut_gpu::SampleGridResolveOn() &&
+            dest->host_format == surface->format) {
+          grid_alias = SampleGridAliasLocked(surface);
+          if (grid_alias && grid_alias->blur_draw_seq <= surface->blur_draw_seq)
+            grid_alias = nullptr;
+        }
+        const uint32_t grid_x = guest_msaa == 2 ? 2u : 1u;
+        // blur-nx (2026-11-10, port 76; its key 219: blur_renut_resolve_exp_bias): with a bias, a resolve is drawn (a copy
+        // cannot scale): a single-sampled source straight from its view, a multisampled one through a staging image of its
+        // own format (resolved whole by the API).
+        uint32_t biased_slot = kInvalidDescriptor;
+        if (exp_bias != 0 && !grid_alias && slice == 0 && z == 0 && dest_level == 0) {
+          if (!multisampled) {
+            biased_slot = SurfaceSampleSlotLocked(surface);
+            if (biased_slot != kInvalidDescriptor)
+              TransitionSurfaceLocked(surface, plume::RenderTextureLayout::SHADER_READ);
+          } else if (surface->texture) {
+            const uint32_t sw = surface->scale.Size(surface->width), sh = surface->scale.Size(surface->height);
+            if (HostTexture *stage = ResolveSourceStagingLocked(surface->format, sw, sh); stage && stage->texture) {
+              TransitionSurfaceLocked(surface, plume::RenderTextureLayout::RESOLVE_SOURCE);
+              TransitionTextureLocked(stage, plume::RenderTextureLayout::RESOLVE_DEST);
+              cmd->resolveTexture(stage->texture.get(), surface->texture.get());
+              TransitionTextureLocked(stage, plume::RenderTextureLayout::SHADER_READ);
+              biased_slot = ResolveSourceStagingSlotLocked(surface->format, sw, sh);
+            }
+          }
+        }
+        if (exp_bias != 0) {
+          static uint32_t logged = 0;
+          if (logged++ < 4)
+            RGPU_INFO("[renut] resolve of {}x{} with exponent bias {} (times {}; blur_renut_resolve_exp_bias){}",
+                      surface->width, surface->height, exp_bias, exp_scale,
+                      grid_alias || biased_slot != kInvalidDescriptor ? "" : ": not drawable here, copied without it");
+        }
+        if (grid_alias && DrawSampleGridResolveLocked(grid_alias, dest, rect, host_x, host_y, grid_x, 2u, exp_scale)) {
+          static uint32_t logged = 0;
+          if (logged++ < 4)
+            RGPU_INFO("[renut] resolve of a {}x{} {}x view drawn from the {}x{} target of its sample grid "
+                      "(blur_renut_sample_grid_resolve)", surface->width, surface->height, grid_x * 2,
+                      grid_alias->width, grid_alias->height);
+        } else if (biased_slot != kInvalidDescriptor &&
+                   DrawCopyFromSlotLocked(biased_slot, dest, rect, host_x, host_y, exp_scale)) {
+          // blur-nx (2026-11-10, port 76; its key 219): drawn with the bias (into the destination's own format)
+        } else if (dest->host_format != surface->format) {
+          // blur-nx (2026-11-10, port 76; its key 212: blur_renut_resolve_keep_dest): a destination kept in another format
+          // (ResolveTarget): its part written by a draw that converts.
+          if (!(slice == 0 && z == 0 && dest_level == 0 && DrawResolveCopy(surface, dest, rect, host_x, host_y, true))) {
+            static uint32_t logged = 0;
+            if (LogLimited(logged, 8))
+              RGPU_WARN("[renut] resolve into {:08X} kept in format {} (source format {}) not drawn (level {}, slice "
+                        "{})", dest_texture_va, u32(dest->host_format), u32(surface->format), dest_level, dest_slice);
+            dest->resolve_signature = 0;
+          }
+        } else if (multisampled && ((dest->extra_levels && IsVulkan()) ||
+                                    ((slice != 0 || z != 0) && banjo::renut_gpu::MsSliceResolveOn()))) {
+          // blur-nx (2026-11-11, port 76; its key 221: blur_renut_ms_slice_resolve): also a slice or depth other than 0 (a
+          // cube face, an array layer): plume's region resolve writes slice 0 only, so the staging image and a copy into
+          // the slice.
           // A destination with host levels takes it through a single-level
           // target (ResolveStagingLocked): plume's Vulkan resolve writes every
           // level of its destination (D3D12's writes level 0 only, and
@@ -15305,10 +17447,90 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
                 host_y, z, &box);
           }
         } else if (multisampled) {
-          TransitionSurfaceLocked(surface, plume::RenderTextureLayout::RESOLVE_SOURCE);
-          TransitionTextureLocked(dest, plume::RenderTextureLayout::RESOLVE_DEST);
-          cmd->resolveTextureRegion(dest->texture.get(), host_x, host_y, surface->texture.get(),
-                                    &rect);
+          // vivapinata-nx (2026-11-11, vivapinata_resolve_from_sibling / A/B 87): the last resolve of this target to its own
+          // place (recorded below) and the target unchanged since but for colour clears outside this rect. Into the same
+          // destination, which still holds that resolve (its signature) at the same place, over a rect inside it: those
+          // texels are this resolve's already, so nothing is resolved. Into another destination of the same format and
+          // scale: that one's texels are copied (one sample a texel, through an identity view: no swizzle, no red-blue
+          // swap) instead of resolved again. Viva Pinata resolves its scene whole into BCCA0550, then into BCCA05D0, then
+          // per tile into BCCA0550 again, each tile cleared after (EndTiling).
+          bool copied = false;
+          if (ResolveFromSiblingOn() && slice == 0 && z == 0 && dest_level == 0 && exp_bias == 0) {
+            const HostSurface::MsSibling &sib = surface->ms_sibling;
+            // Every write since was a colour clear (rect_clears), and none of them reached this rect.
+            int why = !sib.dest_va                                                         ? 2
+                      : surface->writes - sib.writes != surface->rect_clears - sib.clears ? 3
+                                                                                           : 0;
+            for (uint32_t i = 0; !why && i < sib.cleared_count; ++i) {
+              const int32_t *c = sib.cleared[i];
+              if (!(c[2] <= rect.left || c[0] >= rect.right || c[3] <= rect.top || c[1] >= rect.bottom))
+                why = 4;
+            }
+            if (!why && (sib.generation != surface->generation || rect.left < sib.left || rect.top < sib.top ||
+                         rect.right > sib.right || rect.bottom > sib.bottom))
+              why = 5;
+            if (!why && sib.dest_va == dest_texture_va) {
+              if (prev_sig == sib.dest_sig && rect.left == int32_t(host_x) && rect.top == int32_t(host_y) &&
+                  !dest->handed_from && !dest->held_current) {
+                dest->resolve_signature = prev_sig;  // it still holds that resolve, of which this one is a part
+                copied = true;
+                why = 1;
+              } else {
+                why = 6;
+              }
+            } else if (!why) {
+              HostTexture *from = FindHostTextureLocked(sib.dest_va);
+              // 7: the other destination's reason, for the diagnostic line (vivapinata-nx, 2026-11-12)
+              static uint64_t refused[8] = {};
+              const int r = !from || from == dest || !from->texture        ? 0
+                            : !from->gpu_written                           ? 1
+                            : from->resolve_signature != sib.dest_sig      ? 2
+                            : from->host_format != dest->host_format       ? 3
+                            : !(from->scale == surface->scale)             ? 4
+                            : from->handed_from || from->held_current      ? 5
+                            : from->dimension != TextureDimension::Tex2D || from->stacked ? 6
+                                                                           : 7;
+              if (r < 7 && (++refused[r] & (refused[r] - 1)) == 0)  // the 1st, 2nd, 4th, 8th ... of each
+                RGPU_INFO("[renut] resolve from another destination {:08X} into {:08X} refused: reason {} ({} times; "
+                          "0 none, 1 not GPU-written, 2 changed since, 3 format {} / {}, 4 scale, 5 handed, 6 not 2D)",
+                          sib.dest_va, dest_texture_va, r, refused[r], from ? int(from->host_format) : -1,
+                          int(dest->host_format));
+              why = 7;
+              if (r == 7) {
+                const uint32_t slot = RawViewSlotLocked(*from);  // x, y, z, w, no red-blue swap; else none
+                TransitionTextureLocked(from, plume::RenderTextureLayout::SHADER_READ);
+                copied = slot != kInvalidDescriptor && DrawCopyFromSlotLocked(slot, dest, rect, host_x, host_y, 1.0f);
+                if (copied)
+                  why = 0;
+              }
+            }
+            CountResolveFromSibling(why);
+            if (banjo::renut_gpu::ResolveTraceOn()) [[unlikely]]
+              RGPU_INFO("[trace]   from the last one: {} {} (record {:08X} rect ({},{})-({},{}); this ({},{})-({},{}) at "
+                        "({},{}))",
+                        why == 0 ? "copied" : why == 1 ? "not resolved" : "resolved", why, sib.dest_va, sib.left, sib.top,
+                        sib.right, sib.bottom, rect.left, rect.top, rect.right, rect.bottom, host_x, host_y);
+          }
+          if (!copied) {
+            TransitionSurfaceLocked(surface, plume::RenderTextureLayout::RESOLVE_SOURCE);
+            TransitionTextureLocked(dest, plume::RenderTextureLayout::RESOLVE_DEST);
+            cmd->resolveTextureRegion(dest->texture.get(), host_x, host_y, surface->texture.get(),
+                                      &rect);
+            // The destination's texels at the target's coordinates (a resolve to its own place): a sibling for later.
+            surface->ms_sibling = {};
+            if (rect.left == int32_t(host_x) && rect.top == int32_t(host_y)) {
+              HostSurface::MsSibling &sib = surface->ms_sibling;
+              sib.dest_va = dest_texture_va;
+              sib.dest_sig = sig;
+              sib.generation = surface->generation;
+              sib.writes = surface->writes;
+              sib.clears = surface->rect_clears;
+              sib.left = rect.left;
+              sib.top = rect.top;
+              sib.right = rect.right;
+              sib.bottom = rect.bottom;
+            }
+          }
         } else if (surface->sasrt_fixed16 && slice == 0 && z == 0 && banjo::renut_gpu::Fixed16ClampOn() &&
                    ResolveFixed16Locked(surface, dest, rect, host_x, host_y)) {
           // sasrt-nx (2026-10-20): drawn with the fixed-point range.
@@ -15378,9 +17600,15 @@ void ResolveStateLocked(const u8 *device_state, u32 flags, const ClearRect *sour
     // clean; with only the colour cleared each model was depth-tested against the last one's depth. Noted by Kameo:
     // RePowered (MaxDeadBear, BiRabittoh; MIT).
     const u32 other_flags = surface->depth ? clear_flags & 1u : clear_flags & 0x30u;
+    if (DrawLogFrameLocked(TextureFrameLocked())) [[unlikely]] {  // culdcept-nx (2026-11-19): the draw log's window
+      HostSurface *o = GetHostSurfaceLocked(targets[surface->depth ? 0 : 4]);
+      RGPU_INFO("[drawlog] frame {} resolve-clear of {} at {:08X}: flags {:X}, the other ({}) {:08X}{}",
+                TextureFrameLocked(), surface->depth ? "depth" : "colour", surface->guest_va, clear_flags,
+                surface->depth ? "colour" : "depth", o ? o->guest_va : 0,
+                other_flags ? (o && o != surface ? " cleared too" : " not found") : " not asked");
+    }
     if (banjo::renut_gpu::ResolveClearsBothOn() && other_flags) {
-      HostSurface *other = GetHostSurfaceLocked(
-          device.U32(surface->depth ? d3d::kDeviceOffsetRenderTargets : d3d::kDeviceOffsetDepthStencil));
+      HostSurface *other = GetHostSurfaceLocked(targets[surface->depth ? 0 : 4]);  // M-35: render target 0 or depth
       if (other && other != surface) {
         Targets o;
         if (other->depth)
@@ -15501,6 +17729,31 @@ bool FrontBufferWrittenLocked(u32 texture_va) {
   return texture && texture->texture && texture->gpu_written;
 }
 
+// Port 169 (from fnxf_xiii, banjo_renut_scaler_crop): the scaler's source rect, the part of the front buffer the video
+// hardware scans out and stretches to the screen. A game that renders below 720p into a corner of its front buffer
+// was shown whole (its frame in a corner of the window). Only a rect from the corner, inside the texture.
+PresentImage FrontBufferImageLocked(u32 texture_va, const i32 scaler[4]) {
+  PresentImage image = FrontBufferImageLocked(texture_va);
+  const HostTexture *texture = image.texture ? FindHostTextureLocked(texture_va) : nullptr;
+  if (!texture)
+    return image;
+  const i32 x1 = scaler[0], y1 = scaler[1], x2 = scaler[2], y2 = scaler[3];
+  if (x1 == 0 && y1 == 0 && x2 > 0 && y2 > 0 && u32(x2) <= texture->width && u32(y2) <= texture->height) {
+    if (u32(x2) != texture->width || u32(y2) != texture->height) {
+      image.source_width = std::max<uint32_t>(texture->scale.Size(u32(x2)), 1u);
+      image.source_height = std::max<uint32_t>(texture->scale.Size(u32(y2)), 1u);
+    }
+  } else if (x2 > x1 && (x1 || y1)) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      RGPU_WARN("Swap: scaler source ({},{})-({},{}) not from the corner of the {}x{} front buffer: shown whole", x1, y1,
+                x2, y2, texture->width, texture->height);
+    }
+  }
+  return image;
+}
+
 PresentImage FrontBufferImageLocked(u32 texture_va) {
   PresentImage image;
   HostTexture *texture = FindHostTextureLocked(texture_va);
@@ -15513,6 +17766,9 @@ PresentImage FrontBufferImageLocked(u32 texture_va) {
   image.height = texture->alloc_height;
   image.source_width = texture->scale.Size(texture->width);
   image.source_height = texture->scale.Size(texture->height);
+  // vivapinata-nx (2026-11-12, vivapinata_present_lut): a hand-over image is the target's, of the same format.
+  image.unorm8 = texture->host_format == plume::RenderFormat::R8G8B8A8_UNORM ||
+                 texture->host_format == plume::RenderFormat::B8G8R8A8_UNORM;
   // kameo-nx (2026-11-03, banjo_deko3d_scanout_handover): the frame's last resolve left in the target's image is scanned out
   // from there (or from the image the destination took): no copy of a whole frame to read it once. With the key off, or
   // with no room for a view, it is drawn first and scanned out from the destination as before.

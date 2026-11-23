@@ -70,6 +70,31 @@ runtime and FFmpeg get the PGO and LTO flags too):
    `pgo/` in this repository is the released build's profile. A function changed since the instrumented build keeps no
    profile.
 
+Since the base sync (2026-11-22) the Switch build has the machine copies in place (`SASRT_HOT_IN_PLACE` ON, guard forms
+OFF), and that form reads its own profile: `pgo-inplace/` (`BANJO_PGO_DIR_IN_PLACE`), not `pgo/` (the 1.0.x profile of
+the hooked form). The 2026-11-22 build: `C:\rr6pgo\gen122` (generate, `-DBANJO_PGO_DIR_IN_PLACE=C:/rr6pgo/profile122`),
+a 560 s Ryujinx session (`config.toml`'s `input_script = "52:START,84:A,94:A,104:A,122:DOWN,127:DOWN,132:A,142:A,152:A,
+162:A,172:A,182:A,192:A,215:A,225:A,235:A,245:A,255:A,265:A,280:RT@240"`, the `game_opus_test` folder for the Opus music
+and the H.265 opening, the release DKSH cache; window pictures every 15 s showed World Xplorer's first race, Harborline
+765, from about 400 s: a hold such as `RT@240` blocks the presses after it, so the last A must come before it, and the
+game takes no input during its movies), `tools/pgo_merge.py C:/rr6pgo/streams122 C:/rr6pgo/profile122
+--gen-build C:/rr6pgo/gen122/renut.nro` (403 .gcda, copied to `pgo-inplace/`), then `C:\rr6pgo\lto122` (use + LTO, the
+same `BANJO_PGO_DIR_IN_PLACE`).
+
+Since 2026-11-22 (the user: "compile them and extract them in browser like banjo") the released NRO carries no game
+shader: rr6-nx-installer makes them from the player's `default.xex` (its `lib/shaders.js`). The release shader table:
+`python tools/renut_release_shaders.py --glsl out/deko3d_shaders_ult/glsl_opt --cache
+app/out/renut_switch_ult/shader_cache_switch.cpp --out app/out/renut_switch_ult_release` (the table without SPIR-V; its
+`sd/deko3d_glsl.bin` is the version 1 package for tests, game data, never distributed). The build: the LTO folder
+reconfigured with `-DBANJO_RENUT_SHADER_DIR=app/out/renut_switch_ult_release -DBANJO_RENUT_RELEASE_SHADERS=ON` (no GLSL
+package built in; the same PGO profile), `C:\rr6pgo\lto122` on 2026-11-22: `out/final_2026-11-22/rr6-nx_release.nro`.
+The installer's `release/variants.txt`: `tools/deko3d_variant_cache.py` with the cache's own arguments (`--generic
+--plain-guess app/out/renut_switch_ult/shader_cache_switch.cpp --sasrt-guess --round-guess --earlykill-ab`, the lists
+and run-time logs) plus `--export-variants out/browser_shaders/variants.txt --dry-run`; then the installer's
+`tools/make_release.py --nro <the NRO>` and `node test/shaders_node.mjs <game> --reference`. After a change to the
+translator (`app/thirdparty/reblue-XenosRecomp`) or the Python passes, rebuild the installer's `wasm/renut_hlsl` and run
+its `tools/sync_from_base.py --base <rr6-nx>`: its shaders must be this tree's.
+
 Keep the build folders' and the profile's paths free of spaces (GCC's parallel LTO link writes a makefile with them
 unquoted; 1.0.0 used `C:\rr6pgo\gen`, `C:\rr6pgo\lto` and `C:\rr6pgo\profile`, 1.0.1 the same names with `101`
 added), and never run two of these builds at

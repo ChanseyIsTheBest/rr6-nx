@@ -7,6 +7,7 @@
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/system/flags.h>  // the language key (sdk xam_user.cpp)
 #include <rex/logging.h>
 #include <rex/platform.h>
 
@@ -15,10 +16,9 @@
 #endif
 
 REXCVAR_DECLARE(uint32_t, user_language);  // sdk xam_user.cpp
-REXCVAR_DEFINE_STRING(language, "auto", "RR6",
-                      "The game's language: auto (the Switch's system language; English elsewhere, and when the game "
-                      "has no text for it), english, japanese, french, german, spanish or italian")
-    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// rr6-nx (2026-11-22, the sync with the ultimate base): the language key is the base's now (sdk xam_user.cpp, port 177:
+// "System" or a name, read by EffectiveLanguage for XGetLanguage; it takes RR6's values too: "auto" counts as the
+// console's, the names in any case). ApplyLanguage below still sets user_language from it.
 
 namespace rr6 {
 
@@ -87,11 +87,3 @@ void ApplyLanguage() {
 }
 
 }  // namespace rr6
-
-// rr6-nx (2026-11-21, the game menu from the ultimate base: game_menu.cpp asks it for the menu's own language): the
-// language the game is told, user_language as ApplyLanguage set it (the base's own, from its xam_user.cpp, is not
-// in rr6-nx: RR6 keeps its own language key).
-#include <rex/system/flags.h>
-namespace rex::system {
-uint32_t EffectiveLanguage() { return REXCVAR_GET(user_language); }
-}  // namespace rex::system

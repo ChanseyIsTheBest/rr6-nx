@@ -916,6 +916,7 @@ void D3DResource_Destroy_hook(u32 resource) {
       ReleaseHostTextureLocked(resource);
       ReleaseGuestShaderLocked(resource);
     });
+    ForgetInPlaceShader(resource);  // blur-nx (2026-11-13, #13's fix): after the item above is queued
     DestroyGuestResource(resource);
     return;
   }

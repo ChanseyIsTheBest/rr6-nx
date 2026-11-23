@@ -21,8 +21,17 @@ PLAYER_KEYS = ('language', 'banjo_renut_smaa', 'msaa_level', 'input_rumble', 'rr
                'input_joycon_sideways', 'input_joycon_sideways_stick')  # rumble and the DLC: the user, 2026-11-10
 PLAYER_TABLES = ('input_p1', 'input_p2')
 # The final build's own values over the play toml's (the user, 2026-11-10: "no logging enabled besides crash logs"): with
-# every level off no log file is made, and the crash handler still writes logs/rex/rex_crash.log (sdk logging.cpp).
-FINAL = {'log_level': '"off"'}
+# every level off no log file is made, and the crash handler still writes logs/rex/rex_crash.log (sdk logging.cpp). The
+# SDK's stack sampler and the stall watchdog write files of their own, so they are off here as well (1.0.2).
+# rr6-nx (2026-11-22, the user: "Actually let ridge racer use 4 cores"): four-core mode, the NPDM for Ridge Racer 6's
+# forwarder (its program id; the game writes sdmc:/atmosphere/contents/<id>/exefs/main.npdm, the forwarder's next
+# launch has CPU 0-3; four_core_mode, the game menu's row, removes it again).
+FINAL = {'log_level': ('"off"', 'the final build: no logs but the crash logs (rex_crash.log)'),
+         'banjo_forwarder_program_id': ('"050C558A3DE72000"', "Ridge Racer 6's forwarder: four cores (the user, 2026-11-22)"),
+         # rr6-nx 1.0.2 (2026-11-23, the user: "make sure logging is off"): 1.0.0-1.0.2's play set had these two on,
+         # and each writes a file with every log level off (logs/rex/rex_profile.log, logs/rex/banjo_profiler.log).
+         'switch_profile_stacks': ('false', 'the release: no stack sampler, no rex_profile.log (the user, 2026-11-23)'),
+         'banjo_stall_watch_seconds': ('0', 'the release: no stall watchdog, no banjo_profiler.log (the user, 2026-11-23)')}
 
 PLAYER_HEAD = '''# Ridge Racer 6 for the Nintendo Switch (rr6-nx): your options. Every other setting is built into the game.
 # Delete this file and the game writes it again at the next start.
@@ -79,8 +88,8 @@ def main():
     first = re.search(r'(?m)^\[', keep)
     top, rest = (keep[:first.start()], keep[first.start():]) if first else (keep, '')
     top = re.sub(r'(?m)^(%s)\s*=.*\n' % '|'.join(PLAYER_KEYS), '', top)
-    for k, v in FINAL.items():
-        top, n = re.subn(r'(?m)^%s\s*=.*$' % k, f'{k} = {v}  # the final build: no logs but the crash logs (rex_crash.log)', top)
+    for k, (v, note) in FINAL.items():
+        top, n = re.subn(r'(?m)^%s\s*=.*$' % k, f'{k} = {v}  # {note}', top)
         assert n == 1, k
     defaults = ('# rr6-nx: the Switch build\'s fixed settings, compiled into the NRO (RR6_BUILTIN_CONFIG=ON); the player\'s are '
                 'in config.toml\n# (app/rr6_switch.toml). Made by tools/make_rr6_builtin.py from ' +
@@ -102,7 +111,7 @@ def main():
     merged = {**d, **p}
     for k, v in values.items():
         if k in FINAL:
-            assert merged.get(k) == tomllib.loads(f'x = {FINAL[k]}')['x'], k
+            assert merged.get(k) == tomllib.loads(f'x = {FINAL[k][0]}')['x'], k
             continue
         assert merged.get(k) == v, f'{k}: {merged.get(k)!r} against the play toml\'s {v!r}'
     open(os.path.join(ROOT, 'app', 'rr6_switch_defaults.toml'), 'w', encoding='utf-8', newline='\n').write(defaults)

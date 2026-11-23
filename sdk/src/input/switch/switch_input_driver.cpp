@@ -12,12 +12,16 @@
 #include <array>
 #include <bit>
 #include <cctype>
+#include <cmath>  // port 195: input_stick_deadzone
 #include <chrono>  // sasrt-nx (2026-11-03, input_switch_disconnect_grace_ms; port 52)
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <string>
 #include <tuple>
+#include <atomic>
+#include <condition_variable>  // blur-nx (2026-11-17, audit #6): the rumble thread
+#include <mutex>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -97,6 +101,13 @@ REXCVAR_DEFINE_BOOL(input_joycon_sideways_stick, true, "Input",
 // sasrt-nx (2026-11-03; port 52): a pad HID reports absent for a moment (a Bluetooth hiccup, a style change) reached the
 // game as a disconnect at once, and Sonic Transformed stops a race for it about once a race; shipped games wait before
 // they say so.
+// renut-ultimate (2026-11-20, port 195): S4ep1-nx's of 2026-11-15 (github.com/FurryLilManChild/S4ep1-nx, GPL-3.0). The
+// driver passes the sticks through raw and the game applies its own dead zone; this adds one on top for worn sticks that
+// drift. Radial, rescaled so full tilt stays full. Read live. 0 (the default): the game's own only, as before.
+REXCVAR_DEFINE_INT32(input_stick_deadzone, 0, "Input",
+                     "The Switch's controllers: an extra stick dead zone in percent of full tilt (0 = none, the "
+                     "game's own only; 10 or 20 for drifting sticks). Radial, rescaled so full tilt stays full")
+    .range(0, 50);
 REXCVAR_DEFINE_INT32(input_switch_disconnect_grace_ms, 1000, "Input",
                      "A controller HID reports as not connected is kept, with its last state, for this long before "
                      "the game is told it is gone (a Bluetooth hiccup or a layout change clears in well under a "
@@ -439,6 +450,8 @@ struct SwitchInputDriver::Slot {
    * See DispatchMenuShortcuts.
    */
   uint64_t menu_shortcuts = 0;
+  // Port 206 (sims3-nx's): ZL and ZR seen during the current L+R hold (the two trigger shortcuts below).
+  uint64_t trigger_seen = 0;
 
   // Keystroke synthesis, per pad rather than per guest user.
   uint64_t key_buttons = 0;
@@ -463,6 +476,148 @@ struct SwitchInputDriver::Slot {
   uint16_t vibration_right = 0;
 };
 
+// blur-nx (2026-11-17, the Renut audit's #6, input_switch_rumble_thread): hidSendVibrationValues is an IPC request to
+// the HID service that blocks its caller; Blur's race had it at 0.46 % of the Game Master (the frame's critical thread),
+// the game changing the rumble every few frames. With the key on, SetDeviceVibration hands the latest values of each
+// pad to this thread, which sends them: the same values in the same order per pad, a little later (well within a
+// frame). A send that fails is retried by the game thread's next call, as before (TakeFailed).
+REXCVAR_DEFINE_BOOL(input_switch_rumble_thread, true, "Input",
+                    "blur-nx (the Renut audit's #6): rumble values go to the controller from a background thread, not "
+                    "from the game thread that set them (an IPC request that blocks: 0.46 % of Blur's Game Master). "
+                    "false: sent on the game thread, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+namespace {
+class RumbleSender {
+ public:
+  static constexpr size_t kKeys = 9;  // npads No1-No8, then handheld
+  static size_t KeyOf(HidNpadIdType id) { return id == HidNpadIdType_Handheld ? 8 : size_t(id) & 7; }
+
+  // false: the rumble thread is not running (the caller sends the values itself).
+  bool Post(HidNpadIdType id, const HidVibrationDeviceHandle* handles, int count,
+            const std::array<HidVibrationValue, 2>& values) {
+    const size_t k = KeyOf(id);
+    bool wake;
+    {
+      std::lock_guard<std::mutex> lock(m_);
+      if (stopped_) return true;  // the driver's teardown: nothing more is sent
+      if (!started_) {
+        started_ = true;
+        // A libnx thread: std::thread is not implemented on Horizon (std::system_error "Function not implemented",
+        // batch 3's first console run, 2026-11-17 12:48). Priority 0x3B, the game threads' and the lowest this
+        // process may use (0x3C was refused: the second run fell back to the game thread); the process's default
+        // core, a 32 KiB stack; never joined (the sender lives as long as the process). It sleeps in its condition
+        // variable or in the HID request, so it takes little of the game threads' time slices.
+        Result rc = threadCreate(&thread_, &RumbleSender::Entry, this, nullptr, 0x8000, 0x3B, -2);
+        if (R_SUCCEEDED(rc)) rc = threadStart(&thread_);
+        if (R_FAILED(rc)) {
+          failed_start_ = true;
+          static uint32_t logged = 0;
+          if (logged++ < 4)
+            REXLOG_WARN("input: the rumble thread could not start (0x{:X}): rumble sent from the game thread",
+                        unsigned(rc));
+        } else {
+          REXLOG_INFO("input: rumble thread started (input_switch_rumble_thread)");
+        }
+      }
+      if (failed_start_) return false;
+      Request& r = req_[k];
+      std::copy(handles, handles + count, r.handles.begin());
+      r.count = count;
+      r.values = values;
+      r.pending = true;
+      wake = waiting_;
+    }
+    if (wake) cv_.notify_one();
+    return true;
+  }
+
+  // The last send for this pad failed: the game thread sends its next value even if unchanged.
+  bool TakeFailed(HidNpadIdType id) { return failed_[KeyOf(id)].exchange(false, std::memory_order_relaxed); }
+
+  // Nothing is sent after this returns (the driver's teardown stops the pads itself).
+  void Stop() {
+    std::unique_lock<std::mutex> lock(m_);
+    stopped_ = true;
+    for (Request& r : req_) r.pending = false;
+    idle_cv_.wait(lock, [this] { return !sending_; });
+  }
+
+ private:
+  struct Request {
+    std::array<HidVibrationDeviceHandle, 2> handles{};
+    int count = 0;
+    std::array<HidVibrationValue, 2> values{};
+    bool pending = false;
+  };
+
+  bool Started() const { return !failed_start_; }
+
+  static void Entry(void* self) { static_cast<RumbleSender*>(self)->Main(); }
+
+  void Main() {
+    std::array<Request, kKeys> todo;
+    for (;;) {
+      size_t n = 0;
+      {
+        std::unique_lock<std::mutex> lock(m_);
+        waiting_ = true;
+        cv_.wait(lock, [this] {
+          if (stopped_) return true;
+          for (const Request& r : req_)
+            if (r.pending) return true;
+          return false;
+        });
+        waiting_ = false;
+        if (stopped_) return;
+        for (size_t k = 0; k < kKeys; ++k) {
+          if (req_[k].pending) {
+            todo[k] = req_[k];
+            req_[k].pending = false;
+            ++n;
+          } else {
+            todo[k].pending = false;
+          }
+        }
+        sending_ = true;
+      }
+      for (size_t k = 0; k < kKeys; ++k) {
+        if (!todo[k].pending) continue;
+        if (R_FAILED(hidSendVibrationValues(todo[k].handles.data(), todo[k].values.data(), todo[k].count))) {
+          failed_[k].store(true, std::memory_order_relaxed);
+          static uint32_t failures = 0;
+          if (failures++ < 4) REXLOG_WARN("input: rumble send failed on the rumble thread (pad key {})", k);
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(m_);
+        sending_ = false;
+      }
+      idle_cv_.notify_all();
+      (void)n;
+    }
+  }
+
+  std::mutex m_;
+  std::condition_variable cv_, idle_cv_;
+  std::array<Request, kKeys> req_{};
+  std::array<std::atomic<bool>, kKeys> failed_{};
+  bool started_ = false, waiting_ = false, sending_ = false, stopped_ = false;
+  bool failed_start_ = false;  // the thread could not start: the game thread sends (RumbleThreadOn's caller checks)
+  Thread thread_{};
+};
+
+RumbleSender& Rumble() {
+  static RumbleSender* sender = new RumbleSender;  // never destroyed: its thread is detached
+  return *sender;
+}
+
+bool RumbleThreadOn() {
+  static const bool on = REXCVAR_GET(input_switch_rumble_thread);
+  return on;
+}
+}  // namespace
+
 SwitchInputDriver::SwitchInputDriver(rex::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order) {}
 
@@ -472,6 +627,8 @@ SwitchInputDriver::~SwitchInputDriver() {
   }
   // XInput vibration holds until changed, so a pad left rumbling would keep
   // rumbling after the process exits.
+  if (RumbleThreadOn())
+    Rumble().Stop();  // blur-nx (2026-11-17, audit #6): nothing of the thread's after the stops below
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto& slot : slots_) {
     if (slot && slot->vibration_count) {
@@ -737,6 +894,21 @@ void SwitchInputDriver::Poll(size_t index) {
   gamepad.left_trigger = (held & table.left_trigger) ? 0xFF : 0;
   gamepad.right_trigger = (held & table.right_trigger) ? 0xFF : 0;
   // HID reports up as positive Y, like XInput, so no inversion is needed.
+  if (const int32_t dz = REXCVAR_GET(input_stick_deadzone); dz > 0) {  // port 195
+    auto apply = [dz](HidAnalogStickState& st) {
+      const float len = std::sqrt(float(st.x) * float(st.x) + float(st.y) * float(st.y));
+      const float inner = 32767.0f * float(dz) / 100.0f;
+      if (len <= inner) {
+        st = HidAnalogStickState{};
+        return;
+      }
+      const float out = std::min(32767.0f, (len - inner) * 32767.0f / (32767.0f - inner));
+      st.x = s32(float(st.x) * out / len);
+      st.y = s32(float(st.y) * out / len);
+    };
+    apply(left);
+    apply(right);
+  }
   gamepad.thumb_lx = ClampStickAxis(left.x);
   gamepad.thumb_ly = ClampStickAxis(left.y);
   gamepad.thumb_rx = ClampStickAxis(right.x);
@@ -824,37 +996,32 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
   }
 
   /*
-   * L+R+ZL starts the A/B test lap (switch_perf.cpp). It sends no key to the
-   * game: it talks directly to the profiler. It is kept apart from the loop
-   * above because that one translates buttons into keys and this is not a key.
+   * L+R+ZL starts the A/B test lap (switch_perf.cpp; it talks to the profiler, no key to the game); L+R+ZR opens the
+   * system's controller applet (connect a second controller, change the player order, split a Joy-Con pair; on the UI
+   * thread, like the menus). renut-ultimate (2026-11-20, port 206; sims3-nx's): both fire when the trigger is let go,
+   * and only if the other trigger was not pressed during the same L+R hold. L+R+ZL+ZR (LB+RB+LT+RT) is a game's own
+   * combination in some titles (The Sims 3's cheats) and now reaches the game without opening anything.
    */
-  const uint64_t kBitAb = uint64_t(1) << 8;
-  const bool ab_now = modifier && (held & HidNpadButton_ZL) != 0;
-  const bool ab_before = (slot.menu_shortcuts & kBitAb) != 0;
-  if (ab_now && !ab_before) {
-    RexSwitchPerfToggleAb();
-    REXLOG_INFO("menu shortcut: GPU A/B tests");
-  }
-  slot.menu_shortcuts = ab_now ? (slot.menu_shortcuts | kBitAb)
-                                 : (slot.menu_shortcuts & ~kBitAb);
-
-  /*
-   * L+R+ZR opens the system's controller applet: connect a second controller, change the player order, or split a
-   * Joy-Con pair into two sideways Joy-Cons for two players. On the UI thread, like the menus (it blocks until the
-   * player closes it).
-   */
-  const uint64_t kBitApplet = uint64_t(1) << 9;
-  const bool applet_now = modifier && (held & HidNpadButton_ZR) != 0;
-  const bool applet_before = (slot.menu_shortcuts & kBitApplet) != 0;
-  if (applet_now && !applet_before) {
-    REXLOG_INFO("menu shortcut: controllers");
-    auto show = [this] { ShowControllerApplet(); };
-    rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
-    if (!window || !window->app_context().CallInUIThread(show)) {
-      show();
+  constexpr uint64_t kTriggers = HidNpadButton_ZL | HidNpadButton_ZR;
+  const uint64_t triggers = held & kTriggers;
+  if (modifier) slot.trigger_seen |= triggers;
+  if (!triggers && slot.trigger_seen) {
+    const uint64_t seen = slot.trigger_seen;
+    slot.trigger_seen = 0;
+    if (seen == HidNpadButton_ZL) {
+      RexSwitchPerfToggleAb();
+      REXLOG_INFO("menu shortcut: GPU A/B tests");
+    } else if (seen == HidNpadButton_ZR) {
+      REXLOG_INFO("menu shortcut: controllers");
+      auto show = [this] { ShowControllerApplet(); };
+      rex::ui::Window* const window = window_ui_.load(std::memory_order_acquire);
+      if (!window || !window->app_context().CallInUIThread(show)) {
+        show();
+      }
+    } else {
+      REXLOG_INFO("menu shortcut: none (L+R+ZL+ZR goes to the game)");
     }
   }
-  slot.menu_shortcuts = applet_now ? (slot.menu_shortcuts | kBitApplet) : (slot.menu_shortcuts & ~kBitApplet);
 
   /*
    * blur-nx (2026-11-18, the user: "an imgui overlay opened up with the button combination of A+B+X+Y+L+R and closed
@@ -1084,6 +1251,9 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
   // See the vibration_sent comment in Slot: same value as the last one sent, nothing to do.
   const uint16_t left = uint16_t(vibration->left_motor_speed);
   const uint16_t right = uint16_t(vibration->right_motor_speed);
+  // blur-nx (2026-11-17, audit #6): a send the rumble thread could not make is made again.
+  if (RumbleThreadOn() && Rumble().TakeFailed(npad_id))
+    slot->vibration_sent = false;
   if (slot->vibration_sent && slot->vibration_left == left &&
       slot->vibration_right == right) {
     return X_ERROR_SUCCESS;
@@ -1097,7 +1267,9 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
   value.amp_high = float(uint16_t(vibration->right_motor_speed)) / 65535.0f;
   value.freq_high = 320.0f;
   std::array<HidVibrationValue, 2> values = {value, value};
-  if (const Result rc = hidSendVibrationValues(slot->vibration_handles.data(), values.data(), slot->vibration_count);
+  if (RumbleThreadOn() &&  // blur-nx (2026-11-17, audit #6): sent by the rumble thread when it runs
+      Rumble().Post(npad_id, slot->vibration_handles.data(), slot->vibration_count, values)) {
+  } else if (const Result rc = hidSendVibrationValues(slot->vibration_handles.data(), values.data(), slot->vibration_count);
       R_FAILED(rc)) {
     slot->vibration_sent = false;  // retried on the next call
     static uint32_t send_failures = 0;  // renut-ultimate (2026-11-10)

@@ -37,6 +37,9 @@ void RegisterMenuRows();  // rr6_menu_rows.cpp (2026-11-21): RR6's rows on the m
 #if defined(RR6_BUILTIN_CONFIG)
 #include "rr6_builtin_config.h"  // generated from app/rr6_switch_defaults.toml and rr6_switch.toml (CMake)
 #endif
+namespace blur::small_alloc {
+void Enable();  // blur-nx (2026-11-17, #220; renut-ultimate port 151): src/blur_small_alloc.cpp, after setup
+}
 #include "native/nfsmw_nativo_captura.h"
 #if !REX_PLATFORM_SWITCH
 #include "profiler/nfsmw_perfil_pc.h"
@@ -63,6 +66,8 @@ void RexSwitchApmRequestGpuMhz(int mhz);  // sdk/src/ui/switch_apm.cpp
 void RexSwitchApmApply(void);
 }
 #endif
+
+extern "C" const char* RexAppBuildStamp(void);  // port 193 (TFU-nx's): src/build_stamp.cpp
 
 class RenutApp : public rex::ReXApp {
 public:
@@ -122,6 +127,7 @@ public:
         fps_dialog_ = std::make_unique<FpsOverlayDialog>(drawer);
         fps_dialog_->fpsManager = &fpsManager;
         fpsManager.showFPS = REXCVAR_GET(banjo_show_fps);  // banjo-nx (2026-10-21)
+        fpsManager.GetCreateCounter("Shown");  // port 196 (S4ep1-nx's): made here, before the display thread ticks it
         drawer->AddDialog(fps_dialog_.get());
         drawer->AddDialog(new RenuLogOverlayDialog(drawer));
         // CPU/GPU profiler window ported from UnleashedRecomp (F5 / banjo_show_profiler).
@@ -220,6 +226,10 @@ public:
 #endif
 
     void OnPostSetup() override {
+        REXLOG_INFO("[build] {}", RexAppBuildStamp());  // port 193 (TFU-nx's): ties this log to its build
+        // blur-nx (2026-11-17, #220; renut-ultimate port 151): the small-block arena, blur_small_alloc_mb (32 MB by
+        // default, Blur's size; 0 in a game's toml turns it off). Before the DLC install, as Blur has it.
+        blur::small_alloc::Enable();
         // katamari-nx (2026-10-31): DLC packages in the "dlc" folder next to the NRO / exe installed before the game
         // starts (reNut upstream's installer, renut_engine/dlc_install.cpp, as banjo-nx does).
         renut::dlc::InstallPackages(runtime());
@@ -295,7 +305,15 @@ public:
         std::function<void(rex::PathConfig)> resume) override
     {
         StartRenutRenderer();
-        if (!path_wizard_) {
+        // renut-ultimate (port 69, 2026-11-10, blur-nx): with no saved paths, a game folder given on the command line or
+        // in the toml (or the game_root next to the executable) that holds default.xex is used as given, with no wizard.
+        // Before, a new port's first PC run waited for a click on the path dialog, which looked like a hang right after
+        // the swapchain was made. Saved paths still come first, as the wizard takes them (a player's own folders).
+        std::error_code given_ec;
+        const bool given = !defaults.game_data_root.empty() &&
+                           std::filesystem::is_regular_file(defaults.game_data_root / "default.xex", given_ec) &&
+                           !PathConfigStore::TryLoad(app_name_);
+        if (!path_wizard_ || given) {
             // katamari-nx (2026-11-01): banjo_renderer = "emulated" creates no app dialogs (OnCreateDialogs), so no
             // wizard: the paths as given (the command line / the toml).
             renut::dlc::SetUserDataRoot(defaults.user_data_root);

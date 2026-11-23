@@ -118,6 +118,8 @@ struct State {
     std::set<std::pair<size_t, size_t>> view_mapped;
 
     size_t   committed = 0;
+    /* sasrt-nx (2026-11-09 night, RexGmDecommitFigures): bytes decommits asked for, and those they freed. */
+    size_t   decommit_asked = 0, decommit_freed = 0;
     size_t   mapped = 0;
     uint32_t last_result = 0;
 };
@@ -717,6 +719,15 @@ bool RexGmFaultIn(uint64_t window_address) {
     return MapChunkIntoViewPagewise(s, vi, *c);  /* port 56: mk9-nx's fallback */
 }
 
+void RexGmDecommitFigures(size_t* committed, size_t* chunks, size_t* asked, size_t* freed) {
+    State& s = S();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    *committed = s.committed;
+    *chunks = s.chunks.size();
+    *asked = s.decommit_asked;
+    *freed = s.decommit_freed;
+}
+
 bool RexGmDecommit(size_t offset, size_t length) {
     State& s = S();
     std::lock_guard<std::mutex> lock(s.mutex);
@@ -724,6 +735,7 @@ bool RexGmDecommit(size_t offset, size_t length) {
 
     const size_t begin = AlignDown(offset, kPageSize);
     const size_t end   = AlignUp(offset + length, kPageSize);
+    s.decommit_asked += end - begin;  /* sasrt-nx (2026-11-09 night) */
 
     for (auto it = s.chunks.begin(); it != s.chunks.end();) {
         const Chunk c = it->second;
@@ -736,6 +748,7 @@ bool RexGmDecommit(size_t offset, size_t length) {
             UnmapChunkFromViews(s, c);
             ReleaseChunk(c);
             s.committed -= c.length;
+            s.decommit_freed += c.length;  /* sasrt-nx (2026-11-09 night) */
             it = s.chunks.erase(it);
         } else {
             ++it;

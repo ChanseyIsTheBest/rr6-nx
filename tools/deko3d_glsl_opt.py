@@ -1218,6 +1218,7 @@ def pass_plainfetch(text):
     that draw anyway."""
     if 'SPIRV_CROSS_CONSTANT_ID_926' in text or '>> 16u) & 15u;' not in text:
         return text
+    is_vertex = re.search(r'\bgl_Position\b', text) is not None  # vivapinata-nx (2026-11-12): vertex shaders too
     edits = []
     for m in _PF_BLOCK.finditer(text):
         b, x, y, p, e = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
@@ -1237,12 +1238,100 @@ def pass_plainfetch(text):
         # fetch's dimension, bytes 0-383) for the exponent
         if sb != gb or not 384 <= sb < 512 or eb >= 384 or eb % 128 != 4 * r:
             continue
-        edits.append((m.end(), f'\n    {b} = {b} && ((g_sasrtPlainFetch >> {r}u) & 1u) == 0u;'))
+        # vivapinata-nx (2026-11-12, A/B 150): a samplerk read (its line after SK_MARK) skips its block only with 975
+        gate = f'((g_sasrtPlainFetch >> {r}u) & 1u) == 0u'
+        # 2026-11-12: and every fetch of a vertex shader (926 says the vertex shader's fetches too only since the shader
+        # round, render/draw.cpp SasrtPlainFetchMask's vs_entry)
+        if text[:ms.start()].rstrip().endswith(SK_MARK) or is_vertex:
+            gate = f'(!g_vivaRound || {gate})'
+        edits.append((m.end(), f'\n    {b} = {b} && {gate};'))
     if not edits:
         return text
     for at, code in reversed(edits):
         text = text[:at] + code + text[at:]
-    return insert_globals(text, PLAINFETCH_DECL)
+    text = insert_globals(text, PLAINFETCH_DECL)
+    return with_viva_round(text) if '(!g_vivaRound || ' in text else text
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: fetchconv — a fetch's sign, gamma and exponent words as constants of the draw (sasrt-nx, 2026-11-09, the fifth GPU
+# round: sasrt_gpu_fetch_conversion_spec, constants 950-957)
+
+_FC_SIGNS = re.compile(r'^(\s*uint (_\d+) = )(\(g_UboShared\.v\[(2[4-5])u\]\.([xyzw]) >> 16u\) & 15u);$', re.M)
+_FC_GAMMA = re.compile(r'^(\s*uint (_\d+) = )(\(g_UboShared\.v\[(2[4-5])u\]\.([xyzw]) >> 13u\) & 7u);$', re.M)
+_FC_EXP = re.compile(r'^(\s*int (_\d+) = )(int\(g_UboShared\.v\[([0-1])u\]\.([xyzw]) << 6u\) >> 26);$', re.M)
+# sasrt-nx (2026-11-09, sasrt_gpu_fetch_exp_3d_spec): the 3D (v[8 + r / 4]) and cube (v[16 + r / 4]) words' exponent
+_FC_EXP3 = re.compile(r'^(\s*int (_\d+) = )(int\(g_UboShared\.v\[(8|9|16|17)u\]\.([xyzw]) << 6u\) >> 26);$', re.M)
+
+
+def _fc_decl(r):
+    return (f'#ifndef SPIRV_CROSS_CONSTANT_ID_{950 + r}\n#define SPIRV_CROSS_CONSTANT_ID_{950 + r} 0u\n#endif\n'
+            f'const uint g_sasrtConv{r} = SPIRV_CROSS_CONSTANT_ID_{950 + r};\n'
+            f'const bool g_sasrtConvKnown{r} = (g_sasrtConv{r} >> 15u) != 0u;\n')
+
+
+def pass_fetchconv(text):
+    """Renut's fetch code reads fetch constant r's signs (sampler_indices[r] bits 16-19: v[24 + r / 4]), gamma (bits 13-15)
+    and, for a 2D fetch, the exponent adjust (texture_indices[0][r] bits 20-25: v[r / 4]), and applies each to each
+    channel through selects among the conversions: every conversion is computed for every channel where any applies.
+    Constant 950 + r (fetch constant r < 8; render/draw.cpp SasrtSpecWordsOf [12]-[15]): bit 15 set, the draw's three
+    words in bits 0-3, 4-6 and 7-12; each read of them becomes the constant, so the selects fold to the conversions this
+    draw's texture has on the channels that have them, and the block's condition to false where none (as pass plainfetch,
+    which it runs after). Default 0: each read as it was. Same values: the same pixels."""
+    if 'SPIRV_CROSS_CONSTANT_ID_950' in text or '>> 16u) & 15u;' not in text:
+        return text
+    used = set()
+
+    def slot(m, base):
+        return (int(m.group(4)) - base) * 4 + 'xyzw'.index(m.group(5))
+
+    def signs(m):
+        r = slot(m, 24)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? (g_sasrtConv{r} & 15u) : ({m.group(3)});'
+
+    def gamma(m):
+        r = slot(m, 24)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? ((g_sasrtConv{r} >> 4u) & 7u) : ({m.group(3)});'
+
+    def exp(m):
+        r = slot(m, 0)
+        if r >= 8:
+            return m.group(0)
+        used.add(r)
+        return f'{m.group(1)}g_sasrtConvKnown{r} ? (int(g_sasrtConv{r} << 19u) >> 26) : ({m.group(3)});'
+
+    used3 = set()
+
+    def exp3(m):
+        v = int(m.group(4))
+        cube = v >= 16
+        r = (v - (16 if cube else 8)) * 4 + 'xyzw'.index(m.group(5))
+        if r >= 8:
+            return m.group(0)
+        cid = (966 if cube else 958) + r
+        used3.add(cid)
+        return f'{m.group(1)}((g_sasrtExp{cid} >> 7u) != 0u) ? (int(g_sasrtExp{cid} << 26u) >> 26) : ({m.group(3)});'
+
+    text = _FC_SIGNS.sub(signs, text)
+    text = _FC_GAMMA.sub(gamma, text)
+    text = _FC_EXP.sub(exp, text)
+    text = _FC_EXP3.sub(exp3, text)
+    if not used and not used3:
+        return text
+    # vivapinata-nx (2026-11-12, A/B 150): a samplerk read (its line after SK_MARK) takes the known word only with 975
+    text, marked = re.subn(r'(' + re.escape(SK_MARK) + r'\n[ \t]*uint _\d+ = )g_sasrtConvKnown(\d+) \?',
+                           r'\1(g_vivaRound && g_sasrtConvKnown\2) ?', text)
+    decl = ''.join(_fc_decl(r) for r in sorted(used))
+    decl += ''.join(f'#ifndef SPIRV_CROSS_CONSTANT_ID_{c}\n#define SPIRV_CROSS_CONSTANT_ID_{c} 0u\n#endif\n'
+                    f'const uint g_sasrtExp{c} = SPIRV_CROSS_CONSTANT_ID_{c};\n' for c in sorted(used3))
+    text = insert_globals(text, decl)
+    return with_viva_round(text) if marked else text
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1348,10 +1437,288 @@ def pass_onex(text):
         a, b = main_span(text)
         text = text[:a] + text[a:b].replace(SCALE_WORD, f'(g_sasrtOneX ? 1.0 : {SCALE_WORD})') + text[b:]
     onex = 'const bool g_sasrtOneX = (g_sasrtPlainFetch >> 31u) != 0u;\n'
+    # vivapinata-nx (2026-11-12): in a vertex shader only with constant 975 too (bit 31 says the vertex shader's words
+    # are at scale code 0 only since the shader round, render/draw.cpp SasrtPlainFetchMask's vs_entry; A/B 150)
+    vertex = re.search(r'\bgl_Position\b', text) is not None
+    if vertex:
+        onex = 'const bool g_sasrtOneX = ((g_sasrtPlainFetch >> 31u) != 0u) && g_vivaRound;\n'
     anchor = 'const uint g_sasrtPlainFetch = SPIRV_CROSS_CONSTANT_ID_926;\n'
     if anchor in text:  # the plainfetch pass's declaration: after it
-        return text.replace(anchor, anchor + onex, 1)
-    return insert_globals(text, PLAINFETCH_DECL + onex)
+        text = text.replace(anchor, anchor + onex, 1)
+    else:
+        text = insert_globals(text, PLAINFETCH_DECL + onex)
+    return with_viva_round(text) if vertex else text
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: onexsize — a fetch's texel step at 1x without its float round trip (vivapinata-nx, 2026-11-12, the shader round)
+# A fetch with a texel offset divides the offset by the texture's size at the draw's scale, written
+# `vec2(uvec2(roundEven(vec2(uvec2(SIZE)) / vec2(CHAIN))))`, CHAIN the seven-way select of the scale factor on the texture
+# word's scale code V. Where pass onex made V `g_sasrtOneX ? 0u : (...)`, the draws with constant 926's bit 31 have V = 0,
+# so CHAIN is 1.0 (every arm compares V with a code of 1 or more; checked by evaluating it), x / 1.0 is x, x = float(u)
+# is integral so roundEven(x) is x, and float(uint(float(u))) is float(u) for every u (float(u) is integral and at most
+# 2^32, where the conversion back saturates to 2^32 - 1, whose float is 2^32 again). So the whole is vec2(uvec2(SIZE))
+# in those draws: `(g_sasrtOneX ? vec2(uvec2(SIZE)) : <as it was>)`. Two conversions and a round a component (305 pixel
+# shaders, 1,029 places). Without bit 31 the expression is as it was.
+
+def _paren_end(t, i):
+    """The index after the parenthesis that closes the one at t[i] == '(' (-1 if none)."""
+    depth = 0
+    for k in range(i, len(t)):
+        c = t[k]
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return k + 1
+    return -1
+
+
+def _top_args(t):
+    """t's top-level comma-separated parts."""
+    parts, depth, start = [], 0, 0
+    for k, c in enumerate(t):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            parts.append(t[start:k].strip())
+            start = k + 1
+    parts.append(t[start:].strip())
+    return parts
+
+
+def _strip_parens(t):
+    t = t.strip()
+    while t.startswith('(') and _paren_end(t, 0) == len(t):
+        t = t[1:-1].strip()
+    return t
+
+
+def _scale_chain_at_zero(t, var):
+    """The value of a dk_sel chain on `var` when var is 0, as its text, or None if it is not such a chain."""
+    t = _strip_parens(t)
+    while t.startswith('dk_sel('):
+        if _paren_end(t, 6) != len(t):
+            return None
+        args = _top_args(t[7:-1])
+        if len(args) != 3:
+            return None
+        m = re.fullmatch(r'\((_\d+) == (\d+)u\)', args[0])
+        if not m or m.group(1) != var or int(m.group(2)) == 0:
+            return None
+        t = _strip_parens(args[2])  # var == 0: the condition is false
+    return t
+
+
+_OS_HEAD = 'vec2(uvec2(roundEven(vec2(uvec2('
+
+
+def pass_onexsize(text):
+    if 'g_sasrtOneX' not in text or _OS_HEAD not in text:
+        return text
+    out, i, done = [], 0, 0
+    while True:
+        j = text.find(_OS_HEAD, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        end = _paren_end(text, j + 4)  # the outer vec2(...)
+        inner = j + len('vec2(uvec2(roundEven(')
+        size_end = _paren_end(text, inner + 4)  # vec2(uvec2(SIZE))
+        ok = end > 0 and size_end > 0
+        if ok:
+            size = text[inner:size_end]
+            rest = text[size_end:end]
+            m = re.match(r' / vec2\(', rest)
+            ok = bool(m) and rest.endswith(')))')
+        if ok:
+            div_open = size_end + len(' / vec2')
+            div_end = _paren_end(text, div_open)
+            ok = div_end == end - 3  # `... / vec2(CHAIN)` then the roundEven's, uvec2's and vec2's closing
+        if ok:
+            chain = text[div_open + 1:div_end - 1]
+            mv = re.search(r'\((_\d+) == \d+u\)', chain)
+            ok = bool(mv) and _scale_chain_at_zero(chain, mv.group(1)) == '1.0' and re.search(
+                r'\buint ' + re.escape(mv.group(1)) + r' = g_sasrtOneX \? 0u : ', text) is not None
+        if not ok:
+            out.append(text[i:j + len(_OS_HEAD)])
+            i = j + len(_OS_HEAD)
+            continue
+        out.append(text[i:j] + f'((g_sasrtOneX && g_vivaRound) ? {size} : {text[j:end]})')  # 975: A/B 150
+        i = end
+        done += 1
+    return with_viva_round(''.join(out)) if done else text
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: noearly — Renut's early alpha test made optional, constant 976 (vivapinata-nx, 2026-11-12, the shader round;
+# A/B 151, render/draw.cpp vivapinata_shader_noearly)
+# The translator's early alpha test (tools/renut_early_alpha.py) computes the alpha ahead of the main body and discards a
+# quad whose four pixels all fail the alpha test by a margin; the main body's own test then discards each failing pixel.
+# It pays where whole quads fail often and the main body after it is long. After the shader round the grass shell's main
+# body is short: the test is 19 of its 80 instructions, run by every fragment, and saves about 40 for a quad it kills.
+# Constant 976 = 0 skips the block: every quad it would have killed is killed by the main body's test (each of its
+# pixels fails that test: the block fails a pixel only when it fails by the margin), and the block writes nothing the
+# rest reads (checked here: no assignment inside it to a name declared outside it), so the same pixels. Default 1: as
+# before. Which shaders gain is the console's answer (the A/B's items).
+NOEARLY_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_976\n#define SPIRV_CROSS_CONSTANT_ID_976 1u\n#endif\n'
+                'const bool g_vivaEarly = SPIRV_CROSS_CONSTANT_ID_976 != 0u;\n')
+
+
+def _noearly_keep():
+    """tools/noearly_keep.txt: the pixel shaders that keep the early test (the console's A/B 91, now 151, found them
+    slower without)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'noearly_keep.txt')
+    if not os.path.isfile(path):
+        return set()
+    return {l.split('#')[0].strip().upper() for l in open(path, encoding='utf-8') if l.split('#')[0].strip()}
+
+
+NOEARLY_KEEP = _noearly_keep()
+
+
+def pass_noearly(text, name=None):
+    if 'SPIRV_CROSS_CONSTANT_ID_976' in text:
+        return text
+    if name and name.upper().replace('PS_', '').replace('.GLSL', '') in NOEARLY_KEEP:
+        return text
+    found = list(EARLY_IF_RE.finditer(text))
+    if len(found) != 1:
+        return text
+    m = found[0]
+    open_i = text.index('{', m.end() - 1)
+    close_i = matching(text, open_i, '{', '}')
+    if close_i < 0:
+        return text
+    block = text[open_i:close_i + 1]
+    declared = set(re.findall(r'\b(?:float|int|uint|bool|[iub]?vec[234]|mat[234])\s+(_\d+)\b', block))
+    for name in re.findall(r'(?<![\w.])(_\d+)(?:\.[xyzw]+)?\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)', block):
+        if name not in declared:
+            return text  # the block assigns something outside it: skipping it would change what follows
+    cond_at = text.index('if (DK_ALPHA_FUNC != 7u)', m.start())
+    text = text[:cond_at] + 'if (DK_ALPHA_FUNC != 7u && g_vivaEarly)' + text[cond_at + len('if (DK_ALPHA_FUNC != 7u)'):]
+    return insert_globals(text, NOEARLY_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: earlykill — the final alpha test moved up to right after what it needs (vivapinata-nx, 2026-11-12, the shader
+# round; constant 977, A/B 152, render/draw.cpp vivapinata_shader_earlykill)
+# Renut's pixel shaders test alpha as their last statement, after all their colour arithmetic. A pixel the test discards
+# still runs that arithmetic, and a warp whose pixels all fail runs it for nothing. With 977 = 1 the top-level
+# statements of main() before the test are split in two: those the test needs (its operands, transitively), those that
+# fetch a texture, take a derivative, discard or write an output (they must run for every pixel the quad still has), and
+# those a staying statement reads, overwrites or writes after them, stay before it; the others (pure arithmetic only
+# the colour uses) move after it in their order. Moving pure statements past a discard changes nothing for the pixels
+# that survive it (the same operations on the same values, no derivative after the discard) and the test sees the
+# same values, so the same pixels. 977 = 0 (default): the test where it was, the statements in the new order (the same
+# values). The grass shell: its alpha kill at instruction 48 of 61 instead of 60; 98381523: 46 of 71 instead of 70.
+EARLYKILL_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_977\n#define SPIRV_CROSS_CONSTANT_ID_977 0u\n#endif\n'
+                  'const bool g_vivaKill = SPIRV_CROSS_CONSTANT_ID_977 != 0u;\n')
+_EK_TEST = re.compile(r'\n    float (_\d+) = uintBitsToFloat\(g_UboShared\.v\[34u\]\.z\);\n'
+                      r'    if \((!\(\(g_banjoAlphaFunc != 0u\) \? .*? : dk_alpha_pass\(g_UboShared\.v\[34u\]\.w, '
+                      r'(_\d+(?:\.[xyzw])?), \1\)\))\)\n    \{\n        discard;\n    \}\n')
+_EK_NAME = r'(?<![\w.])(_\d+)\b'
+_EK_WRITE = re.compile(r'(?<![\w.])(_\d+)(?:\.[xyzw]+|\[[^\]]*\])?\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)')
+_EK_DECL = re.compile(r'\b(?:float|int|uint|bool|[iub]?vec[234]|mat[234])\s+(_\d+)\b')
+_EK_INCR = re.compile(r'(?:\+\+|--)\s*(_\d+)|(_\d+)\s*(?:\+\+|--)')
+_EK_BARRIER = re.compile(r'\b(texture\w*|texelFetch\w*|textureSize|dFd\w+|fwidth\w*|interpolateAt\w+|image\w+|atomic\w+|'
+                         r'barrier|discard|return|out_var_\w+|gl_FragDepth|gl_SampleMask)\b')
+
+
+def _ek_units(body):
+    """main()'s top-level statements, each a list of lines; a compound statement (an if / else chain, a do-while, a
+    for, a block) with the attribute and comment lines before it is one."""
+    lines = body.split('\n')
+    units, cur, depth, i = [], [], 0, 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.strip()
+        cur.append(line)
+        depth += line.count('{') - line.count('}')
+        i += 1
+        if depth > 0:
+            continue
+        if not s or s.startswith('//') or s.startswith('SPIRV_CROSS_') or s.startswith('#'):
+            if s.startswith('#'):
+                units.append(cur)
+                cur = []
+            continue
+        if s.endswith('{') or re.match(r'^(if|for|while|do|switch)\b', s) or s == 'else':
+            if s.endswith(';'):
+                units.append(cur)
+                cur = []
+            continue
+        if s == '}' or s.startswith('} '):
+            j = i
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and re.match(r'^else\b', lines[j].strip()):
+                continue
+            units.append(cur)
+            cur = []
+            continue
+        if s.endswith(';'):
+            units.append(cur)
+            cur = []
+    if cur:
+        units.append(cur)
+    return units
+
+
+def pass_earlykill(text):
+    if 'SPIRV_CROSS_CONSTANT_ID_977' in text:
+        return text
+    span = main_span(text)
+    if not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    found = list(_EK_TEST.finditer(body))
+    if len(found) != 1:
+        return text
+    m = found[0]
+    before, test, after = body[:m.start() + 1], body[m.start() + 1:m.end()], body[m.end():]
+    units = _ek_units(before.rstrip('\n'))
+    if sum(len(u) for u in units) != len(before.rstrip('\n').split('\n')):
+        return text  # the split lost or doubled a line: leave the shader as it is
+    info = []
+    for u in units:
+        ut = '\n'.join(u)
+        w = set(_EK_WRITE.findall(ut)) | set(_EK_DECL.findall(ut)) | {x or y for x, y in _EK_INCR.findall(ut)}
+        info.append((w, set(re.findall(_EK_NAME, ut)), bool(_EK_BARRIER.search(ut)) or ut.lstrip().startswith('#')))
+    n = len(units)
+    need = set(re.findall(_EK_NAME, m.group(2)))
+    stay = [inf[2] for inf in info]
+    changed = True
+    while changed:
+        changed = False
+        for k in range(n - 1, -1, -1):
+            if stay[k]:
+                continue
+            w, r, _ = info[k]
+            if w & need:
+                stay[k] = changed = True
+                continue
+            for j in range(k + 1, n):
+                if stay[j]:
+                    wj, rj, _ = info[j]
+                    if (w & rj) or (wj & r) or (wj & w):
+                        stay[k] = changed = True
+                        break
+    moved = [k for k in range(n) if not stay[k]]
+    if not moved:
+        return text
+    test_lines = test.rstrip('\n').split('\n')
+    gated = ['        ' + l[4:] if l.startswith('    ') else l for l in test_lines[1:]]
+    out = [l for k in range(n) if stay[k] for l in units[k]]
+    out += [test_lines[0], '    if (g_vivaKill)', '    {'] + gated + ['    }']
+    out += [l for k in moved for l in units[k]]
+    out += ['    if (!g_vivaKill)', '    {'] + gated + ['    }']
+    text = text[:a] + '\n'.join(out) + '\n' + after + text[b:]
+    return insert_globals(text, EARLYKILL_DECL)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -2407,6 +2774,48 @@ def pass_fetchspec(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# pass: samplerk — a fetch through the sampler after its fetch constant's (Xenos' sampler index + k) reads its signs and
+# gamma from the sampler word itself (vivapinata-nx, 2026-11-12, the shader round)
+# The translator writes a tfetch that names sampler index + k (the game's grass shell, PS 0F8483A3, samples fetch
+# constant 2 through `s2_SamplerDescriptorIndex + 1`) as `uint _a = g_UboShared.v[24u].z + 1u;` and takes the signs and
+# gamma from _a: `(_a >> 16u) & 15u`, `(_a >> 13u) & 7u`. Neither plainfetch nor fetchconv knows that form, so those
+# fetches kept their sign, gamma and exponent block in every variant (the grass shell: 226 instructions and 25 GPRs with
+# it, 80 and 12 without). On deko3d a sampler word is (slot << 20) | gamma << 16 | biased << 13 (render/draw.cpp
+# SamplerWord and BindingWords): its bits 0-12 are always 0, so adding k < 2^13 never carries into bit 13 and the two
+# fields of word + k are the word's own. Each such field read becomes the word's, the form both passes after it know.
+# Same values for every word the renderer writes; deko3d only (these passes are deko3d's).
+
+_SK_DEF = re.compile(r'^\s*uint (_\d+) = (g_UboShared\.v\[(2[4-9]|3[01])u\]\.[xyzw]) \+ (\d+)u;$', re.M)
+
+
+def pass_samplerk(text):
+    if not _SK_DEF.search(text):
+        return text
+    for m in list(_SK_DEF.finditer(text)):
+        name, word, k = m.group(1), m.group(2), int(m.group(4))
+        if not 0 < k < (1 << 13):
+            continue
+        for shift, mask in (('16u', '15u'), ('13u', '7u')):
+            # 2026-11-12 (A/B 150): each rewritten line after a marker line (SK_MARK), by which plainfetch and fetchconv
+            # make their folding of it depend on constant 975 (VIVAROUND_DECL)
+            text = re.sub(r'^([ \t]*)(uint _\d+ = )\(' + re.escape(name) + r' >> ' + shift + r'\) & ' + mask + ';$',
+                          lambda mm: f'{mm.group(1)}{SK_MARK}\n{mm.group(1)}{mm.group(2)}({word} >> {shift}) & {mask};',
+                          text, flags=re.M)
+    return text
+
+
+# vivapinata-nx (2026-11-12, A/B 150, render/draw.cpp vivapinata_shader_round): constant 975, 1 by default: the shader
+# round's passes act; 0 (the A/B's off half): their code does what it did before them, so one run measures them.
+SK_MARK = '// dk-samplerk'
+VIVAROUND_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_975\n#define SPIRV_CROSS_CONSTANT_ID_975 1u\n#endif\n'
+                  'const bool g_vivaRound = SPIRV_CROSS_CONSTANT_ID_975 != 0u;\n')
+
+
+def with_viva_round(text):
+    return text if 'SPIRV_CROSS_CONSTANT_ID_975' in text else insert_globals(text, VIVAROUND_DECL)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # pass: plainfetch — a fetch's sign, gamma and exponent code dropped where the draw's fetch words have none
 # (sasrt-nx, 2026-11-08, the GPU round after the move to the ultimate base: sasrt_gpu_plain_fetches, constant 926;
 # rr6-nx's copy of the same day: its console run with the ultimate renderer drew 4 ms a frame more on the GPU, the
@@ -2437,6 +2846,7 @@ def pass_plainfetch(text):
     that draw anyway."""
     if 'SPIRV_CROSS_CONSTANT_ID_926' in text or '>> 16u) & 15u;' not in text:
         return text
+    is_vertex = re.search(r'\bgl_Position\b', text) is not None  # vivapinata-nx (2026-11-12): vertex shaders too
     edits = []
     for m in _PF_BLOCK.finditer(text):
         b, x, y, p, e = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
@@ -2456,12 +2866,19 @@ def pass_plainfetch(text):
         # fetch's dimension, bytes 0-383) for the exponent
         if sb != gb or not 384 <= sb < 512 or eb >= 384 or eb % 128 != 4 * r:
             continue
-        edits.append((m.end(), f'\n    {b} = {b} && ((g_sasrtPlainFetch >> {r}u) & 1u) == 0u;'))
+        # vivapinata-nx (2026-11-12, A/B 150): a samplerk read (its line after SK_MARK) skips its block only with 975
+        gate = f'((g_sasrtPlainFetch >> {r}u) & 1u) == 0u'
+        # 2026-11-12: and every fetch of a vertex shader (926 says the vertex shader's fetches too only since the shader
+        # round, render/draw.cpp SasrtPlainFetchMask's vs_entry)
+        if text[:ms.start()].rstrip().endswith(SK_MARK) or is_vertex:
+            gate = f'(!g_vivaRound || {gate})'
+        edits.append((m.end(), f'\n    {b} = {b} && {gate};'))
     if not edits:
         return text
     for at, code in reversed(edits):
         text = text[:at] + code + text[at:]
-    return insert_globals(text, PLAINFETCH_DECL)
+    text = insert_globals(text, PLAINFETCH_DECL)
+    return with_viva_round(text) if '(!g_vivaRound || ' in text else text
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -2780,6 +3197,51 @@ def pass_clipspec(text):
     return insert_before_main(text, CLIPSPEC_DECL)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: invariant — `invariant gl_Position;` in every vertex shader (dishonored-nx, 2026-10-30, its dishonored_vs_invariant;
+# renut-ultimate port 100)
+# Unreal Engine 3 draws a depth pass, then colour passes with the depth test GEQUAL and no depth bias, each with a vertex
+# shader of its own. uam compiled each one's position arithmetic its own way (fused or not), so at a silhouette one
+# shader covered a pixel the other did not, and the pixel kept the clear and the later additive passes: bright,
+# object-coloured edges in Dishonored. The Xenos gives the same position to shaders that compute it the same way;
+# `invariant` makes uam do so too. dishonored-nx inserted the line when a shader was loaded; here the package holds it.
+def pass_invariant(text):
+    if 'invariant gl_Position' in text or not re.search(r'\bgl_Position\b', text):
+        return text
+    return insert_globals(text, 'invariant gl_Position;')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# pass: clamp7e3 — a 7e3 target's output clamped to the 7e3 range (dishonored-nx, 2026-10-31, dishonored_renut_clamp_7e3;
+# renut-ultimate port 106, constant 990)
+# The Xenos stores a 2_10_10_10_FLOAT colour (7e3: 3-bit exponent, 7-bit mantissa, no sign) clamped to 0..31.875 and its
+# 2-bit alpha to 0..1; Renut's host target is 16-bit float, which keeps a negative value or one far above the range (in
+# Dishonored: negative light passes made black walls, over-range highlights a washed-out frame). Constant 990 is a mask of
+# colour targets (render/draw.cpp sets bit i for a 7e3 target i with exponent bias 0): each such output is clamped, NaN
+# to 0, at every exit from main (after everything else writes it). 0 (default): nothing changes.
+CLAMP7E3_DECL = ('#ifndef SPIRV_CROSS_CONSTANT_ID_990\n#define SPIRV_CROSS_CONSTANT_ID_990 0u\n#endif\n'
+                 'const uint g_ult7e3 = SPIRV_CROSS_CONSTANT_ID_990;\n')
+CLAMP7E3_FN = ('vec4 dk_clamp7e3(vec4 c)\n{\n    c = mix(c, vec4(0.0), isnan(c));\n'
+               '    return vec4(clamp(c.xyz, vec3(0.0), vec3(31.875)), clamp(c.w, 0.0, 1.0));\n}\n\n')
+
+
+def pass_clamp7e3(text):
+    if 'SPIRV_CROSS_CONSTANT_ID_990' in text:
+        return text
+    outs = re.findall(r'layout\(location = (\d)\) out vec4 (out_var_SV_Target\d+)\s*;', text)
+    outs = [(int(i), name) for i, name in outs if int(i) < 4]
+    span = main_span(text)
+    if not outs or not span:
+        return text
+    a, b = span
+    body = text[a:b]
+    code = ''.join(f'if (((g_ult7e3 >> {i}u) & 1u) != 0u) {{ {name} = dk_clamp7e3({name}); }} ' for i, name in outs)
+    body = re.sub(r'(?<![\w.])return;', lambda m: '{ ' + code + 'return; }', body)
+    body = body.rstrip() + '\n    ' + code.rstrip() + '\n'
+    text = text[:a] + body + text[b:]
+    return insert_globals(insert_before_main(text, CLAMP7E3_FN), CLAMP7E3_DECL)
+
+
 PASSES = [
     ('scalecodes', pass_scalecodes),
     ('scale1', pass_scale1),
@@ -2811,9 +3273,13 @@ PASSES = [
     ('bonesel', pass_bonesel),
     ('aw4', pass_aw4),
     ('skinonce', pass_skinonce),
+    ('samplerk', pass_samplerk),  # vivapinata-nx (2026-11-12): the shader round, before plainfetch and fetchconv
     ('plainfetch', pass_plainfetch),  # sasrt-nx (2026-11-08): the GPU round, constant 926
     ('fetchconv', pass_fetchconv),  # sasrt-nx (2026-11-09): the fifth GPU round, constants 950-957
     ('onex', pass_onex),  # sasrt-nx (2026-11-08): the GPU round, constant 926 bit 31
+    ('onexsize', pass_onexsize),  # vivapinata-nx (2026-11-12): the shader round, after onex
+    ('noearly', pass_noearly),  # vivapinata-nx (2026-11-12): the shader round, constant 976 (A/B 151)
+    ('earlykill', pass_earlykill),  # vivapinata-nx (2026-11-12): the shader round, constant 977 (A/B 152)
     ('facesign', pass_facesign),  # sasrt-nx (2026-11-08): the GPU round, constant 928
     ('clipspec', pass_clipspec),  # sasrt-nx (2026-11-08): the second GPU round, constant 929
     ('nofxaa', pass_nofxaa),  # sasrt-nx (2026-11-08): sasrt_smaa_replaces_fxaa, constant 930
@@ -2824,14 +3290,20 @@ PASSES = [
     ('vskill', pass_vskill),  # vivapinata-nx (2026-11-03): last
     ('expwin', pass_expwin),  # sasrt-nx (2026-11-08): the fourth GPU round, constant 944
     ('expparts', pass_expparts),  # sasrt-nx (2026-11-09): an EXPERIMENT, constant 945 (0: as before)
+    ('clamp7e3', pass_clamp7e3),  # dishonored-nx (2026-10-31; port 106): constant 990, the last pixel pass
+    ('invariant', pass_invariant),  # dishonored-nx (2026-10-30; port 100): vertex shaders, no constant
 ]
 # banjo-nx (2026-10-21): scaled targets (648p / 900p): scale1 and fragscale (1x only) are not in the default.
 DEFAULT = ','.join(name for name, _ in PASSES if name not in ('scale1', 'fragscale'))
 
 
 # The passes for one stage only.
-STAGE_OF = {'plainfetch': 'frag', 'fetchconv': 'frag', 'onex': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
+# vivapinata-nx (2026-11-12): samplerk, plainfetch, fetchconv, onex and onexsize act on both stages (vertex shaders'
+# fetches through constant 975, render/draw.cpp SasrtPlainFetchMask's vs_entry).
+STAGE_OF = {'earlykill': 'frag', 'noearly': 'frag', 'facesign': 'frag', 'clipspec': 'vert', 'nofxaa': 'frag',
             'vsepi': 'vert', 'expwin': 'vert', 'expparts': 'vert', 'stack3d': 'frag', 'fetchendian': 'vert', 'expfmt': 'vert', 'skinonce': 'vert', 'bonesel': 'vert', 'aw4': 'vert', 'lightbranch': 'frag', 'nullps': 'frag', 'gpr32': 'frag', 'earlyz': 'frag', 'txq': 'frag', 'alpha': 'frag', 'alphamask': 'frag', 'earlyhoist': 'frag', 'tess': 'vert', 'vsout': 'vert', 'vszero': 'vert', 'pszero': 'frag'}
+STAGE_OF['invariant'] = 'vert'  # dishonored-nx (port 100)
+STAGE_OF['clamp7e3'] = 'frag'  # dishonored-nx (port 106)
 
 
 def optimise(text, passes=DEFAULT, stage=None, name=None):
@@ -2842,7 +3314,8 @@ def optimise(text, passes=DEFAULT, stage=None, name=None):
         stage = 'vert' if re.search(r'\bgl_Position\b', text) else 'frag'
     for pname, fn in PASSES:
         if pname in names and STAGE_OF.get(pname, stage) == stage:
-            text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce, pass_nofxaa) else fn(text)
+            text = fn(text, name) if fn in (pass_gpr32, pass_lightbranch, pass_nullps, pass_skinonce, pass_nofxaa,
+                                            pass_noearly) else fn(text)
     return text
 
 

@@ -5,8 +5,10 @@
 # -Visible: the window is shown (not minimised): Renut presents (and so captures and paces by vsync) only with a
 # swapchain, which a minimised window does not get.
 # rr6-nx's ultimate branch (2026-11-08): -Build names the build folder under app\out (pc-ult for the ultimate renderer).
+# -Game (blur-nx, 2026-11-18; the ultimate base's): another game folder (a web installer's game_root, with its .lz4b files,
+# for example) in place of Ridge Racer 6's (passing --game_data_root in -Extra too would give the key twice).
 param([int]$Seconds = 90, [string]$Name = "run", [int]$Every = 15, [string]$Extra = "", [switch]$Visible, [int]$Max = 60,
-      [string]$Build = "pc")
+      [string]$Build = "pc", [string]$Game = "D:/ridge racer 6/game")
 $root = Split-Path -Parent $PSScriptRoot
 $dir = Join-Path $root "app\out\$Build"
 $exe = Join-Path $dir "renut.exe"
@@ -15,10 +17,15 @@ New-Item -ItemType Directory -Force $logs | Out-Null
 $log = Join-Path $logs "$Name.log"
 Remove-Item $log -ErrorAction SilentlyContinue
 $min = if ($Visible) { "false" } else { "true" }
-$args = @("--log_file=`"$log`"", "--audio_mute=true", "--window_start_minimized=$min", "--fullscreen=false",
-          "--game_data_root=`"D:/ridge racer 6/game`"", "--user_data_root=`"$root/out/pc_user`"",
+$args = @("--log_file=$log", "--audio_mute=true", "--window_start_minimized=$min", "--fullscreen=false",
+          "--game_data_root=$Game", "--user_data_root=$root/out/pc_user",
           "--nfsmw_captura_cada_s=$Every", "--nfsmw_captura_max=$Max", "--log_file_writer=false") +
         @($Extra -split ' ' | Where-Object { $_ })
+# banjo-nx (2026-11-19): Start-Process joins -ArgumentList's elements with spaces and quotes none of them, so a path
+# with a space ("D:\Banjo kazooie port\...") split into two arguments and the run wrote no log.
+# rr6-nx (2026-11-22, the base sync): the paths above without quotes of their own (they had them before this): quoted
+# twice, the log path broke and the run wrote no log.
+$args = @($args | ForEach-Object { if ($_ -match ' ' -and $_ -notmatch '^".*"$') { '"' + $_ + '"' } else { $_ } })
 $style = if ($Visible) { "Normal" } else { "Minimized" }
 $started = Get-Date  # rr6-nx: the run's own time ($p.StartTime is empty once the process has been stopped)
 $p = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $dir -PassThru -WindowStyle $style `

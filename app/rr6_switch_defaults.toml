@@ -53,10 +53,10 @@ switch_software_keyboard = true
 # graphs). The logs are written as before (rex_profile.log, banjo_profiler.log, the [renut] lines). true shows them.
 banjo_show_profiler = false
 banjo_show_fps = false
-banjo_stall_watch_seconds = 1
+banjo_stall_watch_seconds = 0  # the release: no stall watchdog, no banjo_profiler.log (the user, 2026-11-23)
 # Profiling (on in every config except configs/banjo_cpu_verify.toml):
 # CPU: the SDK's sampler records every thread's code addresses into logs/rex/rex_profile.log.
-switch_profile_stacks = true
+switch_profile_stacks = false  # the release: no stack sampler, no rex_profile.log (the user, 2026-11-23)
 # The app's own sampler (logs/rex/banjo_profiler.log); configs/banjo_profile.toml turns it on as well.
 banjo_cpu_profiler = false
 
@@ -545,6 +545,11 @@ frame_cap = "Off"
 # 2026-10-28 (the user's request): the uam shader compile thread alone goes to core 3 (banjo_system_core_uam), at
 # the lowest priority (the audio threads there go first) and held to 10 % of the core by its rests
 # (banjo_deko3d_background_compile_share); the pipeline prebuild workers stay on cores 0-2.
+# rr6-nx (2026-11-22, the 10 % GPU gap after the base sync): back on core 2 (banjo_background_compile_core, with
+# the prebuild worker). Port 251's command stage (0x2E) and warm helper (0x2F) keep core 3 nearly full in a race,
+# so a compile there at 0x3B took 250-354 s (a specialised pipeline's generic stage, the prebuild waiting on it and
+# every other one queued behind: 3 draws a frame on the generic pipeline, GPU +1.2 ms). On core 2: 47 race compiles
+# at 169 ms, 60 fps.
 # Dynamic resolution (2026-11-09, the user's requests: docked only, 900p to 1080p, 5 steps; switch at 15.5 ms and go
 # up once it has held for a second, as sasrt-nx does): docked, the 3D image at 900 936 1008 1044 1080 lines (the steps
 # are multiples of 36), by the GPU's time a frame (a moving average) against banjo_renut_dynamic_gpu_ms, 15.5 ms of the
@@ -554,10 +559,16 @@ frame_cap = "Off"
 # (1 s) in a row. The log says each change. Docking starts at 900. At 1080 the 3D is at the display's own size, the HUD
 # drawn into it without the upscale; below it the HUD stays at the display's resolution. Handheld: off (low = high =
 # 720), the fixed banjo_renut_render_height_handheld.
-banjo_renut_dynamic_resolution = true
-banjo_renut_dynamic_handheld_low = 720
+# 2026-11-22 (the user: "make a separate toggle for handheld and docked dynamic resolution make sure handheld drs is off
+# by default and docked is on by default 972p to 1080p"): a switch for each mode, the game menu's rows under the fixed
+# resolutions (from the next frame). Handheld off by default, its range 540 to 720 (540 576 648 684 720) when it is
+# switched on; docked on, 972 to 1080 (972 1008 1044 1080). A mode with its switch off draws at its fixed resolution
+# (banjo_renut_render_height_handheld 720, _docked 1080).
+banjo_renut_dynamic_resolution_handheld = false
+banjo_renut_dynamic_resolution_docked = true
+banjo_renut_dynamic_handheld_low = 540
 banjo_renut_dynamic_handheld_high = 720
-banjo_renut_dynamic_docked_low = 900
+banjo_renut_dynamic_docked_low = 972
 banjo_renut_dynamic_docked_high = 1080
 banjo_renut_dynamic_steps = 3
 banjo_renut_dynamic_gpu_ms = 15.5
@@ -566,10 +577,10 @@ sasrt_dynamic_up_room_ms = 1.0
 sasrt_dynamic_up_one_step = true
 banjo_system_core = 1
 banjo_system_core_compiles = false
-banjo_system_core_uam = true
+banjo_system_core_uam = false
 banjo_system_core_xma = false
 banjo_system_core_mixer_priority = 45
-banjo_forwarder_program_id = ""
+banjo_forwarder_program_id = "050C558A3DE72000"  # Ridge Racer 6's forwarder: four cores (the user, 2026-11-22)
 banjo_renut_host_packets = false
 banjo_renut_literals_resident = true
 banjo_renut_replay_lookahead = false

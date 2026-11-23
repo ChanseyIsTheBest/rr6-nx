@@ -192,6 +192,14 @@ REXCVAR_DEFINE_BOOL(halo3_renut_target_gamma_bias, true, "Banjo/Enhancements",
                     "linear curve), and a target's colour exponent bias scales the alpha written, as the GPU does (Vulkan and "
                     "deko3d; Halo 3's menu was nearly transparent without the bias). Off: written as the host format takes them")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// blur-nx (2026-11-17, the menu backdrop): with halo3_renut_target_gamma_bias, the colour channels scaled by the target's
+// colour exponent bias as well (shader_common.h banjoTrim, constant 927; render/pipeline.cpp).
+REXCVAR_DEFINE_BOOL(blur_renut_target_bias_rgb, true, "Banjo/Enhancements",
+                    "A colour target's exponent bias (RB_COLOR_INFO) scales the colour a pixel shader writes as well as its "
+                    "alpha, as the GPU scales all of it (Vulkan and deko3d; needs halo3_renut_target_gamma_bias). Blur's menu "
+                    "backdrop was black without it: its blur passes draw into targets of bias 5. Off: the alpha alone, as "
+                    "halo3-nx did")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // sasrt-nx (2026-10-20).
 REXCVAR_DEFINE_BOOL(sasrt_renut_fixed16_float, true, "Banjo/Enhancements",
@@ -203,8 +211,12 @@ REXCVAR_DEFINE_BOOL(sasrt_renut_fixed16_clamp, true, "Banjo/Enhancements",
                     "console stores (unclamped, Sonic Transformed's highlights fed the bloom and exposure: pale and hazy)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-// sasrt-nx (2026-10-20).
-REXCVAR_DEFINE_BOOL(sasrt_renut_depth_restore, true, "Banjo/Enhancements",
+// sasrt-nx (2026-10-20). renut-ultimate (2026-11-20, port 202): OFF by default under the rule of 2026-11-11
+// (docs/off-by-default.md section 1). S4ep1-nx (github.com/FurryLilManChild/S4ep1-nx, GPL-3.0, its 36c65f40) found it
+// draws Sonic 4's title sky white: its reflection pass draws a resolved depth back as colour into EDRAM the main pass's
+// depth target shares, and taken as the depth every sky and island draw above the horizon failed; its PC A/B with it
+// off gives the console's picture. Katamari never reaches it. sasrt-nx, which it was made for, sets it in its toml.
+REXCVAR_DEFINE_BOOL(sasrt_renut_depth_restore, false, "Banjo/Enhancements",
                     "From sasrt-nx: the EDRAM depth restore: a depth target bound over the EDRAM a 32-bit colour target wrote "
                     "since takes its words as its depth, as on the console, where they are one memory (a game drawing a "
                     "resolved depth back as colour to restore it). Off: the depth target keeps its own")
@@ -292,6 +304,14 @@ REXCVAR_DEFINE_BOOL(ultimate_renut_held_exports_guard, true, "Banjo/Enhancements
 // instructions (about 120 more per texture fetch) and more registers. Since sasrt-nx's GPU rounds came in (2026-11-08,
 // night): the key is the round's item 2 (sasrt_gpu_round.cpp defines it; its A/B target 92), read here through it.
 
+// renut-ultimate (port 47, 2026-11-08): rr6-nx's lock-free answer to "is this address one of Renut's objects".
+REXCVAR_DEFINE_BOOL(rr6_records_lockfree, true, "Banjo/Enhancements",
+                    "From rr6-nx: records::Lookup and OwnsHeader answered from a table over the record heap, "
+                    "without locks (a byte per 16-byte granule, marked under the existing locks). Ridge Racer 6's "
+                    "drawing thread spent about 30 % of its time on the console in the read-write lock's unlock "
+                    "behind them. The same answers. Off: the locked set and map")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // renut-ultimate (2026-11-08): sasrt_deko3d_depth_resolve's decompress only when something reads the target.
 REXCVAR_DEFINE_BOOL(ultimate_deko3d_depth_resolve_lazy, true, "Banjo/Enhancements",
                     "renut-ultimate: with sasrt_deko3d_depth_resolve, a compressed depth target leaving the bind point (or "
@@ -299,6 +319,70 @@ REXCVAR_DEFINE_BOOL(ultimate_deko3d_depth_resolve_lazy, true, "Banjo/Enhancement
                     "read layout, or before it is bound through another view. The same pixels; a game that reads no "
                     "depth pays nothing (Ridge Racer 6 paid 0.46 ms a frame on the console for the eager form). Off: "
                     "decompressed at every unbind, as in sasrt-nx")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// sasrt-nx (2026-11-11, port 75; its formats batch, docs/360-precision-differences.md there): where the renderer kept
+// more than the Xenos did at a speed cost, or less than it keeps. Universal (any game's targets and textures of these
+// formats). Rows 6, 8, 10, 74, 93.
+REXCVAR_DEFINE_BOOL(renut_format_10bit_exact, true, "Banjo/Enhancements",
+                    "From sasrt-nx: Xenos 2_10_10_10 render targets and textures in the host's 10:10:10:2 format (the "
+                    "console's own 32 bits a pixel, the same values) instead of 16 bits a channel; their resolves "
+                    "follow. Off: 16 bits a channel, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-11, port 75; its formats batch, found on the way).
+REXCVAR_DEFINE_BOOL(renut_format_edram_as_variants, true, "Banjo/Enhancements",
+                    "From sasrt-nx: the Xenos target formats 2_10_10_10_AS_10_10_10_10 and 2_10_10_10_FLOAT_AS_16_16_16_16 "
+                    "as 10:10:10:2 (16 bits a channel without renut_format_10bit_exact) and FP16; off: 8-bit RGBA, as "
+                    "before (less than the console keeps)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-11, port 75; its formats batch, rows 7, 66, 73, 95, 96).
+REXCVAR_DEFINE_BOOL(renut_format_7e3_rg11b10, false, "Banjo/Enhancements",
+                    "From sasrt-nx, NOT exact: Xenos 7e3 targets (2_10_10_10_FLOAT) as 11:11:10 float, half FP16's "
+                    "bytes. No alpha (the 7e3's 2 bits read as 1) and one mantissa bit less on red and green, two on "
+                    "blue; more range. Off: FP16")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-11, port 75; its formats batch, row 26).
+REXCVAR_DEFINE_BOOL(renut_depth_float_no_stencil, false, "Banjo/Enhancements",
+                    "From sasrt-nx, a speed trade: Xenos float depth targets (D24FS8) as 32-bit float depth without a "
+                    "stencil plane (half the bytes of D32F_S8). Stencil on them then does nothing: the first uses are "
+                    "logged (renut_diag_formats). Off: D32F with stencil")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-11, port 75; its formats batch, row 38).
+REXCVAR_DEFINE_BOOL(renut_float32_point_filter, true, "Banjo/Enhancements",
+                    "From sasrt-nx: 32-bit float textures point-sampled whatever the sampler asks, as the Xenos (which "
+                    "cannot filter them) samples them; off: filtered linearly when asked")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// sasrt-nx (2026-11-11, port 75; its formats batch, the diagnostic).
+REXCVAR_DEFINE_BOOL(renut_diag_formats, true, "Banjo/Enhancements",
+                    "From sasrt-nx, diagnostic, logging only: the first targets and textures of each format a session "
+                    "makes (guest and host formats), the first stencil use on each depth target, the first float "
+                    "textures asked for linear filtering")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// dishonored-nx (2026-10-31; port 104): tiled textures uploaded with an all-zero level watched until their data comes in.
+REXCVAR_DEFINE_BOOL(dishonored_renut_zero_level_recheck, true, "Banjo/Enhancements",
+                    "From dishonored-nx: a tiled texture with a level whose guest data was all zeros at its upload (the "
+                    "game streams the small levels in after the first bind, where the sampled content check does not "
+                    "look) has its whole data hashed every 8 frames, at most 24 textures a frame, until it changes, then "
+                    "is uploaded again (black walls and heads at a distance in Dishonored). Off: the sampled check only")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// dishonored-nx (2026-10-30; port 101): vertex fills and fetch data copies read only committed guest memory.
+REXCVAR_DEFINE_BOOL(dishonored_renut_vertex_readable_check, true, "Banjo/Enhancements",
+                    "From dishonored-nx: a vertex stream fill or fetch data copy whose range runs past the guest memory "
+                    "the game committed converts the committed part and zeros the rest, where the read faulted the render "
+                    "thread before (the Xbox 360's GPU reads whatever is there). Each fill asks the heap's page table (its "
+                    "lock and a walk over the range's pages). Off: the whole range read as before. The Switch only (the "
+                    "PC's heaps are not a plain offset from the base)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// dishonored-nx (2026-10-31; port 106): a 2_10_10_10_FLOAT (7e3) target's pixel shader output clamped to the 7e3 range.
+REXCVAR_DEFINE_BOOL(dishonored_renut_clamp_7e3, true, "Banjo/Enhancements",
+                    "From dishonored-nx: a pixel shader drawing into a 2_10_10_10_FLOAT (7e3) target with exponent bias 0 "
+                    "clamps that output to the 7e3 range (colour 0 to 31.875, alpha 0 to 1, NaN to 0), as the Xenos stores "
+                    "it. The host target is 16-bit float, which kept negative light passes (black walls in Dishonored) and "
+                    "highlights far above the range (a washed-out frame). Needs the shader package with the clamp7e3 pass "
+                    "(constant 990). Blending past the range is not clamped. Off: the output as the shader computes it")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace banjo::renut_gpu {
@@ -407,6 +491,10 @@ bool TargetGammaBiasOn() {
   static const bool on = REXCVAR_GET(halo3_renut_target_gamma_bias);
   return on;
 }
+bool TargetBiasRgbOn() {  // blur-nx (2026-11-17)
+  static const bool on = REXCVAR_GET(halo3_renut_target_gamma_bias) && REXCVAR_GET(blur_renut_target_bias_rgb);
+  return on;
+}
 bool Fixed16FloatOn() {
   static const bool on = REXCVAR_GET(sasrt_renut_fixed16_float);
   return on;
@@ -465,5 +553,45 @@ bool HeldExportsGuardOn() {
 }
 bool PlainFetchesOn() {
   return sasrt::gpu_round::On(sasrt::gpu_round::kPlainFetches);  // sasrt_gpu_plain_fetches, the GPU round's item 2
+}
+bool RecordsLockFreeOn() {
+  static const bool on = REXCVAR_GET(rr6_records_lockfree);
+  return on;
+}
+bool Format10BitExactOn() {
+  static const bool on = REXCVAR_GET(renut_format_10bit_exact);
+  return on;
+}
+bool FormatEdramAsVariantsOn() {
+  static const bool on = REXCVAR_GET(renut_format_edram_as_variants);
+  return on;
+}
+bool Format7e3Rg11b10On() {
+  static const bool on = REXCVAR_GET(renut_format_7e3_rg11b10);
+  return on;
+}
+bool DepthFloatNoStencilOn() {
+  static const bool on = REXCVAR_GET(renut_depth_float_no_stencil);
+  return on;
+}
+bool Float32PointFilterOn() {
+  static const bool on = REXCVAR_GET(renut_float32_point_filter);
+  return on;
+}
+bool DiagFormatsOn() {
+  static const bool on = REXCVAR_GET(renut_diag_formats);
+  return on;
+}
+bool ZeroLevelRecheckOn() {
+  static const bool on = REXCVAR_GET(dishonored_renut_zero_level_recheck);
+  return on;
+}
+bool VertexReadableCheckOn() {
+  static const bool on = REXCVAR_GET(dishonored_renut_vertex_readable_check);
+  return on;
+}
+bool Clamp7e3On() {
+  static const bool on = REXCVAR_GET(dishonored_renut_clamp_7e3);
+  return on;
 }
 }  // namespace banjo::renut_gpu

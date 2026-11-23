@@ -98,16 +98,19 @@ size_t StfsContainerFile::ReadRuns(uint8_t* out, size_t byte_offset, size_t leng
   cursor_offset_ = src_offset;
   return done;
 }
+// ds3-nx (2026-10-24, sdk-patches/0010; port 57): the data files are the device's shared FILE*s, read with a seek
+// then a read: two threads reading at once (games stream on several) could each read from where the other one
+// seeked. One read at a time, for every package.
+static std::mutex g_stfs_read_mutex;
 
 X_STATUS StfsContainerFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
                                      size_t* out_bytes_read) {
+  std::lock_guard<std::mutex> lock(g_stfs_read_mutex);
   if (byte_offset >= entry_->size()) {
     return X_STATUS_END_OF_FILE;
   }
-  // rr6-nx (2026-11-18, DLC read in place): the package's file handles are the device's, shared by every file in it,
-  // and each read is a seek and then a read: two game threads reading at once would read from each other's place.
-  static std::mutex read_mutex;
-  std::lock_guard<std::mutex> lock(read_mutex);
+  // rr6-nx (2026-11-18, DLC read in place) had its own lock here for the same reason: since the base sync (2026-11-22)
+  // the one above (port 57) covers the read-ahead too.
 
   const size_t length = std::min(buffer.size(), entry_->size() - byte_offset);
   if (length >= kReadAhead) {

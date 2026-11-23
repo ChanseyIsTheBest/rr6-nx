@@ -167,6 +167,9 @@ void* RexGmShadowFor(uint64_t window_address);
 
 /* Bytes of backing committed right now. For diagnostics. */
 size_t RexGmCommittedBytes(void);
+/* sasrt-nx (2026-11-09 night; port 58): the backing committed and its chunks, and the bytes decommits asked for
+ * against those they freed (a chunk goes only when a decommit covers all of it). For the memory report. */
+void RexGmDecommitFigures(size_t* committed, size_t* chunks, size_t* asked, size_t* freed);
 
 /* Number of committed chunks (each is a code alias and up to one mapping per view). */
 size_t RexGmChunkCount(void);
