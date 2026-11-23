@@ -419,3 +419,28 @@ on its main branch and any push.
   "+changes". The code is the played build's but for the built-in settings and the stamp.
 - **rr6-nx-installer 1.0.2:** main fast-forwarded to browser-shaders; release/ from tools/make_release.py with this NRO;
   the README and the page say 1.0.2 (the Opus / H.265 sizes: about 3.4 GB on the card, the disc's files 6.2 GB).
+
+## 2026-11-23: rr6-nx 1.0.2.1 (the VFS index)
+
+- **The user:** "port the index fix into the base", then "We can port into rr6 as well as a 1.0.2.1", then "when you
+  are done please push and commit it to the installer and main repo on github publically".
+- **What it fixes:** sasrt-nx's media guide (the base's docs/media-compression.md, section 9) found that the VFS index
+  (sdk/src/filesystem/devices/host_path_index.cpp) stored each file's size as the game sees it, so the game folder's
+  `.lz4b`, `.hevc` and `.opcm` files never matched the card's listing and every start scanned the whole folder. 1.0.2
+  on the console (log_level info in config.toml for the run): "the SD does not match the index: ... 'RRM.DAT.lz4b'
+  (616028296 bytes) on the SD, 'RRM.DAT.lz4b' (819546112 bytes) in the index", then "45 entries in 899.4 ms".
+- **The change:** the base's port 264 (culdcept-nx's two-size index of 2026-11-20, every kind), here for rr6-nx's
+  three kinds (no `.xmo` / `.xmop`): index version 4 keeps each file's SD size and, for a stand-in, its kinds, the size
+  it stands for and the game's name for it; an entry rebuilt from the index takes them as they are, with no stat of a
+  plain NAME and no header read. Commit 1283c8e2 (with the NACP version 1.0.2.1). It also carries port 263's
+  sasrt_gpu_seed_cpu_direct default (false), committed after 1.0.2's build; RR6 counts 0 uses of it.
+- **Checks:** PC, the Opus test folder (`.hevc`, `.opcm`): scan 11.2 ms, from the index 0.8 ms, boots to the title.
+  Console, the user's card (log_level info in config.toml for the runs, the card's own config.toml put back after):
+  the first start of 1.0.2.1 scanned (421.9 ms this time, "index from another version") and wrote version 4; the next
+  start loaded it: 45 entries in 8.3 ms ("validated 1 directories in 3.4 ms"), and reached the title at
+  60 fps, the RRM archives read through the entries the index made.
+- **The NRO:** C:\rr6pgo\lto122 (PGO use with the pgo-inplace profile; LTO; the release shader table) from 1283c8e2:
+  out/final_1.0.2.1/rr6-nx.nro, 49,230,462 bytes, SHA-256 7a9f807441bb7fe17aa2aab3948e27c13c0e9673555b07dbcb994b41fb73777a. On the user's card as switch/rr6-nx/rr6-nx.nro, with
+  1.0.2's kept beside it as rr6-nx_1.0.2.nro.
+- **Installer 1.0.2.1:** release/ from tools/make_release.py with this NRO (only the version and the NRO's SHA-256
+  change in manifest.json); the README and the page say 1.0.2.1, and that an update from 1.0.2 is the NRO alone.
