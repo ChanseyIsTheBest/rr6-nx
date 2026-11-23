@@ -271,8 +271,11 @@ REXCVAR_DEFINE_BOOL(sasrt_gpu_export_raster_discard, true, "SASRT/GPU",
 
 // sasrt-nx (2026-11-08): the third GPU round (docs/gpu-round-1108.md "Round 3"; the user: "Try to aim for 20 more pixel
 // identical gpu optimisations"). A/B 120 and up.
-REXCVAR_DEFINE_BOOL(sasrt_gpu_seed_cpu_direct, true, "SASRT/GPU",
-                    "deko3d renderer (third GPU round, item 30, A/B 120; with sasrt_gpu_fetch_copy_compute): a memexport "
+// Port 263 (2026-11-23, the user: "please make this false sasrt_gpu_seed_cpu_direct also banjo was getting vertex
+// explosions from it"): OFF by default; a game's own toml may turn it on.
+REXCVAR_DEFINE_BOOL(sasrt_gpu_seed_cpu_direct, false, "SASRT/GPU",
+                    "deko3d renderer (third GPU round, item 30, A/B 120; with sasrt_gpu_fetch_copy_compute; OFF by default "
+                    "since port 263: banjo-nx saw vertex explosions with it on): a memexport "
                     "draw's fresh windows get their seed (guest memory's bytes there) written by the CPU straight into the "
                     "slot's export buffer as the draw is recorded, not copied into the upload ring and then by a compute "
                     "dispatch: no dispatch, and no wait between it and the export draw. The buffer is the GPU's and the "

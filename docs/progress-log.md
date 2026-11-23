@@ -401,3 +401,21 @@ Tests:
 
 Not done: a race and a console run with the browser's files, the README / page version, the installer's commit
 on its main branch and any push.
+
+## 2026-11-23: rr6-nx 1.0.2
+
+- **The user:** the browser installer's files on their SD card (F:\switch\rr6-nx, with the DLC): "game worked perfectly"
+  (the 2026-11-22 release NRO, e8deab5f...), then "yes please get 1.0.2 ready", "make sure logging is off", and a rebuild
+  as 1.0.2 for the card.
+- **Logging:** that NRO had log_level "off" but wrote logs/rex/rex_profile.log (1.1 MB: "Stack sampling: active (1 ms)")
+  and banjo_profiler.log (the stall watchdog's [hitch] lines) on the card: the play set's switch_profile_stacks = true
+  and banjo_stall_watch_seconds = 1, as in 1.0.0 and 1.0.1. tools/make_rr6_builtin.py's FINAL now sets both off
+  (false, 0); app/rr6_switch_defaults.toml regenerated (only those two lines changed). The sampler paused a game thread
+  every millisecond; with seconds 0 the watchdog's thread and the wait registry are not started.
+- **Commits:** 1f2d81f6 "rr6-nx 1.0.2" (the base sync and everything since 8c38f3d9, the NACP version 1.0.2, the two
+  keys), then port 263's sasrt_gpu_seed_cpu_direct default (false; RR6 counts 0 uses) and this entry.
+- **The NRO:** C:\rr6pgo\lto122 (PGO use, the pgo-inplace profile; LTO; the release shader table) rebuilt from
+  1f2d81f6: out/final_2026-11-23/rr6-nx.nro, 49,197,694 bytes, SHA-256 9e0aae3209bde3bdb33f0d7c0f1e82827cd270a7b0292bd2c9332c76cb69b076; its stamp names 1f2d81f6 with no
+  "+changes". The code is the played build's but for the built-in settings and the stamp.
+- **rr6-nx-installer 1.0.2:** main fast-forwarded to browser-shaders; release/ from tools/make_release.py with this NRO;
+  the README and the page say 1.0.2 (the Opus / H.265 sizes: about 3.4 GB on the card, the disc's files 6.2 GB).

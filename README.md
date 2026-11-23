@@ -16,16 +16,21 @@ It's not an emulator. The PowerPC code of the game's `default.xex` is statically
 
 1. Open the installer page: **https://chanseyisthebest.github.io/rr6-nx-installer/**
 2. Choose your game (the disc image or an extracted folder), then any DLC packages, and press **Create rr6-nx.zip**.
-   Everything runs in your browser and your game files stay on your computer. The game files are packed on the way: LZ4
-   for the three RRM archives, ZXC for the videos, the music and the sounds (about 800 MB smaller on the SD card).
-3. If you have an older rr6-nx, delete its `switch/rr6-nx/game_root` folder. Then extract `rr6-nx.zip` to the root of
-   your SD card. It makes `switch/rr6-nx/`.
+   Everything runs in your browser and your game files stay on your computer. The page makes the game's shaders from
+   your `default.xex` and compiles them for the Switch, re-encodes the music to Opus and the movies to H.265, and packs
+   the game files (LZ4 for the three RRM archives, ZXC for the rest): about 3.4 GB on the SD card, against the disc's
+   6.2 GB.
+3. If you have an older rr6-nx, delete its `switch/rr6-nx/game_root` and `switch/rr6-nx/dlc` folders. Then extract
+   `rr6-nx.zip` to the root of your SD card. It makes `switch/rr6-nx/`. Since 1.0.2 the NRO alone does not run: the
+   game's shaders are the installer's files next to it.
 4. In **Sphaira**, find Ridge Racer 6, press **X**, choose **Install Forwarder**, set **Address Space** to **39-bit**,
    choose **Create Forwarder**, and start the game from the Home Screen.
 
 Your options are in `switch/rr6-nx/config.toml`, with a comment on each: the language (by default the Switch's), SMAA,
 the game's MSAA, rumble, the DLC's car Unlock Keys and each player's buttons. Every other setting is built into the NRO
-(`app/rr6_switch_defaults.toml`). Multi Battle works with a second controller. Crash logs go to `switch/rr6-nx/logs/`.
+(`app/rr6_switch_defaults.toml`). Multi Battle works with a second controller. A+B+X+Y+L+R opens the game menu with
+the same options. Crash logs go to `switch/rr6-nx/logs/`; nothing else is logged unless `config.toml` turns it on
+(`log_level = "info"` at the top).
 
 The release NRO is built with link-time optimisation and a profile (PGO) collected from a play session.
 `docs/progress-log.md` has the work in order, and `docs/rr6-notes.md` the evidence and the visual differences still
