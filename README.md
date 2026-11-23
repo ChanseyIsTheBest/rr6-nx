@@ -20,9 +20,12 @@ It's not an emulator. The PowerPC code of the game's `default.xex` is statically
    your `default.xex` and compiles them for the Switch, re-encodes the music to Opus and the movies to H.265, and packs
    the game files (LZ4 for the three RRM archives, ZXC for the rest): about 3.4 GB on the SD card, against the disc's
    6.2 GB.
-3. If you have an older rr6-nx, delete its `switch/rr6-nx/game_root` and `switch/rr6-nx/dlc` folders. Then extract
-   `rr6-nx.zip` to the root of your SD card. It makes `switch/rr6-nx/`. Since 1.0.2 the NRO alone does not run: the
-   game's shaders are the installer's files next to it.
+3. If you have an older rr6-nx, delete its `switch/rr6-nx/game_root` and `switch/rr6-nx/dlc` folders. If you had the
+   DLC with 1.0.1, also delete `switch/rr6-nx/renut/0000000000000000`: 1.0.1 unpacked the DLC's music there (about
+   2 GB), and 1.0.2 reads the packages instead (it writes the small headers it needs there again at the next start).
+   **Keep `switch/rr6-nx/renut/B13EBABEBABEBABE`: that folder holds your save.** Then extract `rr6-nx.zip` to the root
+   of your SD card. It makes `switch/rr6-nx/`. Since 1.0.2 the NRO alone does not run: the game's shaders are the
+   installer's files next to it.
 4. In **Sphaira**, find Ridge Racer 6, press **X**, choose **Install Forwarder**, set **Address Space** to **39-bit**,
    choose **Create Forwarder**, and start the game from the Home Screen.
 
